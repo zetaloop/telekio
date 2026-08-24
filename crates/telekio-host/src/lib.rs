@@ -7,16 +7,16 @@ use std::{
     io,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     task::{Context as TaskContext, Poll as RustPoll},
     thread::ThreadId,
     time::Duration,
 };
 
 use telekio::{
-    Blocking, BlockingTask, BuildResult, CallResult, Callback, Flavor, Future, OwnedBytes, Poll,
-    RawHandle, RawRuntime, RuntimeApi, RuntimeConfig, Shutdown, Status, StringCallback, Task,
-    Waker,
+    Blocking, BlockingTask, BuildResult, CallResult, Callback, ClockSample, DurationParts, Flavor,
+    Future, InstantOffset, OperationPoll, OwnedBytes, Poll, RawHandle, RawRuntime, RuntimeApi,
+    RuntimeConfig, Shutdown, Status, StringCallback, Task, Timer, TimerResult, Waker,
 };
 
 pub struct Runtime {
@@ -50,6 +50,11 @@ struct Tasks {
     handles: Mutex<HashMap<u64, Option<tokio::task::AbortHandle>>>,
 }
 
+struct TimeTimer {
+    handle: tokio::runtime::Handle,
+    sleep: Pin<Box<tokio::time::Sleep>>,
+}
+
 struct CallbackOwner(Callback);
 struct StringCallbackOwner(StringCallback);
 
@@ -62,6 +67,8 @@ unsafe impl Sync for StringCallbackOwner {}
 // address and checks that thread before every access to the contained runtime.
 unsafe impl Send for LocalSlot {}
 unsafe impl Sync for LocalSlot {}
+
+static CLOCK_ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
 
 static RUNTIME_API: RuntimeApi = RuntimeApi {
     runtime_block_on,
@@ -76,6 +83,11 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     abort,
     is_finished,
     build,
+    clock,
+    pause,
+    resume,
+    advance,
+    timer,
     shutdown,
 };
 
@@ -85,11 +97,7 @@ impl Runtime {
     }
 
     pub fn from_tokio(runtime: tokio::runtime::Runtime) -> Self {
-        let handle = Arc::new(HandleContext {
-            handle: runtime.handle().clone(),
-            tasks: Arc::new(Tasks::default()),
-            local: None,
-        });
+        let handle = handle_context(runtime.handle().clone(), None);
         Self { runtime, handle }
     }
 
@@ -350,6 +358,123 @@ unsafe extern "C" fn build(_: *const c_void, config: RuntimeConfig) -> BuildResu
     }
 }
 
+unsafe extern "C" fn clock(context: *const c_void) -> ClockSample {
+    let context = unsafe { &*context.cast::<HandleContext>() };
+    let origin = *CLOCK_ORIGIN.get_or_init(std::time::Instant::now);
+    let realtime = instant_offset(origin, std::time::Instant::now());
+    let _guard = context.handle.enter();
+    let logical = instant_offset(origin, tokio::time::Instant::now().into_std());
+    ClockSample { realtime, logical }
+}
+
+unsafe extern "C" fn pause(context: *const c_void) -> CallResult {
+    time_call(context, tokio::time::pause)
+}
+
+unsafe extern "C" fn resume(context: *const c_void) -> CallResult {
+    time_call(context, tokio::time::resume)
+}
+
+fn time_call(context: *const c_void, call: impl FnOnce()) -> CallResult {
+    let context = unsafe { &*context.cast::<HandleContext>() };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let _guard = context.handle.enter();
+        call();
+    })) {
+        Ok(()) => result(Status::Ok, OwnedBytes::empty()),
+        Err(payload) => host_panic(&*payload),
+    }
+}
+
+unsafe extern "C" fn advance(context: *const c_void, duration: DurationParts) -> CallResult {
+    let context = unsafe { &*context.cast::<HandleContext>() };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let _guard = context.handle.enter();
+        let mut operation = std::pin::pin!(tokio::time::advance(duration.duration()));
+        let mut context = TaskContext::from_waker(std::task::Waker::noop());
+        _ = operation.as_mut().poll(&mut context);
+    })) {
+        Ok(()) => result(Status::Ok, OwnedBytes::empty()),
+        Err(payload) => host_panic(&*payload),
+    }
+}
+
+unsafe extern "C" fn timer(context: *const c_void, duration: DurationParts) -> TimerResult {
+    let context = unsafe { &*context.cast::<HandleContext>() };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let _guard = context.handle.enter();
+        Box::new(TimeTimer {
+            handle: context.handle.clone(),
+            sleep: Box::pin(tokio::time::sleep(duration.duration())),
+        })
+    })) {
+        Ok(timer) => TimerResult {
+            call: result(Status::Ok, OwnedBytes::empty()),
+            timer: Timer {
+                data: Box::into_raw(timer).cast(),
+                poll: poll_time_timer,
+                reset: reset_time_timer,
+                is_elapsed: time_timer_elapsed,
+                release: release_time_timer,
+            },
+        },
+        Err(payload) => TimerResult {
+            call: host_panic(&*payload),
+            timer: Timer::empty(),
+        },
+    }
+}
+
+unsafe extern "C" fn poll_time_timer(data: *mut c_void, waker: *const Waker) -> OperationPoll {
+    let timer = unsafe { &mut *data.cast::<TimeTimer>() };
+    let waker = unsafe { (*waker).clone_rust_waker() };
+    let mut context = TaskContext::from_waker(&waker);
+    match catch_unwind(AssertUnwindSafe(|| timer.sleep.as_mut().poll(&mut context))) {
+        Ok(RustPoll::Pending) => time_poll(Poll::Pending, result(Status::Ok, OwnedBytes::empty())),
+        Ok(RustPoll::Ready(())) => time_poll(Poll::Ready, result(Status::Ok, OwnedBytes::empty())),
+        Err(payload) => time_poll(Poll::Panicked, host_panic(&*payload)),
+    }
+}
+
+unsafe extern "C" fn reset_time_timer(data: *mut c_void, duration: DurationParts) -> CallResult {
+    let timer = unsafe { &mut *data.cast::<TimeTimer>() };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let _guard = timer.handle.enter();
+        timer
+            .sleep
+            .as_mut()
+            .reset(tokio::time::Instant::now() + duration.duration());
+    })) {
+        Ok(()) => result(Status::Ok, OwnedBytes::empty()),
+        Err(payload) => host_panic(&*payload),
+    }
+}
+
+unsafe extern "C" fn time_timer_elapsed(data: *const c_void) -> bool {
+    unsafe { &*data.cast::<TimeTimer>() }.sleep.is_elapsed()
+}
+
+unsafe extern "C" fn release_time_timer(data: *mut c_void) {
+    drop(unsafe { Box::from_raw(data.cast::<TimeTimer>()) });
+}
+
+fn time_poll(state: Poll, call: CallResult) -> OperationPoll {
+    OperationPoll { state, call }
+}
+
+fn instant_offset(origin: std::time::Instant, instant: std::time::Instant) -> InstantOffset {
+    match instant.checked_duration_since(origin) {
+        Some(duration) => InstantOffset {
+            duration: DurationParts::new(duration),
+            negative: 0,
+        },
+        None => InstantOffset {
+            duration: DurationParts::new(origin.duration_since(instant)),
+            negative: 1,
+        },
+    }
+}
+
 unsafe extern "C" fn shutdown(
     owner: *mut c_void,
     mode: Shutdown,
@@ -437,11 +562,7 @@ fn build_runtime(config: RuntimeConfig) -> io::Result<(RuntimeKind, Arc<HandleCo
         Flavor::CurrentThread | Flavor::MultiThread => {
             let runtime = builder.build()?;
             let workers = runtime.handle().metrics().num_workers();
-            let handle = Arc::new(HandleContext {
-                handle: runtime.handle().clone(),
-                tasks: Arc::new(Tasks::default()),
-                local: None,
-            });
+            let handle = handle_context(runtime.handle().clone(), None);
             Ok((RuntimeKind::Runtime(Some(runtime)), handle, workers))
         }
         Flavor::Local => {
@@ -449,14 +570,21 @@ fn build_runtime(config: RuntimeConfig) -> io::Result<(RuntimeKind, Arc<HandleCo
             let handle = runtime.handle().clone();
             let workers = handle.metrics().num_workers();
             let local = Arc::new(LocalSlot::new(runtime));
-            let handle = Arc::new(HandleContext {
-                handle,
-                tasks: Arc::new(Tasks::default()),
-                local: Some(Arc::clone(&local)),
-            });
+            let handle = handle_context(handle, Some(Arc::clone(&local)));
             Ok((RuntimeKind::Local(local), handle, workers))
         }
     }
+}
+
+fn handle_context(
+    handle: tokio::runtime::Handle,
+    local: Option<Arc<LocalSlot>>,
+) -> Arc<HandleContext> {
+    Arc::new(HandleContext {
+        handle,
+        tasks: Arc::new(Tasks::default()),
+        local,
+    })
 }
 
 fn raw_handle(context: Arc<HandleContext>) -> RawHandle {

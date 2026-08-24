@@ -1,8 +1,8 @@
 use std::{error::Error, path::Path};
 
 use ra_ap_syntax::{
-    AstNode, Edition, SourceFile, SyntaxNode,
-    ast::{self, HasName, edit::IndentLevel, make},
+    AstNode, Edition, SourceFile, SyntaxElement, SyntaxKind, SyntaxNode,
+    ast::{self, HasArgList, HasName, edit::IndentLevel, make},
     syntax_editor::{Position, SyntaxEditor},
 };
 
@@ -21,6 +21,7 @@ pub struct FieldInit<'a> {
 pub enum AttrTarget<'a> {
     Struct(&'a str),
     Enum(&'a str),
+    Module(&'a str),
     Method { owner: &'a str, name: &'a str },
     Impl { owner: &'a str, method: &'a str },
 }
@@ -43,20 +44,23 @@ fn add_attr_in(
     attribute: &str,
 ) -> Result<bool, Box<dyn Error>> {
     let (editor, root) = open(source)?;
-    if let Some(item) = attr_target(&root, target)? {
+    let items = attr_targets(&root, target)?;
+    if !items.is_empty() {
         let attribute = parse(&format!("{attribute}\nfn replacement() {{}}"))?
             .syntax()
             .descendants()
             .find_map(ast::Attr::cast)
             .ok_or("wrapper has no attribute")?;
-        let indent = IndentLevel::from_node(&item);
-        editor.insert_all(
-            Position::first_child_of(&item),
-            vec![
-                attribute.syntax().clone().into(),
-                make::tokens::whitespace(&format!("\n{indent}")).into(),
-            ],
-        );
+        for item in items {
+            let indent = IndentLevel::from_node(&item);
+            editor.insert_all(
+                Position::first_child_of(&item),
+                vec![
+                    attribute.syntax().clone().into(),
+                    make::tokens::whitespace(&format!("\n{indent}")).into(),
+                ],
+            );
+        }
         commit(source, editor)?;
         return Ok(true);
     }
@@ -114,6 +118,20 @@ fn add_attr_in(
             .find_map(ast::MacroCall::cast)
             .and_then(|call| call.token_tree())
             .ok_or("replacement macro has no token tree")?;
+        let range = source_tree.syntax().text_range();
+        if replacements
+            .iter()
+            .any(|(existing, _): &(ast::TokenTree, ast::TokenTree)| {
+                let existing = existing.syntax().text_range();
+                existing.start() <= range.start() && existing.end() >= range.end()
+            })
+        {
+            continue;
+        }
+        replacements.retain(|(existing, _)| {
+            let existing = existing.syntax().text_range();
+            !(range.start() <= existing.start() && range.end() >= existing.end())
+        });
         replacements.push((source_tree, replacement_tree));
     }
     if replacements.is_empty() {
@@ -178,7 +196,9 @@ pub fn append_record_fields(
     fields: &[FieldInit<'_>],
 ) -> Result<(), Box<dyn Error>> {
     let (editor, root) = open(source)?;
-    let scope = scope.resolve(&root)?;
+    let scope = scope
+        .resolve(&root)?
+        .ok_or("record initializer scope was not found")?;
     let record = one(
         scope
             .descendants()
@@ -208,6 +228,185 @@ pub fn append_record_fields(
             .collect::<Result<Vec<_>, Box<dyn Error>>>()?,
     );
     commit(source, editor)
+}
+
+pub fn retarget_use(source: &mut String, name: &str, path: &str) -> Result<(), Box<dyn Error>> {
+    if retarget_use_in(source, name, path)? {
+        Ok(())
+    } else {
+        Err(format!("use tree `{name}` was not found").into())
+    }
+}
+
+fn retarget_use_in(source: &mut String, name: &str, path: &str) -> Result<bool, Box<dyn Error>> {
+    let (editor, root) = open(source)?;
+    let matches = root
+        .descendants()
+        .filter_map(ast::UseTree::cast)
+        .filter(|tree| {
+            tree.path()
+                .and_then(|path| path.segment())
+                .and_then(|segment| segment.name_ref())
+                .is_some_and(|candidate| candidate.text() == name)
+                && tree.rename().is_none()
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [tree] if tree.use_tree_list().is_some() => {
+            let old = tree.path().ok_or("use tree has no path")?;
+            editor.replace(old.syntax(), make::path_from_text(path).syntax().clone());
+            commit(source, editor)?;
+            return Ok(true);
+        }
+        [tree]
+            if tree
+                .syntax()
+                .ancestors()
+                .find_map(ast::UseTreeList::cast)
+                .is_some() =>
+        {
+            for element in use_tree_removal(tree) {
+                editor.delete(element);
+            }
+            commit(source, editor)?;
+            add_use(source, path)?;
+            return Ok(true);
+        }
+        [tree] => {
+            let old = tree.path().ok_or("use tree has no path")?;
+            editor.replace(old.syntax(), make::path_from_text(path).syntax().clone());
+            commit(source, editor)?;
+            return Ok(true);
+        }
+        [] => {}
+        _ => return Err(format!("found multiple use trees `{name}`").into()),
+    }
+
+    let mut replacements = Vec::new();
+    for source_tree in root.descendants().filter_map(ast::TokenTree::cast) {
+        let text = source_tree.syntax().text().to_string();
+        let Some(mut inner) = text
+            .strip_prefix('{')
+            .and_then(|text| text.strip_suffix('}'))
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if parse(&inner).is_err() || !retarget_use_in(&mut inner, name, path)? {
+            continue;
+        }
+        let replacement = parse(&format!("replacement! {{ {inner} }}"))?
+            .syntax()
+            .descendants()
+            .find_map(ast::MacroCall::cast)
+            .and_then(|call| call.token_tree())
+            .ok_or("replacement macro has no token tree")?;
+        replacements.push((source_tree, replacement));
+    }
+    if replacements.is_empty() {
+        return Ok(false);
+    }
+    for (old, new) in replacements {
+        editor.replace(old.syntax(), new.syntax().clone());
+    }
+    commit(source, editor)?;
+    Ok(true)
+}
+
+pub fn delegate_closure(
+    source: &mut String,
+    scope: Scope<'_>,
+    callee: &str,
+    index: usize,
+    helper: &str,
+    context: &[&str],
+) -> Result<(), Box<dyn Error>> {
+    if delegate_closure_in(source, scope, callee, index, helper, context)? {
+        Ok(())
+    } else {
+        Err(format!("scope for `{callee}` call was not found").into())
+    }
+}
+
+fn delegate_closure_in(
+    source: &mut String,
+    scope: Scope<'_>,
+    callee: &str,
+    index: usize,
+    helper: &str,
+    context: &[&str],
+) -> Result<bool, Box<dyn Error>> {
+    let (editor, root) = open(source)?;
+    if let Some(scope) = scope.resolve(&root)? {
+        let calls = scope
+            .descendants()
+            .filter_map(ast::CallExpr::cast)
+            .filter_map(|call| match call.expr() {
+                Some(ast::Expr::PathExpr(path)) => path
+                    .path()
+                    .map(|path| (path.syntax().text().to_string(), call)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let calls = calls
+            .iter()
+            .filter(|(path, _)| path == callee)
+            .map(|(_, call)| call.clone())
+            .collect::<Vec<_>>();
+        let call = match calls.as_slice() {
+            [] => return Ok(false),
+            [call] => call.clone(),
+            _ => return Err(format!("more than one `{callee}` call in selected scope").into()),
+        };
+        let argument = call
+            .arg_list()
+            .and_then(|arguments| arguments.args().nth(index))
+            .ok_or_else(|| format!("`{callee}` has no argument {index}"))?;
+        if !matches!(argument, ast::Expr::ClosureExpr(_)) {
+            return Err(format!("argument {index} to `{callee}` is not a closure").into());
+        }
+        let mut arguments = context
+            .iter()
+            .map(|source| expression(source))
+            .collect::<Result<Vec<_>, _>>()?;
+        arguments.push(argument.clone());
+        let delegate = make::expr_call(expression(helper)?, make::arg_list(arguments));
+        editor.replace(argument.syntax(), delegate.syntax().clone());
+        commit(source, editor)?;
+        return Ok(true);
+    }
+
+    let mut replacements = Vec::new();
+    for source_tree in root.descendants().filter_map(ast::TokenTree::cast) {
+        let text = source_tree.syntax().text().to_string();
+        let Some(mut inner) = text
+            .strip_prefix('{')
+            .and_then(|text| text.strip_suffix('}'))
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if parse(&inner).is_err()
+            || !delegate_closure_in(&mut inner, scope, callee, index, helper, context)?
+        {
+            continue;
+        }
+        let replacement = parse(&format!("replacement! {{ {inner} }}"))?
+            .syntax()
+            .descendants()
+            .find_map(ast::MacroCall::cast)
+            .and_then(|call| call.token_tree())
+            .ok_or("replacement macro has no token tree")?;
+        retain_outermost(&mut replacements, source_tree, replacement);
+    }
+    if replacements.is_empty() {
+        return Ok(false);
+    }
+    for (old, new) in replacements {
+        editor.replace(old.syntax(), new.syntax().clone());
+    }
+    commit(source, editor)?;
+    Ok(true)
 }
 
 pub fn mount_module(
@@ -252,44 +451,192 @@ pub fn redirect_call(
     from: &str,
     to: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let (editor, root) = open(source)?;
-    let scope = scope.resolve(&root)?;
-    let methods = scope
-        .descendants()
-        .filter_map(ast::MethodCallExpr::cast)
-        .filter(|call| call.name_ref().is_some_and(|name| name.text() == from))
-        .filter_map(|call| call.name_ref().map(|name| (name.syntax().clone(), true)));
-    let functions = scope
-        .descendants()
-        .filter_map(ast::CallExpr::cast)
-        .filter_map(|call| match call.expr() {
-            Some(ast::Expr::PathExpr(expression)) => expression.path(),
-            _ => None,
-        })
-        .filter(|path| path.syntax().text() == from)
-        .map(|path| (path.syntax().clone(), false));
-    let (callee, method) = one(
-        methods.chain(functions),
-        &format!("`{from}` call in selected scope"),
-    )?;
-    if method {
-        if to.contains("::") {
-            return Err(format!("method replacement `{to}` is not a name").into());
-        }
-        editor.replace(callee, make::name_ref(to).syntax().clone());
+    if redirect_call_in(source, scope, from, to)? {
+        Ok(())
     } else {
-        editor.replace(callee, make::path_from_text(to).syntax().clone());
+        Err(format!("scope for `{from}` call was not found").into())
     }
-    commit(source, editor)
+}
+
+fn redirect_call_in(
+    source: &mut String,
+    scope: Scope<'_>,
+    from: &str,
+    to: &str,
+) -> Result<bool, Box<dyn Error>> {
+    let (editor, root) = open(source)?;
+    if let Some(scope) = scope.resolve(&root)? {
+        let methods = scope
+            .descendants()
+            .filter_map(ast::MethodCallExpr::cast)
+            .filter(|call| call.name_ref().is_some_and(|name| name.text() == from))
+            .filter_map(|call| call.name_ref().map(|name| (name.syntax().clone(), true)));
+        let functions = scope
+            .descendants()
+            .filter_map(ast::CallExpr::cast)
+            .filter_map(|call| match call.expr() {
+                Some(ast::Expr::PathExpr(expression)) => expression.path(),
+                _ => None,
+            })
+            .filter(|path| path.syntax().text() == from)
+            .map(|path| (path.syntax().clone(), false));
+        let calls = methods.chain(functions).collect::<Vec<_>>();
+        let (callee, method) = match calls.as_slice() {
+            [] => return Ok(false),
+            [call] => call.clone(),
+            _ => return Err(format!("more than one `{from}` call in selected scope").into()),
+        };
+        if method {
+            if to.contains("::") {
+                return Err(format!("method replacement `{to}` is not a name").into());
+            }
+            editor.replace(callee, make::name_ref(to).syntax().clone());
+        } else {
+            editor.replace(callee, make::path_from_text(to).syntax().clone());
+        }
+        commit(source, editor)?;
+        return Ok(true);
+    }
+
+    let mut replacements = Vec::new();
+    for source_tree in root.descendants().filter_map(ast::TokenTree::cast) {
+        let text = source_tree.syntax().text().to_string();
+        let Some(mut inner) = text
+            .strip_prefix('{')
+            .and_then(|text| text.strip_suffix('}'))
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if parse(&inner).is_err() || !redirect_call_in(&mut inner, scope, from, to)? {
+            continue;
+        }
+        let replacement = parse(&format!("replacement! {{ {inner} }}"))?
+            .syntax()
+            .descendants()
+            .find_map(ast::MacroCall::cast)
+            .and_then(|call| call.token_tree())
+            .ok_or("replacement macro has no token tree")?;
+        let range = source_tree.syntax().text_range();
+        if replacements
+            .iter()
+            .any(|(existing, _): &(ast::TokenTree, ast::TokenTree)| {
+                let existing = existing.syntax().text_range();
+                existing.start() <= range.start() && existing.end() >= range.end()
+            })
+        {
+            continue;
+        }
+        replacements.retain(|(existing, _)| {
+            let existing = existing.syntax().text_range();
+            !(range.start() <= existing.start() && range.end() >= existing.end())
+        });
+        replacements.push((source_tree, replacement));
+    }
+    if replacements.is_empty() {
+        return Ok(false);
+    }
+    for (old, new) in replacements {
+        editor.replace(old.syntax(), new.syntax().clone());
+    }
+    commit(source, editor)?;
+    Ok(true)
 }
 
 impl Scope<'_> {
-    fn resolve(self, root: &SyntaxNode) -> Result<SyntaxNode, Box<dyn Error>> {
+    fn resolve(self, root: &SyntaxNode) -> Result<Option<SyntaxNode>, Box<dyn Error>> {
         match self {
-            Self::Function(name) => Ok(named::<ast::Fn>(root, name)?.syntax().clone()),
-            Self::Method { owner, name } => Ok(method(root, owner, name)?.syntax().clone()),
+            Self::Function(name) => function(root, name)
+                .map(|function| function.map(|function| function.syntax().clone())),
+            Self::Method { owner, name } => {
+                let methods = methods(root, owner)
+                    .filter(|function| {
+                        function
+                            .name()
+                            .is_some_and(|candidate| candidate.text() == name)
+                    })
+                    .collect::<Vec<_>>();
+                match methods.as_slice() {
+                    [] => Ok(None),
+                    [method] => Ok(Some(method.syntax().clone())),
+                    _ => Err(format!("more than one method `{owner}::{name}`").into()),
+                }
+            }
         }
     }
+}
+
+fn retain_outermost(
+    replacements: &mut Vec<(ast::TokenTree, ast::TokenTree)>,
+    source: ast::TokenTree,
+    replacement: ast::TokenTree,
+) {
+    let range = source.syntax().text_range();
+    if replacements.iter().any(|(existing, _)| {
+        let existing = existing.syntax().text_range();
+        existing.start() <= range.start() && existing.end() >= range.end()
+    }) {
+        return;
+    }
+    replacements.retain(|(existing, _)| {
+        let existing = existing.syntax().text_range();
+        !(range.start() <= existing.start() && range.end() >= existing.end())
+    });
+    replacements.push((source, replacement));
+}
+
+fn add_use(source: &mut String, path: &str) -> Result<(), Box<dyn Error>> {
+    let item = make::use_(
+        std::iter::empty(),
+        None,
+        make::use_tree(make::path_from_text(path), None, None, false),
+    );
+    let (editor, root) = open(source)?;
+    let anchor = root
+        .children()
+        .find(|node| ast::Item::can_cast(node.kind()))
+        .ok_or("source has no items")?;
+    editor.insert_all(
+        Position::before(&anchor),
+        vec![
+            item.syntax().clone().into(),
+            make::tokens::whitespace("\n").into(),
+        ],
+    );
+    commit(source, editor)
+}
+
+fn use_tree_removal(tree: &ast::UseTree) -> Vec<SyntaxElement> {
+    let mut elements = vec![tree.syntax().clone().into()];
+    let mut after = Vec::new();
+    let mut cursor = tree.syntax().next_sibling_or_token();
+    while let Some(element) = cursor {
+        cursor = element.next_sibling_or_token();
+        match element.kind() {
+            SyntaxKind::WHITESPACE => after.push(element),
+            SyntaxKind::COMMA => {
+                after.push(element);
+                elements.extend(after);
+                return elements;
+            }
+            _ => break,
+        }
+    }
+    let mut before = Vec::new();
+    let mut cursor = tree.syntax().prev_sibling_or_token();
+    while let Some(element) = cursor {
+        cursor = element.prev_sibling_or_token();
+        match element.kind() {
+            SyntaxKind::WHITESPACE => before.push(element),
+            SyntaxKind::COMMA => {
+                before.push(element);
+                elements.extend(before);
+                return elements;
+            }
+            _ => break,
+        }
+    }
+    elements
 }
 
 fn open(source: &str) -> Result<(SyntaxEditor, SyntaxNode), Box<dyn Error>> {
@@ -313,10 +660,10 @@ fn parse(source: &str) -> Result<SourceFile, Box<dyn Error>> {
     }
 }
 
-fn attr_target(
+fn attr_targets(
     root: &SyntaxNode,
     target: AttrTarget<'_>,
-) -> Result<Option<SyntaxNode>, Box<dyn Error>> {
+) -> Result<Vec<SyntaxNode>, Box<dyn Error>> {
     let nodes: Vec<SyntaxNode> = match target {
         AttrTarget::Struct(name) => root
             .descendants()
@@ -327,6 +674,12 @@ fn attr_target(
         AttrTarget::Enum(name) => root
             .descendants()
             .filter_map(ast::Enum::cast)
+            .filter(|item| item.name().is_some_and(|candidate| candidate.text() == name))
+            .map(|item| item.syntax().clone())
+            .collect(),
+        AttrTarget::Module(name) => root
+            .descendants()
+            .filter_map(ast::Module::cast)
             .filter(|item| item.name().is_some_and(|candidate| candidate.text() == name))
             .map(|item| item.syntax().clone())
             .collect(),
@@ -352,10 +705,10 @@ fn attr_target(
             .map(|item| item.syntax().clone())
             .collect(),
     };
-    match nodes.as_slice() {
-        [] => Ok(None),
-        [node] => Ok(Some(node.clone())),
-        _ => Err("attribute target appears more than once".into()),
+    if nodes.len() <= 1 {
+        Ok(nodes)
+    } else {
+        Err("attribute target appears more than once".into())
     }
 }
 
@@ -375,6 +728,28 @@ fn methods(root: &SyntaxNode, owner: &str) -> impl Iterator<Item = ast::Fn> {
         })
         .collect::<Vec<_>>()
         .into_iter()
+}
+
+fn function(root: &SyntaxNode, name: &str) -> Result<Option<ast::Fn>, Box<dyn Error>> {
+    let functions = root
+        .descendants()
+        .filter_map(ast::Fn::cast)
+        .filter(|function| {
+            function
+                .name()
+                .is_some_and(|candidate| candidate.text() == name)
+                && function
+                    .syntax()
+                    .ancestors()
+                    .find_map(ast::Impl::cast)
+                    .is_none()
+        })
+        .collect::<Vec<_>>();
+    match functions.as_slice() {
+        [] => Ok(None),
+        [function] => Ok(Some(function.clone())),
+        _ => Err(format!("more than one function `{name}`").into()),
+    }
 }
 
 fn method(root: &SyntaxNode, owner: &str, name: &str) -> Result<ast::Fn, Box<dyn Error>> {

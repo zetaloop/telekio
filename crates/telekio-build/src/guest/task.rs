@@ -82,6 +82,29 @@ impl Host {
         self.handle.block_in_place(blocking)
     }
 
+    pub(crate) fn now(&self) -> std::time::Instant {
+        self.handle.now()
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(crate) fn pause(&self) {
+        self.handle.pause().into_io_result().unwrap();
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(crate) fn resume(&self) {
+        self.handle.resume().into_io_result().unwrap();
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(crate) fn advance(&self, duration: Duration) {
+        self.handle.advance(duration).into_io_result().unwrap();
+    }
+
+    pub(crate) fn timer(&self, duration: Duration) -> ::telekio::Timer {
+        ::telekio::Timer::from_result(self.handle.timer(duration))
+    }
+
     pub(crate) fn shutdown(&self, mode: ::telekio::Shutdown, duration: Option<Duration>) {
         let duration = duration.unwrap_or_default();
         self.runtime

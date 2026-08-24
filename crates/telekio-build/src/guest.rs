@@ -22,6 +22,7 @@ pub fn prepare_guest(telekio: &Path, host: &Path) -> Result<PathBuf, Box<dyn Err
     patch_blocking(&generated.join("src/runtime/blocking/pool.rs"))?;
     patch_metrics(&generated.join("src/runtime/metrics/batch.rs"))?;
     patch_context(&generated.join("src/runtime/context/blocking.rs"))?;
+    patch_time(&generated)?;
     Ok(generated)
 }
 
@@ -273,7 +274,14 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
-    patch(path, |source| mount(source, "telekio", "scheduler.rs"))
+    patch(path, |source| {
+        mount(source, "telekio", "scheduler.rs")?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Module("telekio"),
+            "#[cfg(feature = \"rt\")]",
+        )
+    })
 }
 
 fn patch_builder(path: &Path) -> Result<(), Box<dyn Error>> {
@@ -385,6 +393,71 @@ fn patch_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
     })
 }
 
+fn patch_time(generated: &Path) -> Result<(), Box<dyn Error>> {
+    patch(&generated.join("src/time/sleep.rs"), |source| {
+        edit::retarget_use(source, "Timer", "self::telekio::Timer")?;
+        mount(source, "telekio", "time.rs")
+    })?;
+    patch(&generated.join("src/time/clock.rs"), |source| {
+        edit::delegate_closure(
+            source,
+            edit::Scope::Function("pause"),
+            "with_clock",
+            0,
+            "telekio::pause",
+            &[],
+        )
+        .map_err(|error| format!("pause clock integration: {error}"))?;
+        edit::delegate_closure(
+            source,
+            edit::Scope::Function("resume"),
+            "with_clock",
+            0,
+            "telekio::resume",
+            &[],
+        )
+        .map_err(|error| format!("resume clock integration: {error}"))?;
+        edit::delegate_closure(
+            source,
+            edit::Scope::Function("advance"),
+            "with_clock",
+            0,
+            "telekio::advance",
+            &["duration"],
+        )
+        .map_err(|error| format!("advance clock integration: {error}"))?;
+        edit::delegate_closure(
+            source,
+            edit::Scope::Function("now"),
+            "with_clock",
+            0,
+            "telekio::now",
+            &[],
+        )?;
+        mount(source, "telekio", "clock.rs")?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Module("telekio"),
+            "#[cfg(feature = \"test-util\")]",
+        )
+    })?;
+    patch(&generated.join("src/runtime/mod.rs"), |source| {
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Enum("Timer"),
+            "#[expect(dead_code)]",
+        )?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Impl {
+                owner: "Timer",
+                method: "new",
+            },
+            "#[expect(dead_code)]",
+        )
+    })
+}
+
 fn patch_context(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| mount(source, "telekio", "context.rs"))?;
     patch(
@@ -402,7 +475,8 @@ fn patch_context(path: &Path) -> Result<(), Box<dyn Error>> {
                 },
                 "block_on",
                 "block_on_host",
-            )
+            )?;
+            mount(source, "telekio", "handle.rs")
         },
     )
 }

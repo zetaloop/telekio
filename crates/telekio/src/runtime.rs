@@ -1,4 +1,4 @@
-use crate::{BuildResult, RuntimeConfig, Shutdown};
+use crate::{BuildResult, ClockSample, DurationParts, RuntimeConfig, Shutdown, TimerResult};
 
 use std::{
     any::Any,
@@ -18,8 +18,8 @@ static ATTACHED: OnceLock<Handle> = OnceLock::new();
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct RawHandle {
-    context: *const c_void,
-    api: *const RuntimeApi,
+    pub(crate) context: *const c_void,
+    pub(crate) api: *const RuntimeApi,
 }
 
 #[derive(Clone, Copy)]
@@ -30,7 +30,7 @@ pub struct RawRuntime {
 }
 
 pub struct Handle {
-    raw: RawHandle,
+    pub(crate) raw: RawHandle,
 }
 
 pub struct Runtime {
@@ -56,6 +56,11 @@ pub struct RuntimeApi {
     pub abort: unsafe extern "C" fn(*const c_void, u64),
     pub is_finished: unsafe extern "C" fn(*const c_void, u64) -> bool,
     pub build: unsafe extern "C" fn(*const c_void, RuntimeConfig) -> BuildResult,
+    pub clock: unsafe extern "C" fn(*const c_void) -> ClockSample,
+    pub pause: unsafe extern "C" fn(*const c_void) -> CallResult,
+    pub resume: unsafe extern "C" fn(*const c_void) -> CallResult,
+    pub advance: unsafe extern "C" fn(*const c_void, DurationParts) -> CallResult,
+    pub timer: unsafe extern "C" fn(*const c_void, DurationParts) -> TimerResult,
     pub shutdown: unsafe extern "C" fn(*mut c_void, Shutdown, u64, u32) -> CallResult,
 }
 
