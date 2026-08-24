@@ -1,3 +1,5 @@
+use crate::{BuildResult, RuntimeConfig, Shutdown};
+
 use std::{
     any::Any,
     ffi::c_void,
@@ -7,26 +9,58 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
     slice,
+    sync::OnceLock,
     task::{Context, Poll as RustPoll, RawWaker, RawWakerVTable, Waker as RustWaker},
 };
 
+static ATTACHED: OnceLock<Handle> = OnceLock::new();
+
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct Runtime {
+pub struct RawHandle {
     context: *const c_void,
     api: *const RuntimeApi,
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct RawRuntime {
+    owner: *mut c_void,
+    handle: RawHandle,
+}
+
+pub struct Handle {
+    raw: RawHandle,
+}
+
+pub struct Runtime {
+    raw: RawRuntime,
+}
+
+unsafe impl Send for Handle {}
+unsafe impl Sync for Handle {}
 unsafe impl Send for Runtime {}
 unsafe impl Sync for Runtime {}
 
 #[repr(C)]
 pub struct RuntimeApi {
-    pub block_on: unsafe extern "C" fn(*const c_void, Future) -> BlockOnResult,
+    pub runtime_block_on: unsafe extern "C" fn(*mut c_void, Future) -> CallResult,
+    pub handle_block_on: unsafe extern "C" fn(*const c_void, Future) -> CallResult,
+    pub retain_handle: unsafe extern "C" fn(*const c_void),
+    pub release_handle: unsafe extern "C" fn(*const c_void),
+    pub release_runtime: unsafe extern "C" fn(*mut c_void),
+    pub spawn: unsafe extern "C" fn(*const c_void, u64, Task) -> CallResult,
+    pub spawn_local: unsafe extern "C" fn(*const c_void, u64, Task) -> CallResult,
+    pub spawn_blocking: unsafe extern "C" fn(*const c_void, u64, BlockingTask) -> CallResult,
+    pub block_in_place: unsafe extern "C" fn(*const c_void, Blocking) -> CallResult,
+    pub abort: unsafe extern "C" fn(*const c_void, u64),
+    pub is_finished: unsafe extern "C" fn(*const c_void, u64) -> bool,
+    pub build: unsafe extern "C" fn(*const c_void, RuntimeConfig) -> BuildResult,
+    pub shutdown: unsafe extern "C" fn(*mut c_void, Shutdown, u64, u32) -> CallResult,
 }
 
 #[repr(C)]
-pub struct BlockOnResult {
+pub struct CallResult {
     pub status: Status,
     pub payload: OwnedBytes,
 }
@@ -37,6 +71,7 @@ pub enum Status {
     Ok,
     Panicked,
     HostPanicked,
+    Error,
 }
 
 #[repr(C)]
@@ -51,6 +86,31 @@ pub struct OwnedBytes {
 pub struct Future {
     pub data: *mut c_void,
     pub poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> Poll,
+}
+
+#[repr(C)]
+pub struct Task {
+    pub data: *mut c_void,
+    pub poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> Poll,
+    pub cancel: unsafe extern "C" fn(*mut c_void),
+    pub release: unsafe extern "C" fn(*mut c_void),
+}
+
+#[repr(C)]
+pub struct BlockingTask {
+    pub data: *mut c_void,
+    pub run: unsafe extern "C" fn(*mut c_void),
+    pub cancel: unsafe extern "C" fn(*mut c_void),
+    pub release: unsafe extern "C" fn(*mut c_void),
+}
+
+unsafe impl Send for BlockingTask {}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct Blocking {
+    pub data: *mut c_void,
+    pub run: unsafe extern "C" fn(*mut c_void) -> Status,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,40 +139,160 @@ struct FutureState<F: RustFuture> {
     result: Option<Result<F::Output, Box<dyn Any + Send>>>,
 }
 
-impl Runtime {
+impl RawHandle {
+    pub const fn empty() -> Self {
+        Self {
+            context: std::ptr::null(),
+            api: std::ptr::null(),
+        }
+    }
+
     /// # Safety
     ///
-    /// `context` and `api` must remain valid for every use of the returned runtime.
+    /// `context` and `api` must form one valid host handle reference.
     pub const unsafe fn from_raw(context: *const c_void, api: *const RuntimeApi) -> Self {
         Self { context, api }
     }
+}
+
+impl RawRuntime {
+    pub const fn empty() -> Self {
+        Self {
+            owner: std::ptr::null_mut(),
+            handle: RawHandle::empty(),
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `owner` must be one runtime owner associated with `handle`.
+    pub const unsafe fn from_raw(owner: *mut c_void, handle: RawHandle) -> Self {
+        Self { owner, handle }
+    }
+}
+
+pub fn attach(handle: Handle) -> Result<(), Handle> {
+    ATTACHED.set(handle)
+}
+
+#[doc(hidden)]
+pub fn attached() -> Handle {
+    ATTACHED
+        .get()
+        .expect("Telekio runtime is not attached")
+        .clone()
+}
+
+impl Handle {
+    /// # Safety
+    ///
+    /// `raw` must be one owned host handle reference returned by its host API.
+    pub const unsafe fn from_abi(raw: RawHandle) -> Self {
+        Self { raw }
+    }
 
     pub fn block_on<F: RustFuture>(&self, future: F) -> F::Output {
-        let mut state = FutureState {
-            future: Some(Box::pin(future)),
-            result: None,
-        };
-        let future = Future {
-            data: (&raw mut state).cast(),
-            poll: poll_future::<F>,
-        };
-        let result = unsafe { ((*self.api).block_on)(self.context, future) };
-        match (result.status, state.result) {
-            (Status::Ok, Some(Ok(output))) => {
-                unsafe { result.payload.release() };
-                output
+        block_on(future, |future| unsafe {
+            ((*self.raw.api).handle_block_on)(self.raw.context, future)
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn spawn(&self, id: u64, task: Task) -> CallResult {
+        unsafe { ((*self.raw.api).spawn)(self.raw.context, id, task) }
+    }
+
+    #[doc(hidden)]
+    pub fn spawn_local(&self, id: u64, task: Task) -> CallResult {
+        unsafe { ((*self.raw.api).spawn_local)(self.raw.context, id, task) }
+    }
+
+    #[doc(hidden)]
+    pub fn spawn_blocking(&self, id: u64, task: BlockingTask) -> CallResult {
+        unsafe { ((*self.raw.api).spawn_blocking)(self.raw.context, id, task) }
+    }
+
+    #[doc(hidden)]
+    pub fn block_in_place(&self, blocking: Blocking) -> CallResult {
+        unsafe { ((*self.raw.api).block_in_place)(self.raw.context, blocking) }
+    }
+
+    #[doc(hidden)]
+    pub fn abort(&self, id: u64) {
+        unsafe { ((*self.raw.api).abort)(self.raw.context, id) };
+    }
+
+    #[doc(hidden)]
+    pub fn is_finished(&self, id: u64) -> bool {
+        unsafe { ((*self.raw.api).is_finished)(self.raw.context, id) }
+    }
+
+    #[doc(hidden)]
+    pub fn build(&self, config: RuntimeConfig) -> BuildResult {
+        unsafe { ((*self.raw.api).build)(self.raw.context, config) }
+    }
+}
+
+impl Clone for Handle {
+    fn clone(&self) -> Self {
+        unsafe { ((*self.raw.api).retain_handle)(self.raw.context) };
+        Self { raw: self.raw }
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        unsafe { ((*self.raw.api).release_handle)(self.raw.context) };
+    }
+}
+
+impl Runtime {
+    /// # Safety
+    ///
+    /// `raw` must be one owned runtime returned by its host API.
+    pub const unsafe fn from_abi(raw: RawRuntime) -> Self {
+        Self { raw }
+    }
+
+    pub fn handle(&self) -> Handle {
+        unsafe { ((*self.raw.handle.api).retain_handle)(self.raw.handle.context) };
+        Handle {
+            raw: self.raw.handle,
+        }
+    }
+
+    pub fn block_on<F: RustFuture>(&self, future: F) -> F::Output {
+        block_on(future, |future| unsafe {
+            ((*self.raw.handle.api).runtime_block_on)(self.raw.owner, future)
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn shutdown(&self, mode: Shutdown, seconds: u64, nanoseconds: u32) -> CallResult {
+        unsafe { ((*self.raw.handle.api).shutdown)(self.raw.owner, mode, seconds, nanoseconds) }
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        unsafe {
+            ((*self.raw.handle.api).release_runtime)(self.raw.owner);
+            ((*self.raw.handle.api).release_handle)(self.raw.handle.context);
+        }
+    }
+}
+
+impl CallResult {
+    #[doc(hidden)]
+    pub fn into_io_result(self) -> std::io::Result<()> {
+        match self.status {
+            Status::Ok => {
+                unsafe { self.payload.release() };
+                Ok(())
             }
-            (Status::Panicked, Some(Err(payload))) => {
-                unsafe { result.payload.release() };
-                resume_unwind(payload)
-            }
-            (Status::HostPanicked, _) => {
-                let message = unsafe { result.payload.into_string() };
-                resume_unwind(Box::new(message))
-            }
-            _ => {
-                unsafe { result.payload.release() };
-                panic!("host Tokio runtime returned an invalid block_on result")
+            Status::Error => Err(std::io::Error::other(unsafe { self.payload.into_string() })),
+            Status::Panicked | Status::HostPanicked => {
+                resume_unwind(Box::new(unsafe { self.payload.into_string() }))
             }
         }
     }
@@ -140,11 +320,19 @@ impl OwnedBytes {
         }
     }
 
-    unsafe fn release(self) {
+    /// # Safety
+    ///
+    /// This descriptor must still own the allocation supplied by its producer.
+    #[doc(hidden)]
+    pub unsafe fn release(self) {
         unsafe { (self.release)(self.data, self.len) };
     }
 
-    unsafe fn into_string(self) -> String {
+    /// # Safety
+    ///
+    /// This descriptor must contain one uniquely owned UTF-8 allocation.
+    #[doc(hidden)]
+    pub unsafe fn into_string(self) -> String {
         let bytes = if self.len == 0 {
             Vec::new()
         } else {
@@ -155,9 +343,12 @@ impl OwnedBytes {
     }
 }
 
-unsafe extern "C" fn release_bytes(data: *mut u8, len: usize) {
-    if !data.is_null() {
-        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(data, len)) });
+impl fmt::Debug for Handle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Handle")
+            .field("context", &self.raw.context)
+            .finish_non_exhaustive()
     }
 }
 
@@ -165,8 +356,43 @@ impl fmt::Debug for Runtime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Runtime")
-            .field("context", &self.context)
+            .field("owner", &self.raw.owner)
+            .field("handle", &self.raw.handle.context)
             .finish_non_exhaustive()
+    }
+}
+
+fn block_on<F: RustFuture>(future: F, call: impl FnOnce(Future) -> CallResult) -> F::Output {
+    let mut state = FutureState {
+        future: Some(Box::pin(future)),
+        result: None,
+    };
+    let result = call(Future {
+        data: (&raw mut state).cast(),
+        poll: poll_future::<F>,
+    });
+    match (result.status, state.result) {
+        (Status::Ok, Some(Ok(output))) => {
+            unsafe { result.payload.release() };
+            output
+        }
+        (Status::Panicked, Some(Err(payload))) => {
+            unsafe { result.payload.release() };
+            resume_unwind(payload)
+        }
+        (Status::HostPanicked, _) => {
+            resume_unwind(Box::new(unsafe { result.payload.into_string() }))
+        }
+        _ => {
+            unsafe { result.payload.release() };
+            panic!("host Tokio runtime returned an invalid block_on result")
+        }
+    }
+}
+
+unsafe extern "C" fn release_bytes(data: *mut u8, len: usize) {
+    if !data.is_null() {
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(data, len)) });
     }
 }
 
@@ -210,7 +436,11 @@ impl Waker {
         }
     }
 
-    unsafe fn clone_rust_waker(&self) -> RustWaker {
+    /// # Safety
+    ///
+    /// This descriptor must contain valid waker callbacks and state.
+    #[doc(hidden)]
+    pub unsafe fn clone_rust_waker(&self) -> RustWaker {
         let mut owned = MaybeUninit::uninit();
         unsafe { (self.clone)(self.data, owned.as_mut_ptr()) };
         let owned = unsafe { owned.assume_init() };
