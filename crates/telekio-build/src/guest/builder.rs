@@ -1,11 +1,11 @@
 use super::*;
 
-#[cfg(not(test))]
+#[cfg(not(feature = "telekio-test"))]
 fn attached() -> ::telekio::Handle {
     ::telekio::attached()
 }
 
-#[cfg(test)]
+#[cfg(feature = "telekio-test")]
 fn attached() -> ::telekio::Handle {
     static HOST: std::sync::OnceLock<::telekio_host::Runtime> = std::sync::OnceLock::new();
     let host = HOST.get_or_init(|| ::telekio_host::Runtime::new().unwrap());

@@ -32,14 +32,20 @@ fn patch_manifest(path: &Path, telekio: &Path, host: &Path) -> Result<(), Box<dy
         .and_then(Value::as_table_mut)
         .ok_or("Tokio manifest has no dependencies")?;
     dependencies.insert("telekio".to_owned(), dependency(telekio));
+    let mut host_dependency = dependency(host);
+    host_dependency
+        .as_table_mut()
+        .ok_or("generated dependency is not a table")?
+        .insert("optional".to_owned(), Value::Boolean(true));
+    dependencies.insert("telekio-host".to_owned(), host_dependency);
     manifest
-        .as_table_mut()
-        .ok_or("Tokio manifest root is not a table")?
-        .entry("dev-dependencies")
-        .or_insert_with(|| Value::Table(Table::new()))
-        .as_table_mut()
-        .ok_or("Tokio dev-dependencies is not a table")?
-        .insert("telekio-host".to_owned(), dependency(host));
+        .get_mut("features")
+        .and_then(Value::as_table_mut)
+        .ok_or("Tokio manifest has no features")?
+        .insert(
+            "telekio-test".to_owned(),
+            Value::Array(vec![Value::String("dep:telekio-host".to_owned())]),
+        );
     fs::write(path, toml::to_string(&manifest)?)?;
     Ok(())
 }
