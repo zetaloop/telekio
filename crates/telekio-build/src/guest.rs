@@ -1,0 +1,430 @@
+use std::{
+    error::Error,
+    fs,
+    path::{Path, PathBuf},
+};
+
+use toml::{Table, Value};
+
+use crate::{edit, prepare_tokio};
+
+pub fn prepare_guest(telekio: &Path, host: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let generated = prepare_tokio()?;
+    patch_manifest(&generated.join("Cargo.toml"), telekio, host)?;
+    patch_task(&generated.join("src/runtime/task/mod.rs"))?;
+    patch_current_thread(&generated.join("src/runtime/scheduler/current_thread/mod.rs"))?;
+    patch_inject(&generated.join("src/runtime/scheduler/inject.rs"))?;
+    patch_multi_thread(&generated.join("src/runtime/scheduler/multi_thread"))?;
+    patch_scheduler(&generated.join("src/runtime/scheduler/mod.rs"))?;
+    patch_builder(&generated.join("src/runtime/builder.rs"))?;
+    patch_runtime(&generated.join("src/runtime/runtime.rs"))?;
+    patch_local_runtime(&generated.join("src/runtime/local_runtime/runtime.rs"))?;
+    patch_blocking(&generated.join("src/runtime/blocking/pool.rs"))?;
+    patch_metrics(&generated.join("src/runtime/metrics/batch.rs"))?;
+    patch_context(&generated.join("src/runtime/context/blocking.rs"))?;
+    Ok(generated)
+}
+
+fn patch_manifest(path: &Path, telekio: &Path, host: &Path) -> Result<(), Box<dyn Error>> {
+    let mut manifest: Value = toml::from_str(&fs::read_to_string(path)?)?;
+    let dependencies = manifest
+        .get_mut("dependencies")
+        .and_then(Value::as_table_mut)
+        .ok_or("Tokio manifest has no dependencies")?;
+    dependencies.insert("telekio".to_owned(), dependency(telekio));
+    manifest
+        .as_table_mut()
+        .ok_or("Tokio manifest root is not a table")?
+        .entry("dev-dependencies")
+        .or_insert_with(|| Value::Table(Table::new()))
+        .as_table_mut()
+        .ok_or("Tokio dev-dependencies is not a table")?
+        .insert("telekio-host".to_owned(), dependency(host));
+    fs::write(path, toml::to_string(&manifest)?)?;
+    Ok(())
+}
+
+fn dependency(path: &Path) -> Value {
+    Value::Table(Table::from_iter([
+        (
+            "path".to_owned(),
+            Value::String(path.to_string_lossy().into_owned()),
+        ),
+        (
+            "version".to_owned(),
+            Value::String(format!("={}", env!("CARGO_PKG_VERSION"))),
+        ),
+    ]))
+}
+
+fn patch_task(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        mount_with(source, Some("pub(crate)"), "telekio", "task.rs")
+    })
+}
+
+fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        edit::append_fields(
+            source,
+            "Handle",
+            &[edit::Field {
+                visibility: Some("pub(crate)"),
+                name: "telekio",
+                ty: "task::telekio::Registry<Arc<Handle>>",
+            }],
+        )?;
+        edit::append_record_fields(
+            source,
+            edit::Scope::Method {
+                owner: "CurrentThread",
+                name: "new",
+            },
+            "Handle",
+            &[edit::FieldInit {
+                name: "telekio",
+                value: "task::telekio::Registry::new()",
+            }],
+        )?;
+        edit::rename_method(source, "CurrentThread", "block_on", "drive")?;
+        for target in [
+            edit::AttrTarget::Method {
+                owner: "CurrentThread",
+                name: "drive",
+            },
+            edit::AttrTarget::Struct("Core"),
+            edit::AttrTarget::Impl {
+                owner: "Core",
+                method: "tick",
+            },
+            edit::AttrTarget::Impl {
+                owner: "Context",
+                method: "run_task",
+            },
+            edit::AttrTarget::Impl {
+                owner: "Handle",
+                method: "next_remote_task",
+            },
+            edit::AttrTarget::Method {
+                owner: "CoreGuard<'_>",
+                name: "block_on",
+            },
+        ] {
+            edit::add_attr(source, target, "#[expect(dead_code)]")?;
+        }
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "Arc<Handle>",
+                name: "release",
+            },
+            "remove",
+            "remove_host_task",
+        )?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "Arc<Handle>",
+                name: "schedule",
+            },
+            "push_task",
+            "push_host_task",
+        )?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "Arc<Handle>",
+                name: "schedule",
+            },
+            "push",
+            "push_host_task",
+        )?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "Handle",
+                name: "spawn_local",
+            },
+            "schedule",
+            "schedule_local",
+        )?;
+        mount(source, "telekio", "current_thread.rs")
+    })
+}
+
+fn patch_inject(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "Inject<T>",
+                name: "push",
+            },
+            "#[expect(dead_code)]",
+        )?;
+        mount(source, "telekio", "inject.rs")
+    })
+}
+
+fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(&path.join("handle.rs"), |source| {
+        edit::append_fields(
+            source,
+            "Handle",
+            &[edit::Field {
+                visibility: Some("pub(crate)"),
+                name: "telekio",
+                ty: "task::telekio::Registry<Arc<Handle>>",
+            }],
+        )?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "Handle",
+                name: "bind_new_task",
+            },
+            "schedule_option_task_without_yield",
+            "schedule_host_option",
+        )?;
+        for function in ["release", "schedule", "yield_now"] {
+            edit::redirect_call(
+                source,
+                edit::Scope::Method {
+                    owner: "Arc<Handle>",
+                    name: function,
+                },
+                if function == "release" {
+                    "remove"
+                } else {
+                    "schedule_task"
+                },
+                if function == "release" {
+                    "remove_host_task"
+                } else {
+                    "schedule_host_task"
+                },
+            )?;
+        }
+        Ok(())
+    })?;
+    patch(&path.join("worker.rs"), |source| {
+        edit::append_record_fields(
+            source,
+            edit::Scope::Function("create"),
+            "Handle",
+            &[edit::FieldInit {
+                name: "telekio",
+                value: "task::telekio::Registry::new()",
+            }],
+        )?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "Launch",
+                name: "launch",
+            },
+            "runtime::spawn_blocking",
+            "super::telekio::host_worker",
+        )?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Function("block_in_place"),
+            "crate::runtime::context::exit_runtime",
+            "telekio::exit_host_runtime",
+        )?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Impl {
+                owner: "Handle",
+                method: "schedule_task",
+            },
+            "#[expect(dead_code)]",
+        )?;
+        mount(source, "telekio", "worker.rs")
+    })?;
+    patch(&path.join("stats.rs"), |source| {
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "Stats",
+                name: "inc_local_schedule_count",
+            },
+            "#[expect(dead_code)]",
+        )
+    })?;
+    patch(&path.join("mod.rs"), |source| {
+        edit::rename_method(source, "MultiThread", "block_on", "drive")?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "MultiThread",
+                name: "drive",
+            },
+            "#[expect(dead_code)]",
+        )?;
+        mount(source, "telekio", "multi_thread.rs")
+    })
+}
+
+fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| mount(source, "telekio", "scheduler.rs"))
+}
+
+fn patch_builder(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "Builder",
+                name: "build",
+            },
+            "build_current_thread_runtime",
+            "build_hosted_current_thread",
+        )?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "Builder",
+                name: "build",
+            },
+            "build_threaded_runtime",
+            "build_hosted_multi_thread",
+        )?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "Builder",
+                name: "build_local",
+            },
+            "build_current_thread_local_runtime",
+            "build_hosted_local",
+        )?;
+        mount(source, "telekio", "builder.rs")
+    })
+}
+
+fn patch_runtime(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| mount(source, "telekio", "runtime.rs"))
+}
+
+fn patch_local_runtime(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| mount(source, "telekio", "local_runtime.rs"))
+}
+
+fn patch_blocking(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        edit::append_fields(
+            source,
+            "BlockingPool",
+            &[edit::Field {
+                visibility: None,
+                name: "telekio",
+                ty: "std::sync::OnceLock<std::sync::Arc<crate::runtime::task::telekio::Host>>",
+            }],
+        )?;
+        edit::append_record_fields(
+            source,
+            edit::Scope::Method {
+                owner: "BlockingPool",
+                name: "new",
+            },
+            "BlockingPool",
+            &[edit::FieldInit {
+                name: "telekio",
+                value: "std::sync::OnceLock::new()",
+            }],
+        )?;
+        edit::rename_method(source, "BlockingPool", "shutdown", "shutdown_workers")?;
+        for target in [
+            edit::AttrTarget::Enum("Mandatory"),
+            edit::AttrTarget::Impl {
+                owner: "Spawner",
+                method: "spawn_blocking",
+            },
+        ] {
+            edit::add_attr(source, target, "#[expect(dead_code)]")?;
+        }
+        mount(source, "telekio", "blocking.rs")
+    })?;
+    patch(
+        &path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("blocking path has no runtime parent")?
+            .join("handle.rs"),
+        |source| {
+            edit::redirect_call(
+                source,
+                edit::Scope::Method {
+                    owner: "Handle",
+                    name: "spawn_blocking",
+                },
+                "spawn_blocking",
+                "spawn_host_blocking",
+            )
+        },
+    )
+}
+
+fn patch_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "MetricsBatch",
+                name: "inc_local_schedule_count",
+            },
+            "#[expect(dead_code)]",
+        )
+    })
+}
+
+fn patch_context(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| mount(source, "telekio", "context.rs"))?;
+    patch(
+        &path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("context path has no runtime parent")?
+            .join("handle.rs"),
+        |source| {
+            edit::redirect_call(
+                source,
+                edit::Scope::Method {
+                    owner: "Handle",
+                    name: "block_on_inner",
+                },
+                "block_on",
+                "block_on_host",
+            )
+        },
+    )
+}
+
+fn mount(source: &mut String, name: &str, helper: &str) -> Result<(), Box<dyn Error>> {
+    mount_with(source, None, name, helper)
+}
+
+fn mount_with(
+    source: &mut String,
+    visibility: Option<&str>,
+    name: &str,
+    helper: &str,
+) -> Result<(), Box<dyn Error>> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("guest")
+        .join(helper);
+    println!("cargo::rerun-if-changed={}", path.display());
+    edit::mount_module(source, visibility, name, &path)
+}
+
+fn patch(
+    path: &Path,
+    transform: impl FnOnce(&mut String) -> Result<(), Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
+    let mut source = fs::read_to_string(path)?;
+    transform(&mut source).map_err(|error| format!("{}: {error}", path.display()))?;
+    fs::write(path, source)?;
+    Ok(())
+}

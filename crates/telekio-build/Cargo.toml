@@ -9,6 +9,7 @@ description = "Build integration for Telekio"
 
 [dependencies]
 flate2 = "1.1.9"
+ra_ap_syntax = "0.0.349"
 sha2 = { version = "0.11.0", default-features = false }
 tar = { version = "0.4.46", default-features = false }
 toml = "1.1.4"
