@@ -8,6 +8,6 @@ impl BlockingRegionGuard {
     {
         Ok(crate::runtime::scheduler::Handle::current()
             .host()
-            .handle_block_on(future))
+            .handle_block_on(crate::runtime::task::telekio::budget(future)))
     }
 }

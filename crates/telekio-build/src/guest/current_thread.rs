@@ -12,7 +12,7 @@ impl CurrentThread {
                 .as_current_thread()
                 .telekio
                 .host()
-                .runtime_block_on(future)
+                .runtime_block_on(task::telekio::budget(future))
         })
     }
 }

@@ -14,7 +14,10 @@ impl MultiThread {
         crate::runtime::context::enter_runtime(handle, true, |_| {
             match handle {
                 scheduler::Handle::MultiThread(handle) => {
-                    handle.telekio.host().runtime_block_on(future)
+                    handle
+                        .telekio
+                        .host()
+                        .runtime_block_on(task::telekio::budget(future))
                 }
                 _ => unreachable!("expected MultiThread scheduler"),
             }

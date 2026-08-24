@@ -4,12 +4,14 @@ use super::{
 use crate::runtime::task;
 use std::{
     collections::HashMap,
+    future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
     },
-    task::Waker,
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
@@ -44,6 +46,21 @@ struct BlockingRunner<S: Schedule> {
     task: Option<UnownedTask<S>>,
 }
 
+struct Budgeted<F>(F);
+
+pub(crate) fn budget<F: Future>(future: F) -> impl Future<Output = F::Output> {
+    Budgeted(future)
+}
+
+impl<F: Future> Future for Budgeted<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let future = unsafe { self.map_unchecked_mut(|budgeted| &mut budgeted.0) };
+        crate::task::coop::budget(|| future.poll(context))
+    }
+}
+
 impl Host {
     pub(crate) fn new(runtime: ::telekio::Runtime) -> Arc<Self> {
         Arc::new(Self {
@@ -60,6 +77,7 @@ impl Host {
         self.handle.block_on(future)
     }
 
+    #[cfg(feature = "rt-multi-thread")]
     pub(crate) fn block_in_place(&self, blocking: ::telekio::Blocking) -> ::telekio::CallResult {
         self.handle.block_in_place(blocking)
     }
