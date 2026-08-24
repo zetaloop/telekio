@@ -1,0 +1,17 @@
+[package]
+name = "telekio-build"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Build integration for Telekio"
+
+[dependencies]
+flate2 = "1.1.9"
+sha2 = { version = "0.11.0", default-features = false }
+tar = { version = "0.4.46", default-features = false }
+toml = "1.1.4"
+
+[target."cfg(any())".dependencies]
+tokio = "=1.53.1"
