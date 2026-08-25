@@ -27,7 +27,7 @@ macro_rules! socket_source {
 socket_source!(mio::net::TcpListener, mio::net::TcpStream, mio::net::UdpSocket);
 
 #[cfg(windows)]
-impl Source for mio_windows::NamedPipe {
+impl Source for mio::windows::NamedPipe {
     fn telekio_resource(&self) -> ::telekio::IoResource {
         use std::os::windows::io::AsRawHandle;
         ::telekio::IoResource::handle(self.as_raw_handle() as usize as u64)
