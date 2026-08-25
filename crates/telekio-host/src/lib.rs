@@ -1,3 +1,6 @@
+#[path = "io.rs"]
+mod host_io;
+
 use std::{
     any::Any,
     cell::UnsafeCell,
@@ -38,6 +41,7 @@ struct HandleContext {
     handle: tokio::runtime::Handle,
     tasks: Arc<Tasks>,
     local: Option<Arc<LocalSlot>>,
+    io_enabled: bool,
 }
 
 struct LocalSlot {
@@ -88,6 +92,7 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     resume,
     advance,
     timer,
+    register_io: host_io::register,
     shutdown,
 };
 
@@ -97,7 +102,7 @@ impl Runtime {
     }
 
     pub fn from_tokio(runtime: tokio::runtime::Runtime) -> Self {
-        let handle = handle_context(runtime.handle().clone(), None);
+        let handle = handle_context(runtime.handle().clone(), None, true);
         Self { runtime, handle }
     }
 
@@ -562,7 +567,7 @@ fn build_runtime(config: RuntimeConfig) -> io::Result<(RuntimeKind, Arc<HandleCo
         Flavor::CurrentThread | Flavor::MultiThread => {
             let runtime = builder.build()?;
             let workers = runtime.handle().metrics().num_workers();
-            let handle = handle_context(runtime.handle().clone(), None);
+            let handle = handle_context(runtime.handle().clone(), None, config.enable_io != 0);
             Ok((RuntimeKind::Runtime(Some(runtime)), handle, workers))
         }
         Flavor::Local => {
@@ -570,7 +575,7 @@ fn build_runtime(config: RuntimeConfig) -> io::Result<(RuntimeKind, Arc<HandleCo
             let handle = runtime.handle().clone();
             let workers = handle.metrics().num_workers();
             let local = Arc::new(LocalSlot::new(runtime));
-            let handle = handle_context(handle, Some(Arc::clone(&local)));
+            let handle = handle_context(handle, Some(Arc::clone(&local)), config.enable_io != 0);
             Ok((RuntimeKind::Local(local), handle, workers))
         }
     }
@@ -579,11 +584,13 @@ fn build_runtime(config: RuntimeConfig) -> io::Result<(RuntimeKind, Arc<HandleCo
 fn handle_context(
     handle: tokio::runtime::Handle,
     local: Option<Arc<LocalSlot>>,
+    io_enabled: bool,
 ) -> Arc<HandleContext> {
     Arc::new(HandleContext {
         handle,
         tasks: Arc::new(Tasks::default()),
         local,
+        io_enabled,
     })
 }
 

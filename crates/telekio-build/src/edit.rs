@@ -2,7 +2,7 @@ use std::{error::Error, path::Path};
 
 use ra_ap_syntax::{
     AstNode, Edition, SourceFile, SyntaxElement, SyntaxKind, SyntaxNode,
-    ast::{self, HasArgList, HasName, edit::IndentLevel, make},
+    ast::{self, HasArgList, HasGenericParams, HasName, edit::IndentLevel, make},
     syntax_editor::{Position, SyntaxEditor},
 };
 
@@ -142,6 +142,56 @@ fn add_attr_in(
     }
     commit(source, editor)?;
     Ok(true)
+}
+
+pub fn set_type_parameter(
+    source: &mut String,
+    owner: &str,
+    method: &str,
+    parameter: &str,
+    declaration: &str,
+) -> Result<(), Box<dyn Error>> {
+    let (editor, root) = open(source)?;
+    let implementation = one(
+        root.descendants()
+            .filter_map(ast::Impl::cast)
+            .filter(|implementation| {
+                implementation
+                    .self_ty()
+                    .is_some_and(|ty| ty.syntax().text() == owner)
+                    && implementation
+                        .assoc_item_list()
+                        .into_iter()
+                        .flat_map(|items| items.assoc_items())
+                        .any(|item| {
+                            matches!(item, ast::AssocItem::Fn(function) if function.name().is_some_and(|name| name.text() == method))
+                        })
+            }),
+        &format!("impl `{owner}` containing `{method}`"),
+    )?;
+    let parameter = one(
+        implementation
+            .generic_param_list()
+            .into_iter()
+            .flat_map(|parameters| parameters.generic_params())
+            .filter_map(|parameter| match parameter {
+                ast::GenericParam::TypeParam(parameter) => Some(parameter),
+                _ => None,
+            })
+            .filter(|candidate| {
+                candidate
+                    .name()
+                    .is_some_and(|name| name.text() == parameter)
+            }),
+        &format!("type parameter `{parameter}` in impl `{owner}`"),
+    )?;
+    let replacement = parse(&format!("fn replacement<{declaration}>() {{}}"))?
+        .syntax()
+        .descendants()
+        .find_map(ast::TypeParam::cast)
+        .ok_or("replacement has no type parameter")?;
+    editor.replace(parameter.syntax(), replacement.syntax().clone());
+    commit(source, editor)
 }
 
 pub fn rename_method(

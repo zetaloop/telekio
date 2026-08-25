@@ -1,4 +1,7 @@
-use crate::{BuildResult, ClockSample, DurationParts, RuntimeConfig, Shutdown, TimerResult};
+use crate::{
+    BuildResult, ClockSample, DurationParts, IoInterest, IoResource, IoResult, RuntimeConfig,
+    Shutdown, TimerResult,
+};
 
 use std::{
     any::Any,
@@ -61,6 +64,7 @@ pub struct RuntimeApi {
     pub resume: unsafe extern "C" fn(*const c_void) -> CallResult,
     pub advance: unsafe extern "C" fn(*const c_void, DurationParts) -> CallResult,
     pub timer: unsafe extern "C" fn(*const c_void, DurationParts) -> TimerResult,
+    pub register_io: unsafe extern "C" fn(*const c_void, IoResource, IoInterest) -> IoResult,
     pub shutdown: unsafe extern "C" fn(*mut c_void, Shutdown, u64, u32) -> CallResult,
 }
 

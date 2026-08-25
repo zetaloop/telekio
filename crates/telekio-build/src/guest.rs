@@ -23,6 +23,7 @@ pub fn prepare_guest(telekio: &Path, host: &Path) -> Result<PathBuf, Box<dyn Err
     patch_metrics(&generated.join("src/runtime/metrics/batch.rs"))?;
     patch_context(&generated.join("src/runtime/context/blocking.rs"))?;
     patch_time(&generated)?;
+    patch_io(&generated)?;
     Ok(generated)
 }
 
@@ -455,6 +456,78 @@ fn patch_time(generated: &Path) -> Result<(), Box<dyn Error>> {
             },
             "#[expect(dead_code)]",
         )
+    })
+}
+
+fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
+    patch(&generated.join("src/runtime/io/mod.rs"), |source| {
+        mount_with(source, Some("pub(crate)"), "telekio", "io.rs")
+    })?;
+    patch(
+        &generated.join("src/runtime/io/registration.rs"),
+        |source| {
+            for (name, replacement) in [
+                ("new_with_interest_and_handle", "register_local"),
+                ("deregister", "deregister_local"),
+                ("clear_readiness", "clear_local_readiness"),
+                ("poll_read_ready", "poll_local_read_ready"),
+                ("poll_write_ready", "poll_local_write_ready"),
+                ("poll_ready", "poll_local_ready"),
+                ("readiness", "local_readiness"),
+                ("try_io", "local_try_io"),
+            ] {
+                edit::rename_method(source, "Registration", name, replacement)?;
+                edit::add_attr(
+                    source,
+                    edit::AttrTarget::Method {
+                        owner: "Registration",
+                        name: replacement,
+                    },
+                    "#[expect(dead_code)]",
+                )?;
+            }
+            mount(source, "telekio", "registration.rs")
+        },
+    )?;
+    patch(
+        &generated.join("src/runtime/io/scheduled_io.rs"),
+        |source| {
+            edit::append_fields(
+                source,
+                "ScheduledIo",
+                &[edit::Field {
+                    visibility: None,
+                    name: "telekio",
+                    ty: "std::sync::Mutex<Option<::telekio::IoRegistration>>",
+                }],
+            )?;
+            edit::append_record_fields(
+                source,
+                edit::Scope::Method {
+                    owner: "ScheduledIo",
+                    name: "default",
+                },
+                "ScheduledIo",
+                &[edit::FieldInit {
+                    name: "telekio",
+                    value: "std::sync::Mutex::new(None)",
+                }],
+            )?;
+            mount(source, "telekio", "scheduled_io.rs")
+        },
+    )?;
+    patch(&generated.join("src/io/poll_evented.rs"), |source| {
+        edit::set_type_parameter(
+            source,
+            "PollEvented<E>",
+            "new_with_interest_and_handle",
+            "E",
+            "E: Source + crate::runtime::io::telekio::Source",
+        )
+    })?;
+    patch(&generated.join("src/io/async_fd.rs"), |source| {
+        edit::retarget_use(source, "SourceFd", "self::telekio::SourceFd")?;
+        mount(source, "telekio", "async_fd.rs")
     })
 }
 

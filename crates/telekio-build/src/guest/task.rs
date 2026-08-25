@@ -105,6 +105,15 @@ impl Host {
         ::telekio::Timer::from_result(self.handle.timer(duration))
     }
 
+    #[track_caller]
+    pub(crate) fn register_io(
+        &self,
+        resource: ::telekio::IoResource,
+        interest: ::telekio::IoInterest,
+    ) -> std::io::Result<::telekio::IoRegistration> {
+        self.handle.register_io(resource, interest)
+    }
+
     pub(crate) fn shutdown(&self, mode: ::telekio::Shutdown, duration: Option<Duration>) {
         let duration = duration.unwrap_or_default();
         self.runtime
