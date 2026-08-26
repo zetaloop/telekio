@@ -10,3 +10,6 @@ description = "Host runtime backend for Telekio"
 [dependencies]
 telekio = { version = "=0.1.0", path = "../telekio" }
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.189"

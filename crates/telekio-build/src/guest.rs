@@ -24,6 +24,7 @@ pub fn prepare_guest(telekio: &Path, host: &Path) -> Result<PathBuf, Box<dyn Err
     patch_context(&generated.join("src/runtime/context/blocking.rs"))?;
     patch_time(&generated)?;
     patch_io(&generated)?;
+    patch_signal(&generated)?;
     Ok(generated)
 }
 
@@ -638,6 +639,68 @@ fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
             )?;
         }
         mount(source, "telekio", "named_pipe.rs")
+    })
+}
+
+fn patch_signal(generated: &Path) -> Result<(), Box<dyn Error>> {
+    patch(&generated.join("src/signal/mod.rs"), |source| {
+        for target in [
+            edit::AttrTarget::Struct("RxFuture"),
+            edit::AttrTarget::Function("make_future"),
+            edit::AttrTarget::Impl {
+                owner: "RxFuture",
+                method: "new",
+            },
+            edit::AttrTarget::Module("reusable_box"),
+        ] {
+            edit::add_attr(source, target, "#[cfg_attr(not(test), expect(dead_code))]")?;
+        }
+        Ok(())
+    })?;
+    patch(&generated.join("src/signal/unix.rs"), |source| {
+        edit::retarget_use(source, "RxFuture", "self::telekio::RxFuture")?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Function("signal"),
+            "signal_with_handle",
+            "telekio::signal",
+        )?;
+        mount_with(source, Some("pub(crate)"), "telekio", "signal.rs")
+    })?;
+    patch(&generated.join("src/process/unix/mod.rs"), |source| {
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "GlobalOrphanQueue",
+                name: "push_orphan",
+            },
+            "push_orphan",
+            "reap_host_orphan",
+        )?;
+        mount(source, "telekio", "process.rs")
+    })?;
+    patch(&generated.join("src/signal/windows.rs"), |source| {
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Modules("imp"),
+            "#[cfg_attr(not(test), expect(dead_code))]",
+        )?;
+        edit::retarget_use(source, "RxFuture", "self::telekio::RxFuture")?;
+        for name in [
+            "ctrl_c",
+            "ctrl_break",
+            "ctrl_close",
+            "ctrl_logoff",
+            "ctrl_shutdown",
+        ] {
+            edit::redirect_call(
+                source,
+                edit::Scope::Function(name),
+                &format!("self::imp::{name}"),
+                &format!("telekio::{name}"),
+            )?;
+        }
+        mount(source, "telekio", "signal.rs")
     })
 }
 

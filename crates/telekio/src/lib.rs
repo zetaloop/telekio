@@ -1,6 +1,7 @@
 mod builder;
 mod io;
 mod runtime;
+mod signal;
 mod time;
 
 pub use builder::{BuildResult, Bytes, Callback, Flavor, RuntimeConfig, Shutdown, StringCallback};
@@ -12,4 +13,5 @@ pub use runtime::{
     Blocking, BlockingTask, CallResult, Future, Handle, OwnedBytes, Poll, RawHandle, RawRuntime,
     Runtime, RuntimeApi, Status, Task, Waker, attach, attached,
 };
+pub use signal::{Signal, SignalKind, SignalRequest, SignalResult};
 pub use time::{ClockSample, DurationParts, InstantOffset, OperationPoll, Timer, TimerResult};

@@ -105,6 +105,15 @@ impl Host {
         ::telekio::Timer::from_result(self.handle.timer(duration))
     }
 
+    #[cfg(feature = "signal")]
+    #[cfg_attr(test, expect(dead_code))]
+    pub(crate) fn signal(
+        &self,
+        request: ::telekio::SignalRequest,
+    ) -> std::io::Result<::telekio::Signal> {
+        self.handle.signal(request)
+    }
+
     #[track_caller]
     pub(crate) fn register_io(
         &self,

@@ -1,5 +1,7 @@
 #[path = "io.rs"]
 mod host_io;
+#[path = "signal.rs"]
+mod host_signal;
 
 use std::{
     any::Any,
@@ -93,6 +95,8 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     advance,
     timer,
     register_io: host_io::register,
+    signal: host_signal::signal,
+    reap_process,
     shutdown,
 };
 
@@ -477,6 +481,43 @@ fn instant_offset(origin: std::time::Instant, instant: std::time::Instant) -> In
             duration: DurationParts::new(origin.duration_since(instant)),
             negative: 1,
         },
+    }
+}
+
+unsafe extern "C" fn reap_process(context: *const c_void, id: u32) -> CallResult {
+    #[cfg(unix)]
+    {
+        let context = unsafe { &*context.cast::<HandleContext>() };
+        let _guard = context.handle.enter();
+        let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child());
+        match signal {
+            Ok(mut signal) => {
+                context.handle.spawn(async move {
+                    loop {
+                        let result = unsafe {
+                            libc::waitpid(id as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG)
+                        };
+                        if result > 0 {
+                            break;
+                        }
+                        if result < 0 {
+                            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                                continue;
+                            }
+                            break;
+                        }
+                        signal.recv().await;
+                    }
+                });
+                result(Status::Ok, OwnedBytes::empty())
+            }
+            Err(error) => result(Status::Error, OwnedBytes::from_string(error.to_string())),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (context, id);
+        result(Status::Ok, OwnedBytes::empty())
     }
 }
 
