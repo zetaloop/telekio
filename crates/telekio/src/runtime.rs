@@ -68,6 +68,8 @@ pub struct RuntimeApi {
     pub signal: unsafe extern "C" fn(*const c_void, SignalRequest) -> SignalResult,
     pub reap_process: unsafe extern "C" fn(*const c_void, u32) -> CallResult,
     pub shutdown: unsafe extern "C" fn(*mut c_void, Shutdown, u64, u32) -> CallResult,
+    pub defer: unsafe extern "C" fn(*const c_void, *const Waker) -> CallResult,
+    pub metric: unsafe extern "C" fn(*const c_void, Metric, usize) -> MetricResult,
 }
 
 #[repr(C)]
@@ -83,6 +85,21 @@ pub enum Status {
     Panicked,
     HostPanicked,
     Error,
+}
+
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub enum Metric {
+    GlobalQueueDepth,
+    WorkerTotalBusyDuration,
+    WorkerParkCount,
+    WorkerParkUnparkCount,
+}
+
+#[repr(C)]
+pub struct MetricResult {
+    pub call: CallResult,
+    pub value: u64,
 }
 
 #[repr(C)]
@@ -228,6 +245,18 @@ impl Handle {
     }
 
     #[doc(hidden)]
+    pub fn defer(&self, waker: &Waker) -> CallResult {
+        unsafe { ((*self.raw.api).defer)(self.raw.context, waker) }
+    }
+
+    #[doc(hidden)]
+    #[track_caller]
+    pub fn metric(&self, metric: Metric, worker: usize) -> u64 {
+        let result = unsafe { ((*self.raw.api).metric)(self.raw.context, metric, worker) };
+        result.call.into_io_result().unwrap();
+        result.value
+    }
+
     pub fn block_in_place(&self, blocking: Blocking) -> CallResult {
         unsafe { ((*self.raw.api).block_in_place)(self.raw.context, blocking) }
     }
@@ -397,6 +426,11 @@ fn block_on<F: RustFuture>(future: F, call: impl FnOnce(Future) -> CallResult) -
         }
         (Status::HostPanicked, _) => {
             resume_unwind(Box::new(unsafe { result.payload.into_string() }))
+        }
+        (Status::Error, _) => {
+            panic!("host Tokio runtime operation failed: {}", unsafe {
+                result.payload.into_string()
+            })
         }
         _ => {
             unsafe { result.payload.release() };

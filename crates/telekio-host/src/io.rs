@@ -18,13 +18,16 @@ use telekio::IoKind;
 #[cfg(windows)]
 use telekio::IoOperationKind;
 
-use super::HandleContext;
+use super::{HandleContext, HostResource};
 
 #[cfg(windows)]
 type ReadyFuture = Pin<Box<dyn Future<Output = io::Result<tokio::io::Ready>> + Send>>;
 
 #[cfg(any(unix, windows))]
 type OperationFuture = Pin<Box<dyn Future<Output = io::Result<IoReady>> + Send>>;
+
+#[cfg(not(any(unix, windows)))]
+struct Registration;
 
 #[cfg(unix)]
 struct Registration {
@@ -87,12 +90,23 @@ pub(super) unsafe extern "C" fn register(
         };
     }
     match catch_unwind(AssertUnwindSafe(|| {
-        register_inner(context, resource, interest)
+        let registration = register_inner(context, resource, interest)?;
+        HostResource::new(&context.owner, registration).map_err(io::Error::other)
     })) {
         Ok(Ok(registration)) => IoResult {
             call: call_ok(),
             error: IoError::none(),
-            registration,
+            registration: unsafe {
+                IoRegistration::from_raw(
+                    Arc::into_raw(registration).cast_mut().cast(),
+                    poll_registration,
+                    ready,
+                    try_operate,
+                    try_ready,
+                    clear,
+                    release_registration,
+                )
+            },
         },
         Ok(Err(error)) => IoResult {
             error: IoError::from_error(&error),
@@ -112,7 +126,7 @@ fn register_inner(
     context: &HandleContext,
     resource: IoResource,
     interest: IoInterest,
-) -> io::Result<IoRegistration> {
+) -> io::Result<Registration> {
     use std::os::fd::{BorrowedFd, RawFd};
 
     if resource.kind != IoKind::Fd {
@@ -136,17 +150,7 @@ fn register_inner(
             host_interest(interest)?,
         )?)
     };
-    Ok(unsafe {
-        IoRegistration::from_raw(
-            Box::into_raw(Box::new(Registration { io })).cast(),
-            poll_registration,
-            ready,
-            try_operate,
-            try_ready,
-            clear,
-            release_registration,
-        )
-    })
+    Ok(Registration { io })
 }
 
 #[cfg(windows)]
@@ -154,7 +158,7 @@ fn register_inner(
     context: &HandleContext,
     resource: IoResource,
     _: IoInterest,
-) -> io::Result<IoRegistration> {
+) -> io::Result<Registration> {
     use std::os::windows::io::{
         BorrowedHandle, BorrowedSocket, IntoRawHandle, RawHandle, RawSocket,
     };
@@ -184,27 +188,16 @@ fn register_inner(
             ));
         }
     };
-    Ok(unsafe {
-        IoRegistration::from_raw(
-            Box::into_raw(Box::new(Registration {
-                io,
-                read: Mutex::new(None),
-                write: Mutex::new(None),
-                connect: Mutex::new(None),
-            }))
-            .cast(),
-            poll_registration,
-            ready,
-            try_operate,
-            try_ready,
-            clear,
-            release_registration,
-        )
+    Ok(Registration {
+        io,
+        read: Mutex::new(None),
+        write: Mutex::new(None),
+        connect: Mutex::new(None),
     })
 }
 
 #[cfg(not(any(unix, windows)))]
-fn register_inner(_: &HandleContext, _: IoResource, _: IoInterest) -> io::Result<IoRegistration> {
+fn register_inner(_: &HandleContext, _: IoResource, _: IoInterest) -> io::Result<Registration> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "this I/O resource is not supported on this platform",
@@ -241,20 +234,27 @@ unsafe extern "C" fn poll_registration(
     interest: IoInterest,
     waker: *const Waker,
 ) -> IoPoll {
-    let registration = unsafe { &*data.cast::<Registration>() };
+    let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
+    registration.update_waker(unsafe { &*waker });
     let waker = unsafe { (*waker).clone_rust_waker() };
     let mut context = std::task::Context::from_waker(&waker);
-    let result = if interest.contains(IoInterest::WRITABLE) {
-        registration.io.poll_write_ready(&mut context)
-    } else {
-        registration.io.poll_read_ready(&mut context)
-    };
+    let result = registration.with(|registration| {
+        let ready = if interest.contains(IoInterest::WRITABLE) {
+            registration.io.poll_write_ready(&mut context)
+        } else {
+            registration.io.poll_read_ready(&mut context)
+        };
+        ready.map(|ready| ready.map(|guard| map_ready(guard.ready())))
+    });
     match result {
-        std::task::Poll::Pending => io_poll(Poll::Pending, call_ok(), IoReady::empty()),
-        std::task::Poll::Ready(Ok(guard)) => {
-            io_poll(Poll::Ready, call_ok(), map_ready(guard.ready()))
-        }
-        std::task::Poll::Ready(Err(error)) => io_poll_error(Poll::Ready, error, IoReady::SHUTDOWN),
+        Err(error) => io_poll_error(Poll::Ready, io::Error::other(error), IoReady::SHUTDOWN),
+        Ok(result) => match result {
+            std::task::Poll::Pending => io_poll(Poll::Pending, call_ok(), IoReady::empty()),
+            std::task::Poll::Ready(Ok(ready)) => io_poll(Poll::Ready, call_ok(), ready),
+            std::task::Poll::Ready(Err(error)) => {
+                io_poll_error(Poll::Ready, error, IoReady::SHUTDOWN)
+            }
+        },
     }
 }
 
@@ -264,7 +264,21 @@ unsafe extern "C" fn poll_registration(
     interest: IoInterest,
     waker: *const Waker,
 ) -> IoPoll {
-    let registration = unsafe { &*data.cast::<Registration>() };
+    let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
+    registration.update_waker(unsafe { &*waker });
+    registration
+        .with(|registration| poll_windows_registration(registration, interest, waker))
+        .unwrap_or_else(|error| {
+            io_poll_error(Poll::Ready, io::Error::other(error), IoReady::SHUTDOWN)
+        })
+}
+
+#[cfg(windows)]
+fn poll_windows_registration(
+    registration: &Registration,
+    interest: IoInterest,
+    waker: *const Waker,
+) -> IoPoll {
     if let WindowsIo::Socket(io) = &registration.io {
         let slot = if interest.contains(IoInterest::WRITABLE) {
             &registration.write
@@ -321,11 +335,21 @@ unsafe extern "C" fn ready(
     data: *mut std::ffi::c_void,
     interest: IoInterest,
 ) -> telekio::IoOperation {
-    let registration = unsafe { &*data.cast::<Registration>() };
-    let future = operation_ready(registration.io.clone(), interest);
+    let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
+    let Some(owner) = registration.owner.upgrade() else {
+        return telekio::IoOperation::empty();
+    };
+    let Ok(future) =
+        registration.with(|registration| operation_ready(registration.io.clone(), interest))
+    else {
+        return telekio::IoOperation::empty();
+    };
+    let Ok(operation) = HostResource::new(&owner, Operation { future }) else {
+        return telekio::IoOperation::empty();
+    };
     unsafe {
         telekio::IoOperation::from_raw(
-            Box::into_raw(Box::new(Operation { future })).cast(),
+            Arc::into_raw(operation).cast_mut().cast(),
             poll_operation,
             release_operation,
         )
@@ -362,8 +386,13 @@ fn poll_ready(
 
 #[cfg(any(unix, windows))]
 unsafe extern "C" fn poll_operation(data: *mut std::ffi::c_void, waker: *const Waker) -> IoPoll {
-    let operation = unsafe { &mut *data.cast::<Operation>() };
-    poll_completion(operation.future.as_mut(), waker)
+    let operation = unsafe { &*data.cast::<HostResource<Operation>>() };
+    operation.update_waker(unsafe { &*waker });
+    operation
+        .with_mut(|operation| poll_completion(operation.future.as_mut(), waker))
+        .unwrap_or_else(|error| {
+            io_poll_error(Poll::Ready, io::Error::other(error), IoReady::SHUTDOWN)
+        })
 }
 
 #[cfg(any(unix, windows))]
@@ -441,7 +470,16 @@ fn pipe_error(error: io::Error) -> IoPoll {
 
 #[cfg(windows)]
 unsafe extern "C" fn try_operate(data: *mut std::ffi::c_void, request: IoRequest) -> IoPoll {
-    let registration = unsafe { &*data.cast::<Registration>() };
+    let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
+    registration
+        .with(|registration| try_operate_inner(registration, request))
+        .unwrap_or_else(|error| {
+            io_poll_error(Poll::Ready, io::Error::other(error), IoReady::SHUTDOWN)
+        })
+}
+
+#[cfg(windows)]
+fn try_operate_inner(registration: &Registration, request: IoRequest) -> IoPoll {
     let WindowsIo::Pipe(pipe) = &registration.io else {
         return pipe_error(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -507,35 +545,43 @@ unsafe extern "C" fn try_operate(_: *mut std::ffi::c_void, _: IoRequest) -> IoPo
 
 #[cfg(unix)]
 unsafe extern "C" fn try_ready(data: *mut std::ffi::c_void, interest: IoInterest) -> IoPoll {
-    let registration = unsafe { &*data.cast::<Registration>() };
-    match host_interest(interest) {
-        Ok(interest) => match registration.io.try_io(interest, |_| Ok(())) {
-            Ok(()) => io_poll(Poll::Ready, call_ok(), interest_ready(interest)),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                io_poll(Poll::Pending, call_ok(), IoReady::empty())
-            }
-            Err(error) => io_poll_error(Poll::Ready, error, IoReady::SHUTDOWN),
-        },
-        Err(error) => io_poll_error(Poll::Ready, error, IoReady::empty()),
-    }
-}
-
-#[cfg(windows)]
-unsafe extern "C" fn try_ready(data: *mut std::ffi::c_void, interest: IoInterest) -> IoPoll {
-    let registration = unsafe { &*data.cast::<Registration>() };
-    match host_interest(interest) {
-        Ok(interest) => {
-            let result = registration.io.try_io(interest, || Ok(()));
-            match result {
+    let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
+    registration
+        .with(|registration| match host_interest(interest) {
+            Ok(interest) => match registration.io.try_io(interest, |_| Ok(())) {
                 Ok(()) => io_poll(Poll::Ready, call_ok(), interest_ready(interest)),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     io_poll(Poll::Pending, call_ok(), IoReady::empty())
                 }
                 Err(error) => io_poll_error(Poll::Ready, error, IoReady::SHUTDOWN),
+            },
+            Err(error) => io_poll_error(Poll::Ready, error, IoReady::empty()),
+        })
+        .unwrap_or_else(|error| {
+            io_poll_error(Poll::Ready, io::Error::other(error), IoReady::SHUTDOWN)
+        })
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn try_ready(data: *mut std::ffi::c_void, interest: IoInterest) -> IoPoll {
+    let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
+    registration
+        .with(|registration| match host_interest(interest) {
+            Ok(interest) => {
+                let result = registration.io.try_io(interest, || Ok(()));
+                match result {
+                    Ok(()) => io_poll(Poll::Ready, call_ok(), interest_ready(interest)),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        io_poll(Poll::Pending, call_ok(), IoReady::empty())
+                    }
+                    Err(error) => io_poll_error(Poll::Ready, error, IoReady::SHUTDOWN),
+                }
             }
-        }
-        Err(error) => io_poll_error(Poll::Ready, error, IoReady::empty()),
-    }
+            Err(error) => io_poll_error(Poll::Ready, error, IoReady::empty()),
+        })
+        .unwrap_or_else(|error| {
+            io_poll_error(Poll::Ready, io::Error::other(error), IoReady::SHUTDOWN)
+        })
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -565,22 +611,26 @@ fn interest_ready(interest: tokio::io::Interest) -> IoReady {
 
 #[cfg(unix)]
 unsafe extern "C" fn clear(data: *mut std::ffi::c_void, ready: IoReady) {
-    let registration = unsafe { &*data.cast::<Registration>() };
-    for interest in clear_interests(ready) {
-        let _ = registration
-            .io
-            .try_io(interest, |_| Err::<(), _>(io::ErrorKind::WouldBlock.into()));
-    }
+    let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
+    let _ = registration.with(|registration| {
+        for interest in clear_interests(ready) {
+            let _ = registration
+                .io
+                .try_io(interest, |_| Err::<(), _>(io::ErrorKind::WouldBlock.into()));
+        }
+    });
 }
 
 #[cfg(windows)]
 unsafe extern "C" fn clear(data: *mut std::ffi::c_void, ready: IoReady) {
-    let registration = unsafe { &*data.cast::<Registration>() };
-    for interest in clear_interests(ready) {
-        let _ = registration
-            .io
-            .try_io(interest, || Err::<(), _>(io::ErrorKind::WouldBlock.into()));
-    }
+    let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
+    let _ = registration.with(|registration| {
+        for interest in clear_interests(ready) {
+            let _ = registration
+                .io
+                .try_io(interest, || Err::<(), _>(io::ErrorKind::WouldBlock.into()));
+        }
+    });
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -589,7 +639,7 @@ unsafe extern "C" fn clear(_: *mut std::ffi::c_void, _: IoReady) {}
 
 #[cfg(any(unix, windows))]
 unsafe extern "C" fn release_registration(data: *mut std::ffi::c_void) {
-    drop(unsafe { Box::from_raw(data.cast::<Registration>()) });
+    unsafe { Arc::from_raw(data.cast::<HostResource<Registration>>()) }.release();
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -598,7 +648,7 @@ unsafe extern "C" fn release_registration(_: *mut std::ffi::c_void) {}
 
 #[cfg(any(unix, windows))]
 unsafe extern "C" fn release_operation(data: *mut std::ffi::c_void) {
-    drop(unsafe { Box::from_raw(data.cast::<Operation>()) });
+    unsafe { Arc::from_raw(data.cast::<HostResource<Operation>>()) }.release();
 }
 
 #[cfg(any(unix, windows))]

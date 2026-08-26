@@ -1,6 +1,4 @@
-use super::{
-    AbortHandle, Header, Notified, OwnedTasks, Schedule, Task, UnownedTask,
-};
+use super::{AbortHandle, Header, Notified, OwnedTasks, Schedule, Task, UnownedTask};
 use crate::runtime::task;
 use std::{
     collections::HashMap,
@@ -8,8 +6,8 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll, Waker},
     time::Duration,
@@ -18,6 +16,7 @@ use std::{
 pub(crate) trait HostSchedule: Schedule + Clone + Send + Sync + 'static {
     fn registry(&self) -> &Registry<Self>;
     fn run(&self, task: Notified<Self>);
+    fn enter<R>(&self, call: impl FnOnce() -> R) -> R;
 }
 
 pub(crate) struct Host {
@@ -42,7 +41,8 @@ struct RunnerTask<S: HostSchedule> {
     runner: Arc<Runner<S>>,
 }
 
-struct BlockingRunner<S: Schedule> {
+struct BlockingRunner<S: HostSchedule> {
+    schedule: S,
     task: Option<UnownedTask<S>>,
 }
 
@@ -67,6 +67,14 @@ impl Host {
             handle: runtime.handle(),
             runtime,
         })
+    }
+
+    pub(crate) fn defer(&self, waker: &::telekio::Waker) -> ::telekio::CallResult {
+        self.handle.defer(waker)
+    }
+
+    pub(crate) fn metric(&self, metric: ::telekio::Metric, worker: usize) -> u64 {
+        self.handle.metric(metric, worker)
     }
 
     pub(crate) fn runtime_block_on<F: std::future::Future>(&self, future: F) -> F::Output {
@@ -208,8 +216,12 @@ impl<S: HostSchedule> Registry<S> {
             crate::util::trace::SpawnMeta::new_unnamed(size),
             id.as_u64(),
         );
+        let runner_schedule = schedule.clone();
         let (task, join) = task::unowned(future, schedule, id, spawned_at);
-        let runner = Box::new(BlockingRunner { task: Some(task) });
+        let runner = Box::new(BlockingRunner {
+            schedule: runner_schedule,
+            task: Some(task),
+        });
         let task = ::telekio::BlockingTask {
             data: Box::into_raw(runner).cast(),
             run: run_blocking::<S>,
@@ -286,7 +298,9 @@ unsafe extern "C" fn poll_runner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
     waker: *const ::telekio::Waker,
 ) -> ::telekio::Poll {
-    match catch_unwind(AssertUnwindSafe(|| unsafe { poll_runner_inner::<S>(data, waker) })) {
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
+        poll_runner_inner::<S>(data, waker)
+    })) {
         Ok(poll) => poll,
         Err(_) => {
             let task = unsafe { &mut *data.cast::<RunnerTask<S>>() };
@@ -334,18 +348,22 @@ unsafe extern "C" fn release_runner<S: HostSchedule>(data: *mut std::ffi::c_void
     drop(unsafe { Box::from_raw(data.cast::<RunnerTask<S>>()) });
 }
 
-unsafe extern "C" fn run_blocking<S: Schedule>(data: *mut std::ffi::c_void) {
+unsafe extern "C" fn run_blocking<S: HostSchedule>(data: *mut std::ffi::c_void) {
     let runner = unsafe { &mut *data.cast::<BlockingRunner<S>>() };
-    runner.task.take().expect("blocking task ran twice").run();
+    let schedule = runner.schedule.clone();
+    schedule.enter(|| runner.task.take().expect("blocking task ran twice").run());
 }
 
-unsafe extern "C" fn cancel_blocking<S: Schedule>(data: *mut std::ffi::c_void) {
+unsafe extern "C" fn cancel_blocking<S: HostSchedule>(data: *mut std::ffi::c_void) {
     let runner = unsafe { &mut *data.cast::<BlockingRunner<S>>() };
-    if let Some(task) = runner.task.take() {
-        task.shutdown();
-    }
+    let schedule = runner.schedule.clone();
+    schedule.enter(|| {
+        if let Some(task) = runner.task.take() {
+            task.shutdown();
+        }
+    });
 }
 
-unsafe extern "C" fn release_blocking<S: Schedule>(data: *mut std::ffi::c_void) {
+unsafe extern "C" fn release_blocking<S: HostSchedule>(data: *mut std::ffi::c_void) {
     drop(unsafe { Box::from_raw(data.cast::<BlockingRunner<S>>()) });
 }

@@ -2,17 +2,14 @@ use super::*;
 use crate::runtime::task::telekio::{Host, HostSchedule, Registry};
 
 impl CurrentThread {
-    pub(crate) fn block_on<F: Future>(
-        &self,
-        handle: &scheduler::Handle,
-        future: F,
-    ) -> F::Output {
+    #[track_caller]
+    pub(crate) fn block_on<F: Future>(&self, handle: &scheduler::Handle, future: F) -> F::Output {
         crate::runtime::context::enter_runtime(handle, false, |_| {
             handle
                 .as_current_thread()
                 .telekio
                 .host()
-                .runtime_block_on(task::telekio::budget(future))
+                .runtime_block_on(context::telekio::active(task::telekio::budget(future)))
         })
     }
 }
@@ -46,12 +43,22 @@ impl HostSchedule for Arc<Handle> {
         })
         .unwrap_or(false);
         if current {
-            crate::task::coop::budget(|| self.shared.owned.assert_owner(task).run());
+            context::telekio::enter(|| {
+                crate::task::coop::budget(|| self.shared.owned.assert_owner(task).run())
+            });
         } else {
             let handle = scheduler::Handle::CurrentThread(Arc::clone(self));
             context::enter_runtime(&handle, false, |_| {
-                crate::task::coop::budget(|| self.shared.owned.assert_owner(task).run())
+                context::telekio::enter(|| {
+                    crate::task::coop::budget(|| self.shared.owned.assert_owner(task).run())
+                })
             });
         }
+    }
+
+    fn enter<R>(&self, call: impl FnOnce() -> R) -> R {
+        let handle = scheduler::Handle::CurrentThread(Arc::clone(self));
+        let _guard = context::try_set_current(&handle);
+        call()
     }
 }

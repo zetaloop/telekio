@@ -19,6 +19,7 @@ where
         data: (&raw mut state).cast(),
         run: run::<F, R>,
     });
+    context::telekio::restore();
     match (call.status, state.result) {
         (::telekio::Status::Ok, Some(Ok(output))) => {
             unsafe { call.payload.release() };
@@ -42,12 +43,7 @@ where
 {
     let state = unsafe { &mut *data.cast::<BlockingState<F, R>>() };
     match catch_unwind(AssertUnwindSafe(|| {
-        context::exit_runtime(|| {
-            state
-                .function
-                .take()
-                .expect("blocking function ran twice")()
-        })
+        context::exit_runtime(|| state.function.take().expect("blocking function ran twice")())
     })) {
         Ok(output) => {
             state.result = Some(Ok(output));

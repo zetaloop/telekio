@@ -1,26 +1,22 @@
 use super::*;
 use crate::runtime::context;
-use crate::runtime::task::{self, telekio::{Host, HostSchedule, Registry}};
+use crate::runtime::task::{
+    self,
+    telekio::{Host, HostSchedule, Registry},
+};
 
 impl MultiThread {
-    pub(crate) fn block_on<F>(
-        &self,
-        handle: &scheduler::Handle,
-        future: F,
-    ) -> F::Output
+    #[track_caller]
+    pub(crate) fn block_on<F>(&self, handle: &scheduler::Handle, future: F) -> F::Output
     where
         F: Future,
     {
-        crate::runtime::context::enter_runtime(handle, true, |_| {
-            match handle {
-                scheduler::Handle::MultiThread(handle) => {
-                    handle
-                        .telekio
-                        .host()
-                        .runtime_block_on(task::telekio::budget(future))
-                }
-                _ => unreachable!("expected MultiThread scheduler"),
-            }
+        crate::runtime::context::enter_runtime(handle, true, |_| match handle {
+            scheduler::Handle::MultiThread(handle) => handle
+                .telekio
+                .host()
+                .runtime_block_on(context::telekio::active(task::telekio::budget(future))),
+            _ => unreachable!("expected MultiThread scheduler"),
         })
     }
 }
@@ -34,10 +30,7 @@ impl Handle {
         task.schedule_host(false);
     }
 
-    pub(super) fn schedule_host_option(
-        self: &Arc<Self>,
-        task: Option<task::Notified<Arc<Self>>>,
-    ) {
+    pub(super) fn schedule_host_option(self: &Arc<Self>, task: Option<task::Notified<Arc<Self>>>) {
         if let Some(task) = task {
             self.schedule_host_task(task, false);
         }
@@ -56,13 +49,23 @@ impl HostSchedule for Arc<Handle> {
         })
         .unwrap_or(false);
         if current {
-            crate::task::coop::budget(|| self.shared.owned.assert_owner(task).run());
+            context::telekio::enter(|| {
+                crate::task::coop::budget(|| self.shared.owned.assert_owner(task).run())
+            });
         } else {
             let handle = scheduler::Handle::MultiThread(Arc::clone(self));
             context::enter_runtime(&handle, true, |_| {
-                crate::task::coop::budget(|| self.shared.owned.assert_owner(task).run())
+                context::telekio::enter(|| {
+                    crate::task::coop::budget(|| self.shared.owned.assert_owner(task).run())
+                })
             });
         }
+    }
+
+    fn enter<R>(&self, call: impl FnOnce() -> R) -> R {
+        let handle = scheduler::Handle::MultiThread(Arc::clone(self));
+        let _guard = context::try_set_current(&handle);
+        call()
     }
 }
 

@@ -7,9 +7,9 @@ fn attached() -> ::telekio::Handle {
 
 #[cfg(feature = "telekio-test")]
 fn attached() -> ::telekio::Handle {
-    static HOST: std::sync::OnceLock<::telekio_host::Runtime> = std::sync::OnceLock::new();
-    let host = HOST.get_or_init(|| ::telekio_host::Runtime::new().unwrap());
-    let _ = ::telekio::attach(host.runtime());
+    static HOST: std::sync::OnceLock<::telekio_host::Owner> = std::sync::OnceLock::new();
+    let owner = HOST.get_or_init(|| ::telekio_host::Runtime::new().unwrap().owner());
+    let _ = ::telekio::attach(owner.runtime());
     ::telekio::attached()
 }
 

@@ -2,6 +2,7 @@ use std::{
     ffi::c_void,
     io,
     panic::{AssertUnwindSafe, catch_unwind},
+    sync::Arc,
     task::{Context, Poll as RustPoll},
 };
 
@@ -10,7 +11,7 @@ use telekio::{
     Status, Waker,
 };
 
-use super::HandleContext;
+use super::{HandleContext, HostResource};
 
 trait Receiver: Send {
     fn poll_recv(&mut self, context: &mut Context<'_>) -> RustPoll<()>;
@@ -55,15 +56,25 @@ pub(super) unsafe extern "C" fn signal(
 ) -> SignalResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     match catch_unwind(AssertUnwindSafe(|| create(context, request))) {
-        Ok(Ok(receiver)) => SignalResult {
-            call: call_ok(),
-            error: IoError::none(),
-            signal: unsafe {
-                telekio::Signal::from_raw(
-                    Box::into_raw(Box::new(Signal { receiver })).cast(),
-                    poll,
-                    release,
-                )
+        Ok(Ok(receiver)) => match HostResource::new(&context.owner, Signal { receiver }) {
+            Ok(signal) => SignalResult {
+                call: call_ok(),
+                error: IoError::none(),
+                signal: unsafe {
+                    telekio::Signal::from_raw(
+                        Arc::into_raw(signal).cast_mut().cast(),
+                        poll,
+                        release,
+                    )
+                },
+            },
+            Err(error) => SignalResult {
+                call: CallResult {
+                    status: Status::Error,
+                    payload: OwnedBytes::from_string(error),
+                },
+                error: IoError::none(),
+                signal: telekio::Signal::empty(),
             },
         },
         Ok(Err(error)) => SignalResult {
@@ -124,20 +135,30 @@ fn create(_: &HandleContext, _: SignalRequest) -> io::Result<Box<dyn Receiver>> 
 }
 
 unsafe extern "C" fn poll(data: *mut c_void, waker: *const Waker) -> OperationPoll {
-    let signal = unsafe { &mut *data.cast::<Signal>() };
+    let signal = unsafe { &*data.cast::<HostResource<Signal>>() };
+    signal.update_waker(unsafe { &*waker });
     let waker = unsafe { (*waker).clone_rust_waker() };
     let mut context = Context::from_waker(&waker);
-    OperationPoll {
-        state: match signal.receiver.poll_recv(&mut context) {
-            RustPoll::Pending => Poll::Pending,
-            RustPoll::Ready(()) => Poll::Ready,
+    match signal.with_mut(|signal| signal.receiver.poll_recv(&mut context)) {
+        Ok(state) => OperationPoll {
+            state: match state {
+                RustPoll::Pending => Poll::Pending,
+                RustPoll::Ready(()) => Poll::Ready,
+            },
+            call: call_ok(),
         },
-        call: call_ok(),
+        Err(error) => OperationPoll {
+            state: Poll::Ready,
+            call: CallResult {
+                status: Status::Error,
+                payload: OwnedBytes::from_string(error),
+            },
+        },
     }
 }
 
 unsafe extern "C" fn release(data: *mut c_void) {
-    drop(unsafe { Box::from_raw(data.cast::<Signal>()) });
+    unsafe { Arc::from_raw(data.cast::<HostResource<Signal>>()) }.release();
 }
 
 fn call_ok() -> CallResult {

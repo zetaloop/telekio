@@ -281,6 +281,40 @@ pub fn append_record_fields(
     commit(source, editor)
 }
 
+pub fn remove_use(source: &mut String, name: &str) -> Result<(), Box<dyn Error>> {
+    let (editor, root) = open(source)?;
+    let tree = one(
+        root.descendants()
+            .filter_map(ast::UseTree::cast)
+            .filter(|tree| {
+                tree.path()
+                    .and_then(|path| path.segment())
+                    .and_then(|segment| segment.name_ref())
+                    .is_some_and(|candidate| candidate.text() == name)
+                    && tree.rename().is_none()
+            }),
+        &format!("use tree `{name}`"),
+    )?;
+    if tree
+        .syntax()
+        .ancestors()
+        .find_map(ast::UseTreeList::cast)
+        .is_some()
+    {
+        for element in use_tree_removal(&tree) {
+            editor.delete(element);
+        }
+    } else {
+        let item = tree
+            .syntax()
+            .ancestors()
+            .find_map(ast::Use::cast)
+            .ok_or("use tree has no use item")?;
+        editor.delete(item.syntax().clone());
+    }
+    commit(source, editor)
+}
+
 pub fn retarget_use(source: &mut String, name: &str, path: &str) -> Result<(), Box<dyn Error>> {
     if retarget_use_in(source, name, path)? {
         Ok(())
@@ -489,6 +523,10 @@ pub enum Scope<'a> {
         owner: &'a str,
         name: &'a str,
     },
+    FunctionArgument {
+        name: &'a str,
+        call: Call<'a>,
+    },
     MethodArgument {
         owner: &'a str,
         name: &'a str,
@@ -662,7 +700,7 @@ impl Scope<'_> {
                         .is_some_and(|ty| ty.syntax().text() == owner)
                 })
                 .map(|_| Self::Function(name)),
-            Self::MethodArgument { .. } => None,
+            Self::FunctionArgument { .. } | Self::MethodArgument { .. } => None,
         }
     }
 
@@ -684,26 +722,40 @@ impl Scope<'_> {
                     _ => Err(format!("more than one method `{owner}::{name}`").into()),
                 }
             }
+            Self::FunctionArgument { name, call } => {
+                let Some(scope) = (Self::Function(name)).resolve(root)? else {
+                    return Ok(None);
+                };
+                closure_argument(&scope, call, name)
+            }
             Self::MethodArgument { owner, name, call } => {
                 let Some(scope) = (Self::Method { owner, name }).resolve(root)? else {
                     return Ok(None);
                 };
-                let call_name = match call {
-                    Call::Function(name) | Call::Method(name) => name,
-                };
-                let arguments = call_arguments(&scope, call)?
-                    .ok_or_else(|| format!("no `{call_name}` call in `{owner}::{name}`"))?;
-                let closure = one(
-                    arguments.args().filter_map(|argument| match argument {
-                        ast::Expr::ClosureExpr(closure) => Some(closure),
-                        _ => None,
-                    }),
-                    &format!("closure argument to `{call_name}` in `{owner}::{name}`"),
-                )?;
-                Ok(Some(closure.syntax().clone()))
+                closure_argument(&scope, call, &format!("{owner}::{name}"))
             }
         }
     }
+}
+
+fn closure_argument(
+    scope: &SyntaxNode,
+    call: Call<'_>,
+    owner: &str,
+) -> Result<Option<SyntaxNode>, Box<dyn Error>> {
+    let call_name = match call {
+        Call::Function(name) | Call::Method(name) => name,
+    };
+    let arguments = call_arguments(scope, call)?
+        .ok_or_else(|| format!("no `{call_name}` call in `{owner}`"))?;
+    let closure = one(
+        arguments.args().filter_map(|argument| match argument {
+            ast::Expr::ClosureExpr(closure) => Some(closure),
+            _ => None,
+        }),
+        &format!("closure argument to `{call_name}` in `{owner}`"),
+    )?;
+    Ok(Some(closure.syntax().clone()))
 }
 
 fn retain_outermost(
