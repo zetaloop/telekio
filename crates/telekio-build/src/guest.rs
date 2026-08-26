@@ -131,18 +131,20 @@ fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
         )?;
         edit::redirect_call(
             source,
-            edit::Scope::Method {
+            edit::Scope::MethodArgument {
                 owner: "Arc<Handle>",
                 name: "schedule",
+                call: edit::Call::Function("context::with_scheduler"),
             },
             "push_task",
             "push_host_task",
         )?;
         edit::redirect_call(
             source,
-            edit::Scope::Method {
+            edit::Scope::MethodArgument {
                 owner: "Arc<Handle>",
                 name: "schedule",
+                call: edit::Call::Function("context::with_scheduler"),
             },
             "push",
             "push_host_task",
@@ -403,7 +405,7 @@ fn patch_time(generated: &Path) -> Result<(), Box<dyn Error>> {
         edit::delegate_closure(
             source,
             edit::Scope::Function("pause"),
-            "with_clock",
+            edit::Call::Function("with_clock"),
             0,
             "telekio::pause",
             &[],
@@ -412,7 +414,7 @@ fn patch_time(generated: &Path) -> Result<(), Box<dyn Error>> {
         edit::delegate_closure(
             source,
             edit::Scope::Function("resume"),
-            "with_clock",
+            edit::Call::Function("with_clock"),
             0,
             "telekio::resume",
             &[],
@@ -421,7 +423,7 @@ fn patch_time(generated: &Path) -> Result<(), Box<dyn Error>> {
         edit::delegate_closure(
             source,
             edit::Scope::Function("advance"),
-            "with_clock",
+            edit::Call::Function("with_clock"),
             0,
             "telekio::advance",
             &["duration"],
@@ -430,7 +432,7 @@ fn patch_time(generated: &Path) -> Result<(), Box<dyn Error>> {
         edit::delegate_closure(
             source,
             edit::Scope::Function("now"),
-            "with_clock",
+            edit::Call::Function("with_clock"),
             0,
             "telekio::now",
             &[],
@@ -542,9 +544,10 @@ fn patch_context(path: &Path) -> Result<(), Box<dyn Error>> {
         |source| {
             edit::redirect_call(
                 source,
-                edit::Scope::Method {
+                edit::Scope::MethodArgument {
                     owner: "Handle",
                     name: "block_on_inner",
+                    call: edit::Call::Function("context::enter_runtime"),
                 },
                 "block_on",
                 "block_on_host",

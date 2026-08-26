@@ -250,8 +250,7 @@ pub fn append_record_fields(
         .resolve(&root)?
         .ok_or("record initializer scope was not found")?;
     let record = one(
-        scope
-            .descendants()
+        scope_descendants(&scope)
             .filter_map(ast::RecordExpr::cast)
             .filter(|expression| {
                 expression.path().is_some_and(|path| {
@@ -363,64 +362,54 @@ fn retarget_use_in(source: &mut String, name: &str, path: &str) -> Result<bool, 
     Ok(true)
 }
 
+#[derive(Clone, Copy)]
+pub enum Call<'a> {
+    Function(&'a str),
+    #[expect(dead_code)]
+    Method(&'a str),
+}
+
 pub fn delegate_closure(
     source: &mut String,
     scope: Scope<'_>,
-    callee: &str,
+    call: Call<'_>,
     index: usize,
     helper: &str,
     context: &[&str],
 ) -> Result<(), Box<dyn Error>> {
-    if delegate_closure_in(source, scope, callee, index, helper, context)? {
+    if delegate_closure_in(source, scope, call, index, helper, context)? {
         Ok(())
     } else {
-        Err(format!("scope for `{callee}` call was not found").into())
+        Err("closure call was not found in selected scope".into())
     }
 }
 
 fn delegate_closure_in(
     source: &mut String,
     scope: Scope<'_>,
-    callee: &str,
+    call: Call<'_>,
     index: usize,
     helper: &str,
     context: &[&str],
 ) -> Result<bool, Box<dyn Error>> {
     let (editor, root) = open(source)?;
     if let Some(scope) = scope.resolve(&root)? {
-        let calls = scope
-            .descendants()
-            .filter_map(ast::CallExpr::cast)
-            .filter_map(|call| match call.expr() {
-                Some(ast::Expr::PathExpr(path)) => path
-                    .path()
-                    .map(|path| (path.syntax().text().to_string(), call)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let calls = calls
-            .iter()
-            .filter(|(path, _)| path == callee)
-            .map(|(_, call)| call.clone())
-            .collect::<Vec<_>>();
-        let call = match calls.as_slice() {
-            [] => return Ok(false),
-            [call] => call.clone(),
-            _ => return Err(format!("more than one `{callee}` call in selected scope").into()),
+        let Some(arguments) = call_arguments(&scope, call)? else {
+            return Ok(false);
         };
-        let argument = call
-            .arg_list()
-            .and_then(|arguments| arguments.args().nth(index))
-            .ok_or_else(|| format!("`{callee}` has no argument {index}"))?;
-        if !matches!(argument, ast::Expr::ClosureExpr(_)) {
-            return Err(format!("argument {index} to `{callee}` is not a closure").into());
-        }
-        let mut arguments = context
+        let argument = arguments
+            .args()
+            .nth(index)
+            .ok_or_else(|| format!("closure argument {index} is missing"))?;
+        let ast::Expr::ClosureExpr(closure) = argument.clone() else {
+            return Err("selected argument is not a closure".into());
+        };
+        let mut helper_arguments = context
             .iter()
             .map(|source| expression(source))
             .collect::<Result<Vec<_>, _>>()?;
-        arguments.push(argument.clone());
-        let delegate = make::expr_call(expression(helper)?, make::arg_list(arguments));
+        helper_arguments.push(ast::Expr::ClosureExpr(closure));
+        let delegate = make::expr_call(expression(helper)?, make::arg_list(helper_arguments));
         editor.replace(argument.syntax(), delegate.syntax().clone());
         commit(source, editor)?;
         return Ok(true);
@@ -428,6 +417,9 @@ fn delegate_closure_in(
 
     let mut replacements = Vec::new();
     for source_tree in root.descendants().filter_map(ast::TokenTree::cast) {
+        let Some(inner_scope) = scope.inside(&source_tree) else {
+            continue;
+        };
         let text = source_tree.syntax().text().to_string();
         let Some(mut inner) = text
             .strip_prefix('{')
@@ -437,7 +429,7 @@ fn delegate_closure_in(
             continue;
         };
         if parse(&inner).is_err()
-            || !delegate_closure_in(&mut inner, scope, callee, index, helper, context)?
+            || !delegate_closure_in(&mut inner, inner_scope, call, index, helper, context)?
         {
             continue;
         }
@@ -492,7 +484,68 @@ pub fn mount_module(
 #[derive(Clone, Copy)]
 pub enum Scope<'a> {
     Function(&'a str),
-    Method { owner: &'a str, name: &'a str },
+    Method {
+        owner: &'a str,
+        name: &'a str,
+    },
+    MethodArgument {
+        owner: &'a str,
+        name: &'a str,
+        call: Call<'a>,
+    },
+}
+
+fn scope_descendants(scope: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
+    scope
+        .descendants()
+        .filter(|node| node_is_in_scope(node, scope))
+}
+
+fn node_is_in_scope(node: &SyntaxNode, scope: &SyntaxNode) -> bool {
+    if ast::ClosureExpr::can_cast(scope.kind()) {
+        return node
+            .ancestors()
+            .find(|ancestor| ast::ClosureExpr::can_cast(ancestor.kind()))
+            .is_some_and(|closure| closure == *scope);
+    }
+
+    for ancestor in node.ancestors() {
+        if ancestor == *scope {
+            return true;
+        }
+        if ast::ClosureExpr::can_cast(ancestor.kind()) || ast::Fn::can_cast(ancestor.kind()) {
+            return false;
+        }
+    }
+    false
+}
+
+fn call_arguments(
+    scope: &SyntaxNode,
+    call: Call<'_>,
+) -> Result<Option<ast::ArgList>, Box<dyn Error>> {
+    let name = match call {
+        Call::Function(name) | Call::Method(name) => name,
+    };
+    let arguments = match call {
+        Call::Function(name) => scope_descendants(scope)
+            .filter_map(ast::CallExpr::cast)
+            .filter(|call| {
+                matches!(call.expr(), Some(ast::Expr::PathExpr(path)) if path.path().is_some_and(|path| path.syntax().text() == name))
+            })
+            .filter_map(|call| call.arg_list())
+            .collect::<Vec<_>>(),
+        Call::Method(name) => scope_descendants(scope)
+            .filter_map(ast::MethodCallExpr::cast)
+            .filter(|call| call.name_ref().is_some_and(|candidate| candidate.text() == name))
+            .filter_map(|call| call.arg_list())
+            .collect::<Vec<_>>(),
+    };
+    match arguments.as_slice() {
+        [] => Ok(None),
+        [arguments] => Ok(Some(arguments.clone())),
+        _ => Err(format!("more than one `{name}` call in selected scope").into()),
+    }
 }
 
 pub fn redirect_call(
@@ -516,13 +569,11 @@ fn redirect_call_in(
 ) -> Result<bool, Box<dyn Error>> {
     let (editor, root) = open(source)?;
     if let Some(scope) = scope.resolve(&root)? {
-        let methods = scope
-            .descendants()
+        let methods = scope_descendants(&scope)
             .filter_map(ast::MethodCallExpr::cast)
             .filter(|call| call.name_ref().is_some_and(|name| name.text() == from))
             .filter_map(|call| call.name_ref().map(|name| (name.syntax().clone(), true)));
-        let functions = scope
-            .descendants()
+        let functions = scope_descendants(&scope)
             .filter_map(ast::CallExpr::cast)
             .filter_map(|call| match call.expr() {
                 Some(ast::Expr::PathExpr(expression)) => expression.path(),
@@ -550,6 +601,9 @@ fn redirect_call_in(
 
     let mut replacements = Vec::new();
     for source_tree in root.descendants().filter_map(ast::TokenTree::cast) {
+        let Some(inner_scope) = scope.inside(&source_tree) else {
+            continue;
+        };
         let text = source_tree.syntax().text().to_string();
         let Some(mut inner) = text
             .strip_prefix('{')
@@ -558,7 +612,7 @@ fn redirect_call_in(
         else {
             continue;
         };
-        if parse(&inner).is_err() || !redirect_call_in(&mut inner, scope, from, to)? {
+        if parse(&inner).is_err() || !redirect_call_in(&mut inner, inner_scope, from, to)? {
             continue;
         }
         let replacement = parse(&format!("replacement! {{ {inner} }}"))?
@@ -594,6 +648,23 @@ fn redirect_call_in(
 }
 
 impl Scope<'_> {
+    fn inside(self, tree: &ast::TokenTree) -> Option<Self> {
+        match self {
+            Self::Function(_) => Some(self),
+            Self::Method { owner, name } => tree
+                .syntax()
+                .ancestors()
+                .find_map(ast::Impl::cast)
+                .filter(|implementation| {
+                    implementation
+                        .self_ty()
+                        .is_some_and(|ty| ty.syntax().text() == owner)
+                })
+                .map(|_| Self::Function(name)),
+            Self::MethodArgument { .. } => None,
+        }
+    }
+
     fn resolve(self, root: &SyntaxNode) -> Result<Option<SyntaxNode>, Box<dyn Error>> {
         match self {
             Self::Function(name) => function(root, name)
@@ -611,6 +682,24 @@ impl Scope<'_> {
                     [method] => Ok(Some(method.syntax().clone())),
                     _ => Err(format!("more than one method `{owner}::{name}`").into()),
                 }
+            }
+            Self::MethodArgument { owner, name, call } => {
+                let Some(scope) = (Self::Method { owner, name }).resolve(root)? else {
+                    return Ok(None);
+                };
+                let call_name = match call {
+                    Call::Function(name) | Call::Method(name) => name,
+                };
+                let arguments = call_arguments(&scope, call)?
+                    .ok_or_else(|| format!("no `{call_name}` call in `{owner}::{name}`"))?;
+                let closure = one(
+                    arguments.args().filter_map(|argument| match argument {
+                        ast::Expr::ClosureExpr(closure) => Some(closure),
+                        _ => None,
+                    }),
+                    &format!("closure argument to `{call_name}` in `{owner}::{name}`"),
+                )?;
+                Ok(Some(closure.syntax().clone()))
             }
         }
     }
