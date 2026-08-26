@@ -50,9 +50,7 @@ impl Registration {
         interest: Interest,
     ) -> Poll<io::Result<ReadyEvent>> {
         let waker = ::telekio::Waker::from_ref(cx.waker());
-        let result = self
-            .shared
-            .poll_telekio(telekio_interest(interest), &waker);
+        let result = self.shared.poll_telekio(telekio_interest(interest), &waker);
         match result.state {
             ::telekio::Poll::Pending => {
                 unsafe { result.call.payload.release() };
@@ -85,14 +83,16 @@ impl Registration {
         }
     }
 
+    pub(crate) fn try_operate(&self, request: ::telekio::IoRequest) -> ::telekio::IoPoll {
+        self.shared.try_operate_telekio(request)
+    }
+
     pub(crate) fn try_io<R>(
         &self,
         interest: Interest,
         f: impl FnOnce() -> io::Result<R>,
     ) -> io::Result<R> {
-        let result = self
-            .shared
-            .try_ready_telekio(telekio_interest(interest));
+        let result = self.shared.try_ready_telekio(telekio_interest(interest));
         match result.state {
             ::telekio::Poll::Pending => {
                 unsafe { result.call.payload.release() };
@@ -116,9 +116,8 @@ impl Registration {
     }
 
     pub(crate) fn clear_readiness(&self, event: ReadyEvent) {
-        self.shared.clear_telekio(::telekio::IoReady::from_bits(
-            event.ready.as_usize() as u8,
-        ));
+        self.shared
+            .clear_telekio(::telekio::IoReady::from_bits(event.ready.as_usize() as u8));
     }
 }
 

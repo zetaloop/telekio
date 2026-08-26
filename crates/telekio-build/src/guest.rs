@@ -530,6 +530,114 @@ fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
     patch(&generated.join("src/io/async_fd.rs"), |source| {
         edit::retarget_use(source, "SourceFd", "self::telekio::SourceFd")?;
         mount(source, "telekio", "async_fd.rs")
+    })?;
+    patch(&generated.join("src/net/windows/named_pipe.rs"), |source| {
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "NamedPipeServer",
+                name: "connect",
+            },
+            "connect",
+            "connect_host",
+        )?;
+        edit::redirect_call(
+            source,
+            edit::Scope::MethodArgument {
+                owner: "NamedPipeServer",
+                name: "connect",
+                call: edit::Call::Method("async_io"),
+            },
+            "connect",
+            "connect_host",
+        )?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "NamedPipeServer",
+                name: "disconnect",
+            },
+            "disconnect",
+            "disconnect_host",
+        )?;
+        for owner in ["NamedPipeServer", "NamedPipeClient"] {
+            for (method, replacement) in [
+                ("poll_read", "poll_read_host"),
+                ("poll_write", "poll_write_host"),
+                ("poll_write_vectored", "poll_write_vectored_host"),
+            ] {
+                edit::redirect_call(
+                    source,
+                    edit::Scope::Method {
+                        owner,
+                        name: method,
+                    },
+                    method,
+                    replacement,
+                )?;
+            }
+        }
+        for owner in ["NamedPipeServer", "NamedPipeClient"] {
+            for (method, kind, data) in [
+                ("try_read", "Read", "buf.as_mut_ptr()"),
+                ("try_write", "Write", "buf.as_ptr().cast_mut()"),
+            ] {
+                edit::delegate_closure(
+                    source,
+                    edit::Scope::Method {
+                        owner,
+                        name: method,
+                    },
+                    edit::Call::Method("try_io"),
+                    1,
+                    "crate::runtime::io::telekio::delegate",
+                    &[
+                        "self.io.registration()",
+                        &format!("::telekio::IoOperationKind::{kind}"),
+                        data,
+                        "buf.len()",
+                    ],
+                )?;
+            }
+            for (method, helper, data, len) in [
+                (
+                    "try_read_vectored",
+                    "crate::runtime::io::telekio::delegate_read_vectored",
+                    "bufs.as_mut_ptr().cast()",
+                    "bufs.len()",
+                ),
+                (
+                    "try_write_vectored",
+                    "crate::runtime::io::telekio::delegate_write_vectored",
+                    "buf.as_ptr().cast()",
+                    "buf.len()",
+                ),
+            ] {
+                edit::delegate_closure(
+                    source,
+                    edit::Scope::Method {
+                        owner,
+                        name: method,
+                    },
+                    edit::Call::Method("try_io"),
+                    1,
+                    helper,
+                    &["self.io.registration()", data, len],
+                )?;
+            }
+            edit::delegate_closure(
+                source,
+                edit::Scope::Method {
+                    owner,
+                    name: "try_read_buf",
+                },
+                edit::Call::Method("try_io"),
+                1,
+                "crate::runtime::io::telekio::delegate_read_buf",
+                &["self.io.registration()", "std::ptr::from_mut(buf)"],
+            )?;
+        }
+        mount(source, "telekio", "named_pipe.rs")
     })
 }
 

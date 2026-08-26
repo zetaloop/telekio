@@ -1,3 +1,6 @@
+#[cfg(windows)]
+use super::Registration;
+
 pub(crate) trait Source {
     fn telekio_resource(&self) -> ::telekio::IoResource;
 }
@@ -24,12 +27,124 @@ macro_rules! socket_source {
 }
 
 #[cfg(windows)]
-socket_source!(mio::net::TcpListener, mio::net::TcpStream, mio::net::UdpSocket);
+socket_source!(
+    mio::net::TcpListener,
+    mio::net::TcpStream,
+    mio::net::UdpSocket
+);
 
 #[cfg(windows)]
 impl Source for mio::windows::NamedPipe {
     fn telekio_resource(&self) -> ::telekio::IoResource {
         use std::os::windows::io::AsRawHandle;
         ::telekio::IoResource::handle(self.as_raw_handle() as usize as u64)
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn delegate<'a>(
+    registration: &'a Registration,
+    kind: ::telekio::IoOperationKind,
+    data: *mut u8,
+    len: usize,
+    guest: impl FnOnce() -> std::io::Result<usize> + 'a,
+) -> impl FnOnce() -> std::io::Result<usize> + 'a {
+    move || {
+        drop(guest);
+        operation(registration, kind, data, len)
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn delegate_read_vectored<'a>(
+    registration: &'a Registration,
+    buffers: *mut std::ffi::c_void,
+    len: usize,
+    guest: impl FnOnce() -> std::io::Result<usize> + 'a,
+) -> impl FnOnce() -> std::io::Result<usize> + 'a {
+    move || {
+        drop(guest);
+        let buffers = unsafe {
+            std::slice::from_raw_parts_mut(buffers.cast::<std::io::IoSliceMut<'_>>(), len)
+        };
+        let buffer = buffers
+            .iter_mut()
+            .find(|buffer| !buffer.is_empty())
+            .map_or(&mut [][..], |buffer| &mut **buffer);
+        operation(
+            registration,
+            ::telekio::IoOperationKind::Read,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+        )
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn delegate_write_vectored<'a>(
+    registration: &'a Registration,
+    buffers: *const std::ffi::c_void,
+    len: usize,
+    guest: impl FnOnce() -> std::io::Result<usize> + 'a,
+) -> impl FnOnce() -> std::io::Result<usize> + 'a {
+    move || {
+        drop(guest);
+        let buffers =
+            unsafe { std::slice::from_raw_parts(buffers.cast::<std::io::IoSlice<'_>>(), len) };
+        let buffer = buffers
+            .iter()
+            .find(|buffer| !buffer.is_empty())
+            .map_or(&[][..], |buffer| &**buffer);
+        operation(
+            registration,
+            ::telekio::IoOperationKind::Write,
+            buffer.as_ptr().cast_mut(),
+            buffer.len(),
+        )
+    }
+}
+
+#[cfg(all(windows, feature = "io-util"))]
+pub(crate) fn delegate_read_buf<'a, B: bytes::BufMut + 'a>(
+    registration: &'a Registration,
+    buffer: *mut B,
+    guest: impl FnOnce() -> std::io::Result<usize> + 'a,
+) -> impl FnOnce() -> std::io::Result<usize> + 'a {
+    move || {
+        drop(guest);
+        let buffer = unsafe { &mut *buffer };
+        let chunk = buffer.chunk_mut();
+        let read = operation(
+            registration,
+            ::telekio::IoOperationKind::Read,
+            chunk.as_mut_ptr(),
+            chunk.len(),
+        )?;
+        unsafe { buffer.advance_mut(read) };
+        Ok(read)
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn operation(
+    registration: &Registration,
+    kind: ::telekio::IoOperationKind,
+    data: *mut u8,
+    len: usize,
+) -> std::io::Result<usize> {
+    let result = registration.try_operate(::telekio::IoRequest { kind, data, len });
+    match result.state {
+        ::telekio::Poll::Pending => {
+            unsafe { result.call.payload.release() };
+            Err(std::io::ErrorKind::WouldBlock.into())
+        }
+        ::telekio::Poll::Ready => {
+            result.error.into_io_result(result.call)?;
+            Ok(result.value)
+        }
+        ::telekio::Poll::Panicked => {
+            result.error.into_io_result(result.call)?;
+            unreachable!()
+        }
     }
 }

@@ -33,14 +33,109 @@ pub struct IoInterest(u8);
 #[repr(transparent)]
 pub struct IoReady(u8);
 
+macro_rules! io_error_kinds {
+    ($($kind:ident),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        #[repr(u8)]
+        enum IoErrorKind {
+            $($kind,)+
+            Other,
+        }
+
+        impl From<std::io::ErrorKind> for IoErrorKind {
+            fn from(kind: std::io::ErrorKind) -> Self {
+                match kind {
+                    $(std::io::ErrorKind::$kind => Self::$kind,)+
+                    _ => Self::Other,
+                }
+            }
+        }
+
+        impl From<IoErrorKind> for std::io::ErrorKind {
+            fn from(kind: IoErrorKind) -> Self {
+                match kind {
+                    $(IoErrorKind::$kind => Self::$kind,)+
+                    IoErrorKind::Other => Self::Other,
+                }
+            }
+        }
+    };
+}
+
+io_error_kinds!(
+    NotFound,
+    PermissionDenied,
+    ConnectionRefused,
+    ConnectionReset,
+    HostUnreachable,
+    NetworkUnreachable,
+    ConnectionAborted,
+    NotConnected,
+    AddrInUse,
+    AddrNotAvailable,
+    NetworkDown,
+    BrokenPipe,
+    AlreadyExists,
+    WouldBlock,
+    NotADirectory,
+    IsADirectory,
+    DirectoryNotEmpty,
+    ReadOnlyFilesystem,
+    StaleNetworkFileHandle,
+    InvalidInput,
+    InvalidData,
+    TimedOut,
+    WriteZero,
+    StorageFull,
+    NotSeekable,
+    QuotaExceeded,
+    FileTooLarge,
+    ResourceBusy,
+    ExecutableFileBusy,
+    Deadlock,
+    CrossesDevices,
+    TooManyLinks,
+    InvalidFilename,
+    ArgumentListTooLong,
+    Interrupted,
+    Unsupported,
+    UnexpectedEof,
+    OutOfMemory,
+);
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct IoError {
+    kind: IoErrorKind,
+    raw: i32,
+    has_raw: u8,
+}
+
 #[repr(C)]
 pub struct IoRegistration {
     data: *mut c_void,
     poll: unsafe extern "C" fn(*mut c_void, IoInterest, *const Waker) -> IoPoll,
     ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoOperation,
+    try_operate: unsafe extern "C" fn(*mut c_void, IoRequest) -> IoPoll,
     try_ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoPoll,
     clear: unsafe extern "C" fn(*mut c_void, IoReady),
     release: unsafe extern "C" fn(*mut c_void),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IoOperationKind {
+    Connect,
+    Read,
+    Write,
+    Disconnect,
+}
+
+#[repr(C)]
+pub struct IoRequest {
+    pub kind: IoOperationKind,
+    pub data: *mut u8,
+    pub len: usize,
 }
 
 #[repr(C)]
@@ -53,6 +148,7 @@ pub struct IoOperation {
 #[repr(C)]
 pub struct IoResult {
     pub call: CallResult,
+    pub error: IoError,
     pub registration: IoRegistration,
 }
 
@@ -60,12 +156,15 @@ pub struct IoResult {
 pub struct IoPoll {
     pub state: Poll,
     pub call: CallResult,
+    pub error: IoError,
     pub ready: IoReady,
+    pub value: usize,
 }
 
 unsafe impl Send for IoRegistration {}
 unsafe impl Sync for IoRegistration {}
 unsafe impl Send for IoOperation {}
+unsafe impl Sync for IoOperation {}
 
 impl IoResource {
     pub const fn fd(raw: i32) -> Self {
@@ -143,12 +242,46 @@ impl std::ops::BitOrAssign for IoReady {
     }
 }
 
+impl IoError {
+    pub const fn none() -> Self {
+        Self {
+            kind: IoErrorKind::Other,
+            raw: 0,
+            has_raw: 0,
+        }
+    }
+
+    pub fn from_error(error: &std::io::Error) -> Self {
+        Self {
+            kind: error.kind().into(),
+            raw: error.raw_os_error().unwrap_or_default(),
+            has_raw: error.raw_os_error().is_some().into(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn into_io_result(self, call: CallResult) -> std::io::Result<()> {
+        if call.status != crate::Status::Error {
+            return call.into_io_result();
+        }
+        if self.has_raw != 0 {
+            unsafe { call.payload.release() };
+            Err(std::io::Error::from_raw_os_error(self.raw))
+        } else {
+            Err(std::io::Error::new(self.kind.into(), unsafe {
+                call.payload.into_string()
+            }))
+        }
+    }
+}
+
 impl IoRegistration {
     pub fn empty() -> Self {
         Self {
             data: std::ptr::null_mut(),
             poll: poll_empty,
             ready: ready_empty,
+            try_operate: try_operate_empty,
             try_ready: try_ready_empty,
             clear: clear_empty,
             release: release_empty,
@@ -162,6 +295,7 @@ impl IoRegistration {
         data: *mut c_void,
         poll: unsafe extern "C" fn(*mut c_void, IoInterest, *const Waker) -> IoPoll,
         ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoOperation,
+        try_operate: unsafe extern "C" fn(*mut c_void, IoRequest) -> IoPoll,
         try_ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoPoll,
         clear: unsafe extern "C" fn(*mut c_void, IoReady),
         release: unsafe extern "C" fn(*mut c_void),
@@ -170,6 +304,7 @@ impl IoRegistration {
             data,
             poll,
             ready,
+            try_operate,
             try_ready,
             clear,
             release,
@@ -178,14 +313,12 @@ impl IoRegistration {
 
     #[track_caller]
     pub fn from_result(result: IoResult) -> std::io::Result<Self> {
-        if result.call.status == crate::Status::Error {
-            let message = unsafe { result.call.payload.into_string() };
-            if message == IO_DRIVER_DISABLED_ERROR {
-                panic!("{message}");
+        if let Err(error) = result.error.into_io_result(result.call) {
+            if error.to_string() == IO_DRIVER_DISABLED_ERROR {
+                panic!("{error}");
             }
-            return Err(std::io::Error::other(message));
+            return Err(error);
         }
-        result.call.into_io_result()?;
         Ok(result.registration)
     }
 
@@ -195,6 +328,10 @@ impl IoRegistration {
 
     pub fn ready(&self, interest: IoInterest) -> IoOperation {
         unsafe { (self.ready)(self.data, interest) }
+    }
+
+    pub fn try_operate(&self, request: IoRequest) -> IoPoll {
+        unsafe { (self.try_operate)(self.data, request) }
     }
 
     pub fn try_ready(&self, interest: IoInterest) -> IoPoll {
@@ -264,12 +401,12 @@ impl Future for IoOperation {
                 unsafe { result.call.payload.release() };
                 RustPoll::Pending
             }
-            Poll::Ready => match result.call.into_io_result() {
+            Poll::Ready => match result.error.into_io_result(result.call) {
                 Ok(()) => RustPoll::Ready(Ok(result.ready)),
                 Err(error) => RustPoll::Ready(Err(error)),
             },
             Poll::Panicked => {
-                result.call.into_io_result().unwrap();
+                result.error.into_io_result(result.call).unwrap();
                 unreachable!()
             }
         }
@@ -300,6 +437,10 @@ unsafe extern "C" fn poll_empty(_: *mut c_void, _: IoInterest, _: *const Waker) 
     empty_poll()
 }
 
+unsafe extern "C" fn try_operate_empty(_: *mut c_void, _: IoRequest) -> IoPoll {
+    empty_poll()
+}
+
 unsafe extern "C" fn ready_empty(_: *mut c_void, _: IoInterest) -> IoOperation {
     IoOperation {
         data: std::ptr::null_mut(),
@@ -319,7 +460,9 @@ fn empty_poll() -> IoPoll {
             status: crate::Status::Ok,
             payload: crate::OwnedBytes::empty(),
         },
+        error: IoError::none(),
         ready: IoReady::SHUTDOWN,
+        value: 0,
     }
 }
 

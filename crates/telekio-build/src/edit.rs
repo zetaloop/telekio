@@ -365,7 +365,6 @@ fn retarget_use_in(source: &mut String, name: &str, path: &str) -> Result<bool, 
 #[derive(Clone, Copy)]
 pub enum Call<'a> {
     Function(&'a str),
-    #[expect(dead_code)]
     Method(&'a str),
 }
 

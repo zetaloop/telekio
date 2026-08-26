@@ -19,10 +19,7 @@ impl ScheduledIo {
             .poll(interest, waker)
     }
 
-    pub(crate) fn ready_telekio(
-        &self,
-        interest: ::telekio::IoInterest,
-    ) -> ::telekio::IoOperation {
+    pub(crate) fn ready_telekio(&self, interest: ::telekio::IoInterest) -> ::telekio::IoOperation {
         self.telekio
             .lock()
             .unwrap()
@@ -31,10 +28,16 @@ impl ScheduledIo {
             .ready(interest)
     }
 
-    pub(crate) fn try_ready_telekio(
-        &self,
-        interest: ::telekio::IoInterest,
-    ) -> ::telekio::IoPoll {
+    pub(crate) fn try_operate_telekio(&self, request: ::telekio::IoRequest) -> ::telekio::IoPoll {
+        self.telekio
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("I/O resource is not registered")
+            .try_operate(request)
+    }
+
+    pub(crate) fn try_ready_telekio(&self, interest: ::telekio::IoInterest) -> ::telekio::IoPoll {
         self.telekio
             .lock()
             .unwrap()

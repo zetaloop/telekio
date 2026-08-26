@@ -5,8 +5,8 @@ mod time;
 
 pub use builder::{BuildResult, Bytes, Callback, Flavor, RuntimeConfig, Shutdown, StringCallback};
 pub use io::{
-    IO_DRIVER_DISABLED_ERROR, IoInterest, IoKind, IoOperation, IoPoll, IoReady, IoRegistration,
-    IoResource, IoResult,
+    IO_DRIVER_DISABLED_ERROR, IoError, IoInterest, IoKind, IoOperation, IoOperationKind, IoPoll,
+    IoReady, IoRegistration, IoRequest, IoResource, IoResult,
 };
 pub use runtime::{
     Blocking, BlockingTask, CallResult, Future, Handle, OwnedBytes, Poll, RawHandle, RawRuntime,
