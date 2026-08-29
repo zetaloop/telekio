@@ -115,11 +115,11 @@ pub struct IoError {
 pub struct IoRegistration {
     data: *mut c_void,
     poll: unsafe extern "C" fn(*mut c_void, IoInterest, *const Waker) -> IoPoll,
-    ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoOperation,
+    ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoOperationResult,
     try_operate: unsafe extern "C" fn(*mut c_void, IoRequest) -> IoPoll,
     try_ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoPoll,
-    clear: unsafe extern "C" fn(*mut c_void, IoReady),
-    release: unsafe extern "C" fn(*mut c_void),
+    clear: unsafe extern "C" fn(*mut c_void, IoReady) -> CallResult,
+    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,7 +142,7 @@ pub struct IoRequest {
 pub struct IoOperation {
     data: *mut c_void,
     poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> IoPoll,
-    release: unsafe extern "C" fn(*mut c_void),
+    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 #[repr(C)]
@@ -150,6 +150,12 @@ pub struct IoResult {
     pub call: CallResult,
     pub error: IoError,
     pub registration: IoRegistration,
+}
+
+#[repr(C)]
+pub struct IoOperationResult {
+    pub call: CallResult,
+    pub operation: IoOperation,
 }
 
 #[repr(C)]
@@ -344,11 +350,11 @@ impl IoRegistration {
     pub const unsafe fn from_raw(
         data: *mut c_void,
         poll: unsafe extern "C" fn(*mut c_void, IoInterest, *const Waker) -> IoPoll,
-        ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoOperation,
+        ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoOperationResult,
         try_operate: unsafe extern "C" fn(*mut c_void, IoRequest) -> IoPoll,
         try_ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoPoll,
-        clear: unsafe extern "C" fn(*mut c_void, IoReady),
-        release: unsafe extern "C" fn(*mut c_void),
+        clear: unsafe extern "C" fn(*mut c_void, IoReady) -> CallResult,
+        release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
             data,
@@ -377,7 +383,9 @@ impl IoRegistration {
     }
 
     pub fn ready(&self, interest: IoInterest) -> IoOperation {
-        unsafe { (self.ready)(self.data, interest) }
+        let result = unsafe { (self.ready)(self.data, interest) };
+        result.call.resume("failed to create Tokio I/O operation");
+        result.operation
     }
 
     pub fn try_operate(&self, request: IoRequest) -> IoPoll {
@@ -389,12 +397,12 @@ impl IoRegistration {
     }
 
     pub fn clear(&self, ready: IoReady) {
-        unsafe { (self.clear)(self.data, ready) };
+        unsafe { (self.clear)(self.data, ready) }.resume("failed to clear Tokio I/O readiness");
     }
 
     pub fn close(&mut self) {
         if !self.data.is_null() {
-            unsafe { (self.release)(self.data) };
+            unsafe { (self.release)(self.data) }.resume("failed to release Tokio I/O registration");
             self.data = std::ptr::null_mut();
         }
     }
@@ -432,7 +440,7 @@ impl IoOperation {
     pub const unsafe fn from_raw(
         data: *mut c_void,
         poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> IoPoll,
-        release: unsafe extern "C" fn(*mut c_void),
+        release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
             data,
@@ -467,7 +475,7 @@ impl Future for IoOperation {
 
 impl Drop for IoOperation {
     fn drop(&mut self) {
-        unsafe { (self.release)(self.data) };
+        unsafe { (self.release)(self.data) }.resume("failed to release Tokio I/O operation");
     }
 }
 
@@ -493,11 +501,14 @@ unsafe extern "C" fn try_operate_empty(_: *mut c_void, _: IoRequest) -> IoPoll {
     empty_poll()
 }
 
-unsafe extern "C" fn ready_empty(_: *mut c_void, _: IoInterest) -> IoOperation {
-    IoOperation {
-        data: std::ptr::null_mut(),
-        poll: poll_operation_empty,
-        release: release_empty,
+unsafe extern "C" fn ready_empty(_: *mut c_void, _: IoInterest) -> IoOperationResult {
+    IoOperationResult {
+        call: CallResult::ok(),
+        operation: IoOperation {
+            data: std::ptr::null_mut(),
+            poll: poll_operation_empty,
+            release: release_empty,
+        },
     }
 }
 
@@ -522,5 +533,9 @@ unsafe extern "C" fn try_ready_empty(_: *mut c_void, _: IoInterest) -> IoPoll {
     empty_poll()
 }
 
-unsafe extern "C" fn clear_empty(_: *mut c_void, _: IoReady) {}
-unsafe extern "C" fn release_empty(_: *mut c_void) {}
+unsafe extern "C" fn clear_empty(_: *mut c_void, _: IoReady) -> CallResult {
+    CallResult::ok()
+}
+unsafe extern "C" fn release_empty(_: *mut c_void) -> CallResult {
+    CallResult::ok()
+}

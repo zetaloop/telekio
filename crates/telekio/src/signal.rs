@@ -27,7 +27,7 @@ pub struct SignalRequest {
 pub struct Signal {
     data: *mut c_void,
     poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
-    release: unsafe extern "C" fn(*mut c_void),
+    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 #[repr(C)]
@@ -70,7 +70,7 @@ impl Signal {
     pub const unsafe fn from_raw(
         data: *mut c_void,
         poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
-        release: unsafe extern "C" fn(*mut c_void),
+        release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
             data,
@@ -110,7 +110,7 @@ impl Signal {
 
 impl Drop for Signal {
     fn drop(&mut self) {
-        unsafe { (self.release)(self.data) };
+        unsafe { (self.release)(self.data) }.resume("failed to release Tokio signal");
     }
 }
 
@@ -140,4 +140,6 @@ unsafe extern "C" fn poll_empty(_: *mut c_void, _: *const Waker) -> OperationPol
     }
 }
 
-unsafe extern "C" fn release_empty(_: *mut c_void) {}
+unsafe extern "C" fn release_empty(_: *mut c_void) -> CallResult {
+    CallResult::ok()
+}

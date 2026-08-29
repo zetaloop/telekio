@@ -1,5 +1,4 @@
 use std::{
-    any::Any,
     ffi::c_void,
     panic::{AssertUnwindSafe, catch_unwind},
     slice, str,
@@ -38,7 +37,7 @@ unsafe impl Sync for Bytes {}
 pub struct Callback {
     data: *const c_void,
     call: unsafe extern "C" fn(*const c_void) -> CallResult,
-    release: unsafe extern "C" fn(*const c_void),
+    release: unsafe extern "C" fn(*const c_void) -> CallResult,
 }
 
 unsafe impl Send for Callback {}
@@ -48,7 +47,7 @@ unsafe impl Sync for Callback {}
 pub struct StringCallback {
     data: *const c_void,
     call: unsafe extern "C" fn(*const c_void) -> CallResult,
-    release: unsafe extern "C" fn(*const c_void),
+    release: unsafe extern "C" fn(*const c_void) -> CallResult,
 }
 
 unsafe impl Send for StringCallback {}
@@ -181,7 +180,7 @@ impl Callback {
 
 impl Drop for Callback {
     fn drop(&mut self) {
-        unsafe { (self.release)(self.data) };
+        unsafe { (self.release)(self.data) }.resume("failed to release Tokio callback");
     }
 }
 
@@ -202,7 +201,7 @@ impl StringCallback {
 
 impl Drop for StringCallback {
     fn drop(&mut self) {
-        unsafe { (self.release)(self.data) };
+        unsafe { (self.release)(self.data) }.resume("failed to release Tokio string callback");
     }
 }
 
@@ -210,35 +209,47 @@ unsafe extern "C" fn call_none(_: *const c_void) -> CallResult {
     call_ok(OwnedBytes::empty())
 }
 
-unsafe extern "C" fn release_none(_: *const c_void) {}
+unsafe extern "C" fn release_none(_: *const c_void) -> CallResult {
+    CallResult::ok()
+}
 
 unsafe extern "C" fn call_callback(data: *const c_void) -> CallResult {
     let callback = unsafe { &*data.cast::<Arc<dyn Fn() + Send + Sync>>() };
     match catch_unwind(AssertUnwindSafe(|| callback())) {
         Ok(()) => call_ok(OwnedBytes::empty()),
-        Err(payload) => call_panicked(&*payload),
+        Err(payload) => CallResult::panicked(&*payload),
     }
 }
 
-unsafe extern "C" fn release_callback(data: *const c_void) {
-    drop(unsafe { Box::from_raw(data.cast_mut().cast::<Arc<dyn Fn() + Send + Sync>>()) });
+unsafe extern "C" fn release_callback(data: *const c_void) -> CallResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        drop(unsafe { Box::from_raw(data.cast_mut().cast::<Arc<dyn Fn() + Send + Sync>>()) });
+    })) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => CallResult::panicked(&*payload),
+    }
 }
 
 unsafe extern "C" fn call_string_callback(data: *const c_void) -> CallResult {
     let callback = unsafe { &*data.cast::<Arc<dyn Fn() -> String + Send + Sync>>() };
     match catch_unwind(AssertUnwindSafe(|| callback())) {
         Ok(value) => call_ok(OwnedBytes::from_string(value)),
-        Err(payload) => call_panicked(&*payload),
+        Err(payload) => CallResult::panicked(&*payload),
     }
 }
 
-unsafe extern "C" fn release_string_callback(data: *const c_void) {
-    drop(unsafe {
-        Box::from_raw(
-            data.cast_mut()
-                .cast::<Arc<dyn Fn() -> String + Send + Sync>>(),
-        )
-    });
+unsafe extern "C" fn release_string_callback(data: *const c_void) -> CallResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        drop(unsafe {
+            Box::from_raw(
+                data.cast_mut()
+                    .cast::<Arc<dyn Fn() -> String + Send + Sync>>(),
+            )
+        });
+    })) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => CallResult::panicked(&*payload),
+    }
 }
 
 fn call_ok(payload: OwnedBytes) -> CallResult {
@@ -246,23 +257,4 @@ fn call_ok(payload: OwnedBytes) -> CallResult {
         status: Status::Ok,
         payload,
     }
-}
-
-fn call_panicked(payload: &(dyn Any + Send)) -> CallResult {
-    CallResult {
-        status: Status::Panicked,
-        payload: OwnedBytes::from_string(panic_message(payload)),
-    }
-}
-
-fn panic_message(payload: &(dyn Any + Send)) -> String {
-    payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| {
-            payload
-                .downcast_ref::<&'static str>()
-                .map(|message| (*message).to_owned())
-        })
-        .unwrap_or_else(|| "Box<dyn Any>".to_owned())
 }

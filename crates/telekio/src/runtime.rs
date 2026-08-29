@@ -49,16 +49,16 @@ pub struct RuntimeApi {
     pub runtime_block_on: unsafe extern "C" fn(*mut c_void, Future) -> CallResult,
     pub handle_block_on: unsafe extern "C" fn(*const c_void, Future) -> CallResult,
     pub retain_handle: unsafe extern "C" fn(*const c_void),
-    pub release_handle: unsafe extern "C" fn(*const c_void),
-    pub release_runtime: unsafe extern "C" fn(*mut c_void),
+    pub release_handle: unsafe extern "C" fn(*const c_void) -> CallResult,
+    pub release_runtime: unsafe extern "C" fn(*mut c_void) -> CallResult,
     pub spawn: unsafe extern "C" fn(*const c_void, u64, Task) -> CallResult,
     pub spawn_local: unsafe extern "C" fn(*const c_void, u64, Task) -> CallResult,
     pub spawn_blocking: unsafe extern "C" fn(*const c_void, u64, BlockingTask) -> CallResult,
     pub block_in_place: unsafe extern "C" fn(*const c_void, Blocking) -> CallResult,
-    pub abort: unsafe extern "C" fn(*const c_void, u64),
-    pub is_finished: unsafe extern "C" fn(*const c_void, u64) -> bool,
+    pub abort: unsafe extern "C" fn(*const c_void, u64) -> CallResult,
+    pub is_finished: unsafe extern "C" fn(*const c_void, u64) -> BoolResult,
     pub build: unsafe extern "C" fn(*const c_void, RuntimeConfig) -> BuildResult,
-    pub clock: unsafe extern "C" fn(*const c_void) -> ClockSample,
+    pub clock: unsafe extern "C" fn(*const c_void) -> ClockResult,
     pub pause: unsafe extern "C" fn(*const c_void) -> CallResult,
     pub resume: unsafe extern "C" fn(*const c_void) -> CallResult,
     pub advance: unsafe extern "C" fn(*const c_void, DurationParts) -> CallResult,
@@ -102,6 +102,18 @@ pub struct MetricResult {
 }
 
 #[repr(C)]
+pub struct BoolResult {
+    pub call: CallResult,
+    pub value: bool,
+}
+
+#[repr(C)]
+pub struct ClockResult {
+    pub call: CallResult,
+    pub value: ClockSample,
+}
+
+#[repr(C)]
 pub struct OwnedBytes {
     data: *mut u8,
     len: usize,
@@ -118,16 +130,16 @@ pub struct Future {
 pub struct Task {
     data: *mut c_void,
     poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> Poll,
-    cancel: unsafe extern "C" fn(*mut c_void),
-    release: unsafe extern "C" fn(*mut c_void),
+    cancel: unsafe extern "C" fn(*mut c_void) -> CallResult,
+    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 #[repr(C)]
 pub struct BlockingTask {
     data: *mut c_void,
-    run: unsafe extern "C" fn(*mut c_void),
-    cancel: unsafe extern "C" fn(*mut c_void),
-    release: unsafe extern "C" fn(*mut c_void),
+    run: unsafe extern "C" fn(*mut c_void) -> CallResult,
+    cancel: unsafe extern "C" fn(*mut c_void) -> CallResult,
+    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 unsafe impl Send for BlockingTask {}
@@ -150,10 +162,10 @@ pub enum Poll {
 #[repr(C)]
 pub struct Waker {
     data: *const c_void,
-    clone: unsafe extern "C" fn(*const c_void, *mut Waker),
-    wake: unsafe extern "C" fn(*const c_void),
-    wake_by_ref: unsafe extern "C" fn(*const c_void),
-    release: unsafe extern "C" fn(*const c_void),
+    clone: unsafe extern "C" fn(*const c_void, *mut Waker) -> CallResult,
+    wake: unsafe extern "C" fn(*const c_void) -> CallResult,
+    wake_by_ref: unsafe extern "C" fn(*const c_void) -> CallResult,
+    release: unsafe extern "C" fn(*const c_void) -> CallResult,
 }
 
 unsafe impl Send for Waker {}
@@ -214,8 +226,8 @@ impl Task {
     pub const unsafe fn from_raw(
         data: *mut c_void,
         poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> Poll,
-        cancel: unsafe extern "C" fn(*mut c_void),
-        release: unsafe extern "C" fn(*mut c_void),
+        cancel: unsafe extern "C" fn(*mut c_void) -> CallResult,
+        release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
             data,
@@ -235,13 +247,13 @@ impl Task {
     /// The task must not have been cancelled or completed already.
     #[doc(hidden)]
     pub unsafe fn cancel(&mut self) {
-        unsafe { (self.cancel)(self.data) };
+        unsafe { (self.cancel)(self.data) }.resume("failed to cancel Tokio task");
     }
 }
 
 impl Drop for Task {
     fn drop(&mut self) {
-        unsafe { (self.release)(self.data) };
+        unsafe { (self.release)(self.data) }.resume("failed to release Tokio task");
     }
 }
 
@@ -254,9 +266,9 @@ impl BlockingTask {
     #[doc(hidden)]
     pub const unsafe fn from_raw(
         data: *mut c_void,
-        run: unsafe extern "C" fn(*mut c_void),
-        cancel: unsafe extern "C" fn(*mut c_void),
-        release: unsafe extern "C" fn(*mut c_void),
+        run: unsafe extern "C" fn(*mut c_void) -> CallResult,
+        cancel: unsafe extern "C" fn(*mut c_void) -> CallResult,
+        release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
             data,
@@ -271,7 +283,7 @@ impl BlockingTask {
     /// This task must not have been run or cancelled already.
     #[doc(hidden)]
     pub unsafe fn run(&mut self) {
-        unsafe { (self.run)(self.data) };
+        unsafe { (self.run)(self.data) }.resume("failed to run Tokio blocking task");
     }
 
     /// # Safety
@@ -279,13 +291,13 @@ impl BlockingTask {
     /// This task must not have been run or cancelled already.
     #[doc(hidden)]
     pub unsafe fn cancel(&mut self) {
-        unsafe { (self.cancel)(self.data) };
+        unsafe { (self.cancel)(self.data) }.resume("failed to cancel Tokio blocking task");
     }
 }
 
 impl Drop for BlockingTask {
     fn drop(&mut self) {
-        unsafe { (self.release)(self.data) };
+        unsafe { (self.release)(self.data) }.resume("failed to release Tokio blocking task");
     }
 }
 
@@ -339,8 +351,19 @@ pub fn attach(handle: Handle) -> Result<(), Handle> {
 ///
 /// `raw` must be one owned host handle reference returned by its host API.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn telekio_guest_attach(raw: RawHandle) -> bool {
-    attach(unsafe { Handle::from_abi(raw) }).is_ok()
+pub unsafe extern "C" fn telekio_guest_attach(raw: RawHandle) -> BoolResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        attach(unsafe { Handle::from_abi(raw) }).is_ok()
+    })) {
+        Ok(value) => BoolResult {
+            call: CallResult::ok(),
+            value,
+        },
+        Err(payload) => BoolResult {
+            call: CallResult::panicked(&*payload),
+            value: false,
+        },
+    }
 }
 
 #[doc(hidden)]
@@ -350,7 +373,7 @@ pub fn attached() -> Handle {
     }
     #[cfg(feature = "guest")]
     {
-        unsafe extern "C" {
+        unsafe extern "C-unwind" {
             fn telekio_test_handle() -> RawHandle;
         }
         let raw = unsafe { telekio_test_handle() };
@@ -422,12 +445,15 @@ impl Handle {
 
     #[doc(hidden)]
     pub fn abort(&self, id: u64) {
-        unsafe { ((*self.raw.api).abort)(self.raw.context, id) };
+        unsafe { ((*self.raw.api).abort)(self.raw.context, id) }
+            .resume("failed to abort Tokio task");
     }
 
     #[doc(hidden)]
     pub fn is_finished(&self, id: u64) -> bool {
-        unsafe { ((*self.raw.api).is_finished)(self.raw.context, id) }
+        let result = unsafe { ((*self.raw.api).is_finished)(self.raw.context, id) };
+        result.call.resume("failed to inspect Tokio task");
+        result.value
     }
 
     #[doc(hidden)]
@@ -445,7 +471,8 @@ impl Clone for Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        unsafe { ((*self.raw.api).release_handle)(self.raw.context) };
+        unsafe { ((*self.raw.api).release_handle)(self.raw.context) }
+            .resume("failed to release Tokio handle");
     }
 }
 
@@ -478,14 +505,35 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        unsafe {
-            ((*self.raw.handle.api).release_runtime)(self.raw.owner);
-            ((*self.raw.handle.api).release_handle)(self.raw.handle.context);
-        }
+        unsafe { ((*self.raw.handle.api).release_runtime)(self.raw.owner) }
+            .resume("failed to release Tokio runtime");
+        unsafe { ((*self.raw.handle.api).release_handle)(self.raw.handle.context) }
+            .resume("failed to release Tokio handle");
     }
 }
 
 impl CallResult {
+    #[doc(hidden)]
+    pub fn ok() -> Self {
+        Self {
+            status: Status::Ok,
+            payload: OwnedBytes::empty(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn panicked(payload: &(dyn Any + Send)) -> Self {
+        Self {
+            status: Status::Panicked,
+            payload: OwnedBytes::from_string(panic_message(payload)),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn resume(self, context: &str) {
+        self.into_io_result().expect(context);
+    }
+
     #[doc(hidden)]
     pub fn into_io_result(self) -> std::io::Result<()> {
         match self.status {
@@ -651,23 +699,28 @@ impl Waker {
     #[doc(hidden)]
     pub unsafe fn clone_rust_waker(&self) -> RustWaker {
         let mut owned = MaybeUninit::uninit();
-        unsafe { (self.clone)(self.data, owned.as_mut_ptr()) };
+        unsafe { (self.clone)(self.data, owned.as_mut_ptr()) }
+            .resume("failed to clone Tokio waker");
         let owned = unsafe { owned.assume_init() };
         let raw = RawWaker::new(Box::into_raw(Box::new(owned)).cast(), &RAW_WAKER_VTABLE);
         unsafe { RustWaker::from_raw(raw) }
     }
 }
 
-unsafe extern "C" fn clone_borrowed(data: *const c_void, output: *mut Waker) {
-    let waker = unsafe { &*data.cast::<RustWaker>() };
-    unsafe { output.write(owned_waker(waker.clone())) };
+unsafe extern "C" fn clone_borrowed(data: *const c_void, output: *mut Waker) -> CallResult {
+    callback(|| {
+        let waker = unsafe { &*data.cast::<RustWaker>() };
+        unsafe { output.write(owned_waker(waker.clone())) };
+    })
 }
 
-unsafe extern "C" fn wake_borrowed(data: *const c_void) {
-    unsafe { &*data.cast::<RustWaker>() }.wake_by_ref();
+unsafe extern "C" fn wake_borrowed(data: *const c_void) -> CallResult {
+    callback(|| unsafe { &*data.cast::<RustWaker>() }.wake_by_ref())
 }
 
-unsafe extern "C" fn release_borrowed(_: *const c_void) {}
+unsafe extern "C" fn release_borrowed(_: *const c_void) -> CallResult {
+    CallResult::ok()
+}
 
 fn owned_waker(waker: RustWaker) -> Waker {
     Waker {
@@ -679,21 +732,23 @@ fn owned_waker(waker: RustWaker) -> Waker {
     }
 }
 
-unsafe extern "C" fn clone_owned(data: *const c_void, output: *mut Waker) {
-    let waker = unsafe { &*data.cast::<RustWaker>() };
-    unsafe { output.write(owned_waker(waker.clone())) };
+unsafe extern "C" fn clone_owned(data: *const c_void, output: *mut Waker) -> CallResult {
+    callback(|| {
+        let waker = unsafe { &*data.cast::<RustWaker>() };
+        unsafe { output.write(owned_waker(waker.clone())) };
+    })
 }
 
-unsafe extern "C" fn wake_owned(data: *const c_void) {
-    unsafe { Box::from_raw(data.cast_mut().cast::<RustWaker>()) }.wake();
+unsafe extern "C" fn wake_owned(data: *const c_void) -> CallResult {
+    callback(|| unsafe { Box::from_raw(data.cast_mut().cast::<RustWaker>()) }.wake())
 }
 
-unsafe extern "C" fn wake_by_ref_owned(data: *const c_void) {
-    unsafe { &*data.cast::<RustWaker>() }.wake_by_ref();
+unsafe extern "C" fn wake_by_ref_owned(data: *const c_void) -> CallResult {
+    callback(|| unsafe { &*data.cast::<RustWaker>() }.wake_by_ref())
 }
 
-unsafe extern "C" fn release_owned(data: *const c_void) {
-    drop(unsafe { Box::from_raw(data.cast_mut().cast::<RustWaker>()) });
+unsafe extern "C" fn release_owned(data: *const c_void) -> CallResult {
+    callback(|| drop(unsafe { Box::from_raw(data.cast_mut().cast::<RustWaker>()) }))
 }
 
 static RAW_WAKER_VTABLE: RawWakerVTable =
@@ -702,22 +757,41 @@ static RAW_WAKER_VTABLE: RawWakerVTable =
 unsafe fn raw_clone(data: *const ()) -> RawWaker {
     let waker = unsafe { &*data.cast::<Waker>() };
     let mut cloned = MaybeUninit::uninit();
-    unsafe { (waker.clone)(waker.data, cloned.as_mut_ptr()) };
+    unsafe { (waker.clone)(waker.data, cloned.as_mut_ptr()) }.resume("failed to clone Tokio waker");
     let cloned = unsafe { cloned.assume_init() };
     RawWaker::new(Box::into_raw(Box::new(cloned)).cast(), &RAW_WAKER_VTABLE)
 }
 
 unsafe fn raw_wake(data: *const ()) {
     let waker = unsafe { Box::from_raw(data.cast_mut().cast::<Waker>()) };
-    unsafe { (waker.wake)(waker.data) };
+    unsafe { (waker.wake)(waker.data) }.resume("failed to wake Tokio task");
 }
 
 unsafe fn raw_wake_by_ref(data: *const ()) {
     let waker = unsafe { &*data.cast::<Waker>() };
-    unsafe { (waker.wake_by_ref)(waker.data) };
+    unsafe { (waker.wake_by_ref)(waker.data) }.resume("failed to wake Tokio task");
 }
 
 unsafe fn raw_drop(data: *const ()) {
     let waker = unsafe { Box::from_raw(data.cast_mut().cast::<Waker>()) };
-    unsafe { (waker.release)(waker.data) };
+    unsafe { (waker.release)(waker.data) }.resume("failed to release Tokio waker");
+}
+
+fn callback(call: impl FnOnce()) -> CallResult {
+    match catch_unwind(AssertUnwindSafe(call)) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => CallResult::panicked(&*payload),
+    }
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&'static str>()
+                .map(|message| (*message).to_owned())
+        })
+        .unwrap_or_else(|| "Box<dyn Any>".to_owned())
 }

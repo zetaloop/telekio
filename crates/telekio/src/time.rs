@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{CallResult, Handle, Poll, Status, Waker};
+use crate::{BoolResult, CallResult, Handle, Poll, Status, Waker};
 
 static CLOCK_ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
 
@@ -35,8 +35,8 @@ pub struct Timer {
     data: *mut c_void,
     poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
     reset: unsafe extern "C" fn(*mut c_void, DurationParts) -> CallResult,
-    is_elapsed: unsafe extern "C" fn(*const c_void) -> bool,
-    release: unsafe extern "C" fn(*mut c_void),
+    is_elapsed: unsafe extern "C" fn(*const c_void) -> BoolResult,
+    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 #[repr(C)]
@@ -88,7 +88,9 @@ impl DurationParts {
 impl Handle {
     #[doc(hidden)]
     pub fn clock(&self) -> ClockSample {
-        unsafe { ((*self.raw.api).clock)(self.raw.context) }
+        let result = unsafe { ((*self.raw.api).clock)(self.raw.context) };
+        result.call.resume("failed to sample Tokio clock");
+        result.value
     }
 
     #[doc(hidden)]
@@ -140,8 +142,8 @@ impl Timer {
         data: *mut c_void,
         poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
         reset: unsafe extern "C" fn(*mut c_void, DurationParts) -> CallResult,
-        is_elapsed: unsafe extern "C" fn(*const c_void) -> bool,
-        release: unsafe extern "C" fn(*mut c_void),
+        is_elapsed: unsafe extern "C" fn(*const c_void) -> BoolResult,
+        release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
             data,
@@ -173,13 +175,15 @@ impl Timer {
     }
 
     pub fn is_elapsed(&self) -> bool {
-        unsafe { (self.is_elapsed)(self.data) }
+        let result = unsafe { (self.is_elapsed)(self.data) };
+        result.call.resume("failed to inspect Tokio timer");
+        result.value
     }
 }
 
 impl Drop for Timer {
     fn drop(&mut self) {
-        unsafe { (self.release)(self.data) };
+        unsafe { (self.release)(self.data) }.resume("failed to release Tokio timer");
     }
 }
 
@@ -200,11 +204,16 @@ unsafe extern "C" fn reset_empty(_: *mut c_void, _: DurationParts) -> CallResult
     }
 }
 
-unsafe extern "C" fn elapsed_empty(_: *const c_void) -> bool {
-    true
+unsafe extern "C" fn elapsed_empty(_: *const c_void) -> BoolResult {
+    BoolResult {
+        call: CallResult::ok(),
+        value: true,
+    }
 }
 
-unsafe extern "C" fn release_empty(_: *mut c_void) {}
+unsafe extern "C" fn release_empty(_: *mut c_void) -> CallResult {
+    CallResult::ok()
+}
 
 fn poll_result(result: OperationPoll) -> RustPoll<()> {
     match result.state {

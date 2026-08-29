@@ -577,27 +577,29 @@ unsafe extern "C" fn retain_handle(context: *const c_void) {
     unsafe { Arc::increment_strong_count(context.cast::<HandleContext>()) };
 }
 
-unsafe extern "C" fn release_handle(context: *const c_void) {
-    unsafe { Arc::decrement_strong_count(context.cast::<HandleContext>()) };
+unsafe extern "C" fn release_handle(context: *const c_void) -> CallResult {
+    host_callback(|| unsafe { Arc::decrement_strong_count(context.cast::<HandleContext>()) })
 }
 
-unsafe extern "C" fn release_runtime(owner: *mut c_void) {
-    let runtime = unsafe { Arc::from_raw(owner.cast::<RuntimeOwner>()) };
-    if let Some(owner) = runtime.owner.upgrade() {
-        owner.unregister_runtime(*runtime.id.get().unwrap());
-    }
+unsafe extern "C" fn release_runtime(owner: *mut c_void) -> CallResult {
+    host_callback(|| {
+        let runtime = unsafe { Arc::from_raw(owner.cast::<RuntimeOwner>()) };
+        if let Some(owner) = runtime.owner.upgrade() {
+            owner.unregister_runtime(*runtime.id.get().unwrap());
+        }
+    })
 }
 
 unsafe extern "C" fn runtime_block_on(owner: *mut c_void, future: Future) -> CallResult {
-    let runtime = unsafe { &*owner.cast::<RuntimeOwner>() };
-    let owner = runtime.owner.upgrade().expect("Tokio owner has gone away");
-    let activity = match owner.activity() {
-        Ok(activity) => activity,
-        Err(error) => return result(Status::Error, OwnedBytes::from_string(error)),
-    };
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
+    let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<Status, String> {
+        let runtime = unsafe { &*owner.cast::<RuntimeOwner>() };
+        let owner = runtime
+            .owner
+            .upgrade()
+            .ok_or_else(|| "Tokio owner has gone away".to_owned())?;
+        let activity = owner.activity()?;
         let kind = runtime.kind.read().unwrap();
-        match &*kind {
+        let status = match &*kind {
             RuntimeKind::Runtime(runtime) => runtime
                 .as_ref()
                 .expect("Tokio runtime has shut down")
@@ -606,23 +608,30 @@ unsafe extern "C" fn runtime_block_on(owner: *mut c_void, future: Future) -> Cal
                 .with(|runtime| runtime.block_on(GuestFuture::new(future, &activity)))
                 .unwrap_or_else(|error| panic!("{error}")),
             RuntimeKind::Closed => panic!("Tokio runtime has shut down"),
-        }
+        };
+        drop(activity);
+        Ok(status)
     }));
-    drop(activity);
-    block_on_result(outcome)
+    match outcome {
+        Ok(Ok(status)) => block_on_result(Ok(status)),
+        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
+        Err(payload) => host_panic(&*payload),
+    }
 }
 
 unsafe extern "C" fn handle_block_on(context: *const c_void, future: Future) -> CallResult {
-    let context = unsafe { &*context.cast::<HandleContext>() };
-    let activity = match context.owner.activity() {
-        Ok(activity) => activity,
-        Err(error) => return result(Status::Error, OwnedBytes::from_string(error)),
-    };
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        context.handle.block_on(GuestFuture::new(future, &activity))
+    let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<Status, String> {
+        let context = unsafe { &*context.cast::<HandleContext>() };
+        let activity = context.owner.activity()?;
+        let status = context.handle.block_on(GuestFuture::new(future, &activity));
+        drop(activity);
+        Ok(status)
     }));
-    drop(activity);
-    block_on_result(outcome)
+    match outcome {
+        Ok(Ok(status)) => block_on_result(Ok(status)),
+        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
+        Err(payload) => host_panic(&*payload),
+    }
 }
 
 fn block_on_result(outcome: Result<Status, Box<dyn Any + Send>>) -> CallResult {
@@ -739,18 +748,13 @@ unsafe extern "C" fn defer(context: *const c_void, waker: *const Waker) -> CallR
 }
 
 unsafe extern "C" fn metric(context: *const c_void, metric: Metric, worker: usize) -> MetricResult {
-    let context = unsafe { &*context.cast::<HandleContext>() };
-    if let Err(error) = context.owner.accepting() {
-        return MetricResult {
-            call: result(Status::Error, OwnedBytes::from_string(error)),
-            value: 0,
-        };
-    }
     match catch_unwind(AssertUnwindSafe(|| {
+        let context = unsafe { &*context.cast::<HandleContext>() };
+        context.owner.accepting()?;
         let metrics = context.handle.metrics();
         #[cfg(not(target_has_atomic = "64"))]
         let _ = worker;
-        match metric {
+        Ok::<_, String>(match metric {
             Metric::GlobalQueueDepth => metrics.global_queue_depth() as u64,
             Metric::WorkerTotalBusyDuration => {
                 #[cfg(target_has_atomic = "64")]
@@ -782,11 +786,15 @@ unsafe extern "C" fn metric(context: *const c_void, metric: Metric, worker: usiz
                     0
                 }
             }
-        }
+        })
     })) {
-        Ok(value) => MetricResult {
+        Ok(Ok(value)) => MetricResult {
             call: result(Status::Ok, OwnedBytes::empty()),
             value,
+        },
+        Ok(Err(error)) => MetricResult {
+            call: result(Status::Error, OwnedBytes::from_string(error)),
+            value: 0,
         },
         Err(payload) => MetricResult {
             call: host_panic(&*payload),
@@ -796,94 +804,129 @@ unsafe extern "C" fn metric(context: *const c_void, metric: Metric, worker: usiz
 }
 
 unsafe extern "C" fn block_in_place(context: *const c_void, blocking: Blocking) -> CallResult {
-    let context = unsafe { &*context.cast::<HandleContext>() };
-    let activity = match context.owner.activity() {
-        Ok(activity) => activity,
-        Err(error) => return result(Status::Error, OwnedBytes::from_string(error)),
-    };
-    context.owner.wake_activities();
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        tokio::task::block_in_place(|| unsafe { blocking.run() })
+    let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<Status, String> {
+        let context = unsafe { &*context.cast::<HandleContext>() };
+        let activity = context.owner.activity()?;
+        context.owner.wake_activities();
+        let status = tokio::task::block_in_place(|| unsafe { blocking.run() });
+        drop(activity);
+        Ok(status)
     }));
-    drop(activity);
     match outcome {
-        Ok(status) => result(status, OwnedBytes::empty()),
+        Ok(Ok(status)) => result(status, OwnedBytes::empty()),
+        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
         Err(payload) => host_panic(&*payload),
     }
 }
 
-unsafe extern "C" fn abort(context: *const c_void, id: u64) {
-    let context = unsafe { &*context.cast::<HandleContext>() };
-    if let Some(Some(handle)) = context.owner.state.lock().unwrap().tasks.get(&id) {
-        handle.abort();
-    }
+unsafe extern "C" fn abort(context: *const c_void, id: u64) -> CallResult {
+    host_callback(|| {
+        let context = unsafe { &*context.cast::<HandleContext>() };
+        if let Some(Some(handle)) = context.owner.state.lock().unwrap().tasks.get(&id) {
+            handle.abort();
+        }
+    })
 }
 
-unsafe extern "C" fn is_finished(context: *const c_void, id: u64) -> bool {
-    let context = unsafe { &*context.cast::<HandleContext>() };
-    match context.owner.state.lock().unwrap().tasks.get(&id) {
-        Some(Some(handle)) => handle.is_finished(),
-        Some(None) => false,
-        None => true,
+unsafe extern "C" fn is_finished(context: *const c_void, id: u64) -> telekio::BoolResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let context = unsafe { &*context.cast::<HandleContext>() };
+        match context.owner.state.lock().unwrap().tasks.get(&id) {
+            Some(Some(handle)) => handle.is_finished(),
+            Some(None) => false,
+            None => true,
+        }
+    })) {
+        Ok(value) => telekio::BoolResult {
+            call: CallResult::ok(),
+            value,
+        },
+        Err(payload) => telekio::BoolResult {
+            call: host_panic(&*payload),
+            value: false,
+        },
     }
 }
 
 unsafe extern "C" fn build(context: *const c_void, config: RuntimeConfig) -> BuildResult {
-    let context = unsafe { &*context.cast::<HandleContext>() };
-    let _activity = match context.owner.activity() {
-        Ok(activity) => activity,
-        Err(error) => {
-            return BuildResult::error(result(Status::Error, OwnedBytes::from_string(error)));
-        }
-    };
     match catch_unwind(AssertUnwindSafe(|| {
-        build_runtime(config, Arc::clone(&context.owner))
-    })) {
-        Ok(Ok((kind, handle, workers))) => {
-            let runtime = Arc::new(RuntimeOwner {
-                id: OnceLock::new(),
-                owner: Arc::downgrade(&context.owner),
-                kind: RwLock::new(kind),
-            });
-            let id = match context.owner.register_runtime(Arc::clone(&runtime)) {
-                Ok(id) => id,
-                Err(error) => {
-                    let closed =
-                        std::thread::spawn(move || runtime.close(Shutdown::Wait, Duration::ZERO))
-                            .join();
-                    return BuildResult::error(match closed {
-                        Ok(Ok(())) => result(Status::Error, OwnedBytes::from_string(error)),
-                        Ok(Err(error)) => {
-                            result(Status::Error, OwnedBytes::from_string(error.to_string()))
-                        }
-                        Err(payload) => host_panic(&*payload),
-                    });
-                }
-            };
-            runtime.id.set(id).unwrap();
-            let raw_handle = raw_handle(handle);
-            BuildResult::success(
-                unsafe {
-                    RawRuntime::from_raw(Arc::into_raw(runtime).cast_mut().cast(), raw_handle)
-                },
-                workers,
-            )
+        let context = unsafe { &*context.cast::<HandleContext>() };
+        let _activity = match context.owner.activity() {
+            Ok(activity) => activity,
+            Err(error) => {
+                return BuildResult::error(result(Status::Error, OwnedBytes::from_string(error)));
+            }
+        };
+        match build_runtime(config, Arc::clone(&context.owner)) {
+            Ok((kind, handle, workers)) => {
+                let runtime = Arc::new(RuntimeOwner {
+                    id: OnceLock::new(),
+                    owner: Arc::downgrade(&context.owner),
+                    kind: RwLock::new(kind),
+                });
+                let id = match context.owner.register_runtime(Arc::clone(&runtime)) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        let closed = std::thread::spawn(move || {
+                            runtime.close(Shutdown::Wait, Duration::ZERO)
+                        })
+                        .join();
+                        return BuildResult::error(match closed {
+                            Ok(Ok(())) => result(Status::Error, OwnedBytes::from_string(error)),
+                            Ok(Err(error)) => {
+                                result(Status::Error, OwnedBytes::from_string(error.to_string()))
+                            }
+                            Err(payload) => host_panic(&*payload),
+                        });
+                    }
+                };
+                runtime.id.set(id).unwrap();
+                let raw_handle = raw_handle(handle);
+                BuildResult::success(
+                    unsafe {
+                        RawRuntime::from_raw(Arc::into_raw(runtime).cast_mut().cast(), raw_handle)
+                    },
+                    workers,
+                )
+            }
+            Err(error) => BuildResult::error(result(
+                Status::Error,
+                OwnedBytes::from_string(error.to_string()),
+            )),
         }
-        Ok(Err(error)) => BuildResult::error(result(
-            Status::Error,
-            OwnedBytes::from_string(error.to_string()),
-        )),
+    })) {
+        Ok(result) => result,
         Err(payload) => BuildResult::error(host_panic(&*payload)),
     }
 }
 
-unsafe extern "C" fn clock(context: *const c_void) -> ClockSample {
-    let context = unsafe { &*context.cast::<HandleContext>() };
-    let origin = *CLOCK_ORIGIN.get_or_init(std::time::Instant::now);
-    let realtime = instant_offset(origin, std::time::Instant::now());
-    let _guard = context.handle.enter();
-    let logical = instant_offset(origin, tokio::time::Instant::now().into_std());
-    ClockSample { realtime, logical }
+unsafe extern "C" fn clock(context: *const c_void) -> telekio::ClockResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let context = unsafe { &*context.cast::<HandleContext>() };
+        let origin = *CLOCK_ORIGIN.get_or_init(std::time::Instant::now);
+        let realtime = instant_offset(origin, std::time::Instant::now());
+        let _guard = context.handle.enter();
+        let logical = instant_offset(origin, tokio::time::Instant::now().into_std());
+        ClockSample { realtime, logical }
+    })) {
+        Ok(value) => telekio::ClockResult {
+            call: CallResult::ok(),
+            value,
+        },
+        Err(payload) => telekio::ClockResult {
+            call: host_panic(&*payload),
+            value: ClockSample {
+                realtime: InstantOffset {
+                    duration: DurationParts::new(Duration::ZERO),
+                    negative: 0,
+                },
+                logical: InstantOffset {
+                    duration: DurationParts::new(Duration::ZERO),
+                    negative: 0,
+                },
+            },
+        },
+    }
 }
 
 unsafe extern "C" fn pause(context: *const c_void) -> CallResult {
@@ -954,11 +997,11 @@ unsafe extern "C" fn timer(context: *const c_void, duration: DurationParts) -> T
 }
 
 unsafe extern "C" fn poll_time_timer(data: *mut c_void, waker: *const Waker) -> OperationPoll {
-    let timer = unsafe { &*data.cast::<HostResource<TimeTimer>>() };
-    timer.update_waker(unsafe { &*waker });
-    let waker = unsafe { (*waker).clone_rust_waker() };
-    let mut context = TaskContext::from_waker(&waker);
     match catch_unwind(AssertUnwindSafe(|| {
+        let timer = unsafe { &*data.cast::<HostResource<TimeTimer>>() };
+        timer.update_waker(unsafe { &*waker });
+        let waker = unsafe { (*waker).clone_rust_waker() };
+        let mut context = TaskContext::from_waker(&waker);
         timer.with_mut(|timer| timer.sleep.as_mut().poll(&mut context))
     })) {
         Ok(Ok(RustPoll::Pending)) => {
@@ -992,14 +1035,25 @@ unsafe extern "C" fn reset_time_timer(data: *mut c_void, duration: DurationParts
     }
 }
 
-unsafe extern "C" fn time_timer_elapsed(data: *const c_void) -> bool {
-    unsafe { &*data.cast::<HostResource<TimeTimer>>() }
-        .with(|timer| timer.sleep.is_elapsed())
-        .unwrap_or(true)
+unsafe extern "C" fn time_timer_elapsed(data: *const c_void) -> telekio::BoolResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        unsafe { &*data.cast::<HostResource<TimeTimer>>() }
+            .with(|timer| timer.sleep.is_elapsed())
+            .unwrap_or(true)
+    })) {
+        Ok(value) => telekio::BoolResult {
+            call: CallResult::ok(),
+            value,
+        },
+        Err(payload) => telekio::BoolResult {
+            call: host_panic(&*payload),
+            value: true,
+        },
+    }
 }
 
-unsafe extern "C" fn release_time_timer(data: *mut c_void) {
-    unsafe { Arc::from_raw(data.cast::<HostResource<TimeTimer>>()) }.release();
+unsafe extern "C" fn release_time_timer(data: *mut c_void) -> CallResult {
+    host_callback(|| unsafe { Arc::from_raw(data.cast::<HostResource<TimeTimer>>()) }.release())
 }
 
 fn time_poll(state: Poll, call: CallResult) -> OperationPoll {
@@ -1022,31 +1076,40 @@ fn instant_offset(origin: std::time::Instant, instant: std::time::Instant) -> In
 unsafe extern "C" fn reap_process(context: *const c_void, id: u32) -> CallResult {
     #[cfg(unix)]
     {
-        let context = unsafe { &*context.cast::<HandleContext>() };
-        let _guard = context.handle.enter();
-        let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child());
-        match signal {
-            Ok(mut signal) => {
-                context.handle.spawn(async move {
-                    loop {
-                        let result = unsafe {
-                            libc::waitpid(id as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG)
-                        };
-                        if result > 0 {
-                            break;
-                        }
-                        if result < 0 {
-                            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                                continue;
+        match catch_unwind(AssertUnwindSafe(|| {
+            let context = unsafe { &*context.cast::<HandleContext>() };
+            let _guard = context.handle.enter();
+            let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child());
+            match signal {
+                Ok(mut signal) => {
+                    context.handle.spawn(async move {
+                        loop {
+                            let result = unsafe {
+                                libc::waitpid(
+                                    id as libc::pid_t,
+                                    std::ptr::null_mut(),
+                                    libc::WNOHANG,
+                                )
+                            };
+                            if result > 0 {
+                                break;
                             }
-                            break;
+                            if result < 0 {
+                                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                                    continue;
+                                }
+                                break;
+                            }
+                            signal.recv().await;
                         }
-                        signal.recv().await;
-                    }
-                });
-                result(Status::Ok, OwnedBytes::empty())
+                    });
+                    result(Status::Ok, OwnedBytes::empty())
+                }
+                Err(error) => result(Status::Error, OwnedBytes::from_string(error.to_string())),
             }
-            Err(error) => result(Status::Error, OwnedBytes::from_string(error.to_string())),
+        })) {
+            Ok(result) => result,
+            Err(payload) => host_panic(&*payload),
         }
     }
     #[cfg(not(unix))]
@@ -1203,6 +1266,13 @@ fn host_panic(payload: &(dyn Any + Send)) -> CallResult {
         Status::HostPanicked,
         OwnedBytes::from_string(panic_message(payload)),
     )
+}
+
+pub(crate) fn host_callback(call: impl FnOnce()) -> CallResult {
+    match catch_unwind(AssertUnwindSafe(call)) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => host_panic(&*payload),
+    }
 }
 
 fn panic_message(payload: &(dyn Any + Send)) -> String {

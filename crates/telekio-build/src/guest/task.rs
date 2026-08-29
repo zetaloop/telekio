@@ -337,37 +337,58 @@ unsafe fn poll_runner_inner<S: HostSchedule>(
     }
 }
 
-unsafe extern "C" fn cancel_runner<S: HostSchedule>(data: *mut std::ffi::c_void) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+unsafe extern "C" fn cancel_runner<S: HostSchedule>(
+    data: *mut std::ffi::c_void,
+) -> ::telekio::CallResult {
+    callback(|| {
         let task = unsafe { &mut *data.cast::<RunnerTask<S>>() };
         task.runner.abort.abort();
         let notified = task.runner.notified.lock().unwrap().take();
         if let Some(notified) = notified {
             task.schedule.run(notified);
         }
-    }));
+    })
 }
 
-unsafe extern "C" fn release_runner<S: HostSchedule>(data: *mut std::ffi::c_void) {
-    drop(unsafe { Box::from_raw(data.cast::<RunnerTask<S>>()) });
+unsafe extern "C" fn release_runner<S: HostSchedule>(
+    data: *mut std::ffi::c_void,
+) -> ::telekio::CallResult {
+    callback(|| drop(unsafe { Box::from_raw(data.cast::<RunnerTask<S>>()) }))
 }
 
-unsafe extern "C" fn run_blocking<S: HostSchedule>(data: *mut std::ffi::c_void) {
-    let runner = unsafe { &mut *data.cast::<BlockingRunner<S>>() };
-    let schedule = runner.schedule.clone();
-    schedule.enter(|| runner.task.take().expect("blocking task ran twice").run());
+unsafe extern "C" fn run_blocking<S: HostSchedule>(
+    data: *mut std::ffi::c_void,
+) -> ::telekio::CallResult {
+    callback(|| {
+        let runner = unsafe { &mut *data.cast::<BlockingRunner<S>>() };
+        let schedule = runner.schedule.clone();
+        schedule.enter(|| runner.task.take().expect("blocking task ran twice").run());
+    })
 }
 
-unsafe extern "C" fn cancel_blocking<S: HostSchedule>(data: *mut std::ffi::c_void) {
-    let runner = unsafe { &mut *data.cast::<BlockingRunner<S>>() };
-    let schedule = runner.schedule.clone();
-    schedule.enter(|| {
-        if let Some(task) = runner.task.take() {
-            task.shutdown();
-        }
-    });
+unsafe extern "C" fn cancel_blocking<S: HostSchedule>(
+    data: *mut std::ffi::c_void,
+) -> ::telekio::CallResult {
+    callback(|| {
+        let runner = unsafe { &mut *data.cast::<BlockingRunner<S>>() };
+        let schedule = runner.schedule.clone();
+        schedule.enter(|| {
+            if let Some(task) = runner.task.take() {
+                task.shutdown();
+            }
+        });
+    })
 }
 
-unsafe extern "C" fn release_blocking<S: HostSchedule>(data: *mut std::ffi::c_void) {
-    drop(unsafe { Box::from_raw(data.cast::<BlockingRunner<S>>()) });
+unsafe extern "C" fn release_blocking<S: HostSchedule>(
+    data: *mut std::ffi::c_void,
+) -> ::telekio::CallResult {
+    callback(|| drop(unsafe { Box::from_raw(data.cast::<BlockingRunner<S>>()) }))
+}
+
+fn callback(call: impl FnOnce()) -> ::telekio::CallResult {
+    match catch_unwind(AssertUnwindSafe(call)) {
+        Ok(()) => ::telekio::CallResult::ok(),
+        Err(payload) => ::telekio::CallResult::panicked(&*payload),
+    }
 }

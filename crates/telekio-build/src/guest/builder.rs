@@ -15,7 +15,7 @@ fn test_owner() -> &'static ::telekio_host::Owner {
 
 #[cfg(all(feature = "telekio-test", not(test)))]
 #[unsafe(no_mangle)]
-pub(super) extern "C" fn telekio_test_handle() -> ::telekio::RawHandle {
+pub(super) extern "C-unwind" fn telekio_test_handle() -> ::telekio::RawHandle {
     test_owner().runtime().into_abi()
 }
 

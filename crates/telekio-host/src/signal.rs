@@ -135,30 +135,38 @@ fn create(_: &HandleContext, _: SignalRequest) -> io::Result<Box<dyn Receiver>> 
 }
 
 unsafe extern "C" fn poll(data: *mut c_void, waker: *const Waker) -> OperationPoll {
-    let signal = unsafe { &*data.cast::<HostResource<Signal>>() };
-    signal.update_waker(unsafe { &*waker });
-    let waker = unsafe { (*waker).clone_rust_waker() };
-    let mut context = Context::from_waker(&waker);
-    match signal.with_mut(|signal| signal.receiver.poll_recv(&mut context)) {
-        Ok(state) => OperationPoll {
-            state: match state {
-                RustPoll::Pending => Poll::Pending,
-                RustPoll::Ready(()) => Poll::Ready,
+    match catch_unwind(AssertUnwindSafe(|| {
+        let signal = unsafe { &*data.cast::<HostResource<Signal>>() };
+        signal.update_waker(unsafe { &*waker });
+        let waker = unsafe { (*waker).clone_rust_waker() };
+        let mut context = Context::from_waker(&waker);
+        match signal.with_mut(|signal| signal.receiver.poll_recv(&mut context)) {
+            Ok(state) => OperationPoll {
+                state: match state {
+                    RustPoll::Pending => Poll::Pending,
+                    RustPoll::Ready(()) => Poll::Ready,
+                },
+                call: call_ok(),
             },
-            call: call_ok(),
-        },
-        Err(error) => OperationPoll {
-            state: Poll::Ready,
-            call: CallResult {
-                status: Status::Error,
-                payload: OwnedBytes::from_string(error),
+            Err(error) => OperationPoll {
+                state: Poll::Ready,
+                call: CallResult {
+                    status: Status::Error,
+                    payload: OwnedBytes::from_string(error),
+                },
             },
+        }
+    })) {
+        Ok(result) => result,
+        Err(payload) => OperationPoll {
+            state: Poll::Panicked,
+            call: super::host_panic(&*payload),
         },
     }
 }
 
-unsafe extern "C" fn release(data: *mut c_void) {
-    unsafe { Arc::from_raw(data.cast::<HostResource<Signal>>()) }.release();
+unsafe extern "C" fn release(data: *mut c_void) -> CallResult {
+    super::host_callback(|| unsafe { Arc::from_raw(data.cast::<HostResource<Signal>>()) }.release())
 }
 
 fn call_ok() -> CallResult {
