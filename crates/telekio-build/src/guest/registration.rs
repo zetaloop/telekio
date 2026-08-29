@@ -49,7 +49,7 @@ impl Registration {
         cx: &mut Context<'_>,
         interest: Interest,
     ) -> Poll<io::Result<ReadyEvent>> {
-        let waker = ::telekio::Waker::from_ref(cx.waker());
+        let waker = unsafe { ::telekio::Waker::from_ref(cx.waker()) };
         let result = self.shared.poll_telekio(telekio_interest(interest), &waker);
         match result.state {
             ::telekio::Poll::Pending => {

@@ -32,11 +32,11 @@ pub struct ClockSample {
 
 #[repr(C)]
 pub struct Timer {
-    pub data: *mut c_void,
-    pub poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
-    pub reset: unsafe extern "C" fn(*mut c_void, DurationParts) -> CallResult,
-    pub is_elapsed: unsafe extern "C" fn(*const c_void) -> bool,
-    pub release: unsafe extern "C" fn(*mut c_void),
+    data: *mut c_void,
+    poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
+    reset: unsafe extern "C" fn(*mut c_void, DurationParts) -> CallResult,
+    is_elapsed: unsafe extern "C" fn(*const c_void) -> bool,
+    release: unsafe extern "C" fn(*mut c_void),
 }
 
 #[repr(C)]
@@ -131,6 +131,27 @@ impl Timer {
         }
     }
 
+    /// # Safety
+    ///
+    /// `data` and the callbacks must describe one owned host timer whose state
+    /// is safe to move and access through shared references across threads.
+    #[doc(hidden)]
+    pub const unsafe fn from_raw(
+        data: *mut c_void,
+        poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
+        reset: unsafe extern "C" fn(*mut c_void, DurationParts) -> CallResult,
+        is_elapsed: unsafe extern "C" fn(*const c_void) -> bool,
+        release: unsafe extern "C" fn(*mut c_void),
+    ) -> Self {
+        Self {
+            data,
+            poll,
+            reset,
+            is_elapsed,
+            release,
+        }
+    }
+
     pub fn from_result(result: TimerResult) -> Self {
         result
             .call
@@ -140,7 +161,7 @@ impl Timer {
     }
 
     pub fn poll(&mut self, context: &mut Context<'_>) -> RustPoll<()> {
-        let waker = Waker::from_ref(context.waker());
+        let waker = unsafe { Waker::from_ref(context.waker()) };
         let result = unsafe { (self.poll)(self.data, &raw const waker) };
         poll_result(result)
     }

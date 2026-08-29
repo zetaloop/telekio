@@ -95,7 +95,7 @@ impl Builder {
                 global_queue_interval: self.global_queue_interval.unwrap_or_default(),
                 event_interval: self.event_interval,
                 max_io_events_per_tick: self.nevents,
-                name: ::telekio::Bytes::borrow(self.name.as_deref()),
+                name: unsafe { ::telekio::Bytes::borrow(self.name.as_deref()) },
             })
             .into_runtime()
             .map(|(runtime, _)| runtime)

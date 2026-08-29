@@ -60,7 +60,7 @@ pub(crate) fn defer(waker: &std::task::Waker) {
         return;
     }
     match super::with_current(|handle| {
-        let waker = ::telekio::Waker::from_ref(waker);
+        let waker = unsafe { ::telekio::Waker::from_ref(waker) };
         handle.host().defer(&waker)
     }) {
         Ok(result) => result

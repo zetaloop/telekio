@@ -21,8 +21,8 @@ pub enum IoKind {
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct IoResource {
-    pub kind: IoKind,
-    pub raw: u64,
+    kind: IoKind,
+    raw: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,9 +133,9 @@ pub enum IoOperationKind {
 
 #[repr(C)]
 pub struct IoRequest {
-    pub kind: IoOperationKind,
-    pub data: *mut u8,
-    pub len: usize,
+    kind: IoOperationKind,
+    data: *mut u8,
+    len: usize,
 }
 
 #[repr(C)]
@@ -167,25 +167,74 @@ unsafe impl Send for IoOperation {}
 unsafe impl Sync for IoOperation {}
 
 impl IoResource {
-    pub const fn fd(raw: i32) -> Self {
+    /// # Safety
+    ///
+    /// `raw` must remain a valid file descriptor until the registration call
+    /// returns.
+    #[doc(hidden)]
+    pub const unsafe fn fd(raw: i32) -> Self {
         Self {
             kind: IoKind::Fd,
             raw: raw as u32 as u64,
         }
     }
 
-    pub const fn socket(raw: u64) -> Self {
+    /// # Safety
+    ///
+    /// `raw` must remain a valid socket until the registration call returns.
+    #[doc(hidden)]
+    pub const unsafe fn socket(raw: u64) -> Self {
         Self {
             kind: IoKind::Socket,
             raw,
         }
     }
 
-    pub const fn handle(raw: u64) -> Self {
+    /// # Safety
+    ///
+    /// `raw` must remain a valid handle until the registration call returns.
+    #[doc(hidden)]
+    pub const unsafe fn handle(raw: u64) -> Self {
         Self {
             kind: IoKind::Handle,
             raw,
         }
+    }
+
+    #[doc(hidden)]
+    pub const fn kind(self) -> IoKind {
+        self.kind
+    }
+
+    #[doc(hidden)]
+    pub const fn raw(self) -> u64 {
+        self.raw
+    }
+}
+
+impl IoRequest {
+    /// # Safety
+    ///
+    /// `data..data + len` must remain valid for the requested synchronous I/O
+    /// operation and permit access matching `kind`.
+    #[doc(hidden)]
+    pub const unsafe fn from_raw(kind: IoOperationKind, data: *mut u8, len: usize) -> Self {
+        Self { kind, data, len }
+    }
+
+    #[doc(hidden)]
+    pub const fn kind(&self) -> IoOperationKind {
+        self.kind
+    }
+
+    #[doc(hidden)]
+    pub const fn buffer(&self) -> *mut u8 {
+        self.data
+    }
+
+    #[doc(hidden)]
+    pub const fn buffer_len(&self) -> usize {
+        self.len
     }
 }
 
@@ -290,7 +339,8 @@ impl IoRegistration {
 
     /// # Safety
     ///
-    /// `data` and the callbacks must describe one owned host registration.
+    /// `data` and the callbacks must describe one owned host registration whose
+    /// state synchronizes concurrent access across threads.
     pub const unsafe fn from_raw(
         data: *mut c_void,
         poll: unsafe extern "C" fn(*mut c_void, IoInterest, *const Waker) -> IoPoll,
@@ -376,7 +426,9 @@ impl IoOperation {
 
     /// # Safety
     ///
-    /// `data` and both callbacks must describe one owned host operation.
+    /// `data` and both callbacks must describe one owned host operation whose
+    /// state is safe to move and access through shared references across
+    /// threads.
     pub const unsafe fn from_raw(
         data: *mut c_void,
         poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> IoPoll,
@@ -394,7 +446,7 @@ impl Future for IoOperation {
     type Output = std::io::Result<IoReady>;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> RustPoll<Self::Output> {
-        let waker = Waker::from_ref(context.waker());
+        let waker = unsafe { Waker::from_ref(context.waker()) };
         let result = unsafe { (self.poll)(self.data, &raw const waker) };
         match result.state {
             Poll::Pending => {

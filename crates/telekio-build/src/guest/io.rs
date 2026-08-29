@@ -8,7 +8,7 @@ pub(crate) trait Source {
 #[cfg(unix)]
 impl<T: std::os::fd::AsRawFd> Source for T {
     fn telekio_resource(&self) -> ::telekio::IoResource {
-        ::telekio::IoResource::fd(self.as_raw_fd())
+        unsafe { ::telekio::IoResource::fd(self.as_raw_fd()) }
     }
 }
 
@@ -19,7 +19,7 @@ macro_rules! socket_source {
             impl Source for $ty {
                 fn telekio_resource(&self) -> ::telekio::IoResource {
                     use std::os::windows::io::AsRawSocket;
-                    ::telekio::IoResource::socket(self.as_raw_socket() as u64)
+                    unsafe { ::telekio::IoResource::socket(self.as_raw_socket() as u64) }
                 }
             }
         )+
@@ -37,7 +37,7 @@ socket_source!(
 impl Source for mio::windows::NamedPipe {
     fn telekio_resource(&self) -> ::telekio::IoResource {
         use std::os::windows::io::AsRawHandle;
-        ::telekio::IoResource::handle(self.as_raw_handle() as usize as u64)
+        unsafe { ::telekio::IoResource::handle(self.as_raw_handle() as usize as u64) }
     }
 }
 
@@ -132,7 +132,7 @@ pub(crate) fn operation(
     data: *mut u8,
     len: usize,
 ) -> std::io::Result<usize> {
-    let result = registration.try_operate(::telekio::IoRequest { kind, data, len });
+    let result = registration.try_operate(unsafe { ::telekio::IoRequest::from_raw(kind, data, len) });
     match result.state {
         ::telekio::Poll::Pending => {
             unsafe { result.call.payload.release() };

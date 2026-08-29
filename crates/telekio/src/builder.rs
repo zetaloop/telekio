@@ -27,8 +27,8 @@ pub enum Shutdown {
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Bytes {
-    pub data: *const u8,
-    pub len: usize,
+    data: *const u8,
+    len: usize,
 }
 
 unsafe impl Send for Bytes {}
@@ -36,9 +36,9 @@ unsafe impl Sync for Bytes {}
 
 #[repr(C)]
 pub struct Callback {
-    pub data: *const c_void,
-    pub call: unsafe extern "C" fn(*const c_void) -> CallResult,
-    pub release: unsafe extern "C" fn(*const c_void),
+    data: *const c_void,
+    call: unsafe extern "C" fn(*const c_void) -> CallResult,
+    release: unsafe extern "C" fn(*const c_void),
 }
 
 unsafe impl Send for Callback {}
@@ -46,9 +46,9 @@ unsafe impl Sync for Callback {}
 
 #[repr(C)]
 pub struct StringCallback {
-    pub data: *const c_void,
-    pub call: unsafe extern "C" fn(*const c_void) -> CallResult,
-    pub release: unsafe extern "C" fn(*const c_void),
+    data: *const c_void,
+    call: unsafe extern "C" fn(*const c_void) -> CallResult,
+    release: unsafe extern "C" fn(*const c_void),
 }
 
 unsafe impl Send for StringCallback {}
@@ -80,12 +80,34 @@ pub struct RuntimeConfig {
 
 #[repr(C)]
 pub struct BuildResult {
-    pub call: CallResult,
-    pub runtime: RawRuntime,
-    pub workers: usize,
+    call: CallResult,
+    runtime: RawRuntime,
+    workers: usize,
 }
 
 impl BuildResult {
+    #[doc(hidden)]
+    pub fn success(runtime: RawRuntime, workers: usize) -> Self {
+        assert!(!runtime.is_empty(), "host returned an empty Tokio runtime");
+        Self {
+            call: CallResult {
+                status: Status::Ok,
+                payload: OwnedBytes::empty(),
+            },
+            runtime,
+            workers,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn error(call: CallResult) -> Self {
+        Self {
+            call,
+            runtime: RawRuntime::empty(),
+            workers: 0,
+        }
+    }
+
     #[doc(hidden)]
     pub fn into_runtime(self) -> std::io::Result<(Runtime, usize)> {
         self.call.into_io_result()?;
@@ -94,7 +116,11 @@ impl BuildResult {
 }
 
 impl Bytes {
-    pub fn borrow(value: Option<&str>) -> Self {
+    /// # Safety
+    ///
+    /// The borrowed string must remain valid until the host build call returns.
+    #[doc(hidden)]
+    pub unsafe fn borrow(value: Option<&str>) -> Self {
         value.map_or(
             Self {
                 data: std::ptr::null(),
@@ -115,6 +141,10 @@ impl Bytes {
             return "";
         }
         unsafe { str::from_utf8_unchecked(slice::from_raw_parts(self.data, self.len)) }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 }
 
@@ -138,6 +168,17 @@ impl Callback {
     pub fn is_some(&self) -> bool {
         !self.data.is_null()
     }
+
+    #[doc(hidden)]
+    pub fn call(&self) -> CallResult {
+        unsafe { (self.call)(self.data) }
+    }
+}
+
+impl Drop for Callback {
+    fn drop(&mut self) {
+        unsafe { (self.release)(self.data) };
+    }
 }
 
 impl StringCallback {
@@ -147,6 +188,17 @@ impl StringCallback {
             call: call_string_callback,
             release: release_string_callback,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn call(&self) -> CallResult {
+        unsafe { (self.call)(self.data) }
+    }
+}
+
+impl Drop for StringCallback {
+    fn drop(&mut self) {
+        unsafe { (self.release)(self.data) };
     }
 }
 

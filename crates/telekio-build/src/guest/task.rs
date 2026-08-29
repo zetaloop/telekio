@@ -177,11 +177,13 @@ impl<S: HostSchedule> Registry<S> {
         drop(runners);
 
         let task = Box::new(RunnerTask { schedule, runner });
-        let task = ::telekio::Task {
-            data: Box::into_raw(task).cast(),
-            poll: poll_runner::<S>,
-            cancel: cancel_runner::<S>,
-            release: release_runner::<S>,
+        let task = unsafe {
+            ::telekio::Task::from_raw(
+                Box::into_raw(task).cast(),
+                poll_runner::<S>,
+                cancel_runner::<S>,
+                release_runner::<S>,
+            )
         };
         let result = if local {
             self.host().handle.spawn_local(id.as_u64(), task)
@@ -222,11 +224,13 @@ impl<S: HostSchedule> Registry<S> {
             schedule: runner_schedule,
             task: Some(task),
         });
-        let task = ::telekio::BlockingTask {
-            data: Box::into_raw(runner).cast(),
-            run: run_blocking::<S>,
-            cancel: cancel_blocking::<S>,
-            release: release_blocking::<S>,
+        let task = unsafe {
+            ::telekio::BlockingTask::from_raw(
+                Box::into_raw(runner).cast(),
+                run_blocking::<S>,
+                cancel_blocking::<S>,
+                release_blocking::<S>,
+            )
         };
         self.host()
             .handle

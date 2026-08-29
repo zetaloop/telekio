@@ -129,13 +129,13 @@ fn register_inner(
 ) -> io::Result<Registration> {
     use std::os::fd::{BorrowedFd, RawFd};
 
-    if resource.kind != IoKind::Fd {
+    if resource.kind() != IoKind::Fd {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "expected a Unix file descriptor",
         ));
     }
-    let raw = resource.raw as u32 as RawFd;
+    let raw = resource.raw() as u32 as RawFd;
     if raw < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -163,16 +163,16 @@ fn register_inner(
         BorrowedHandle, BorrowedSocket, IntoRawHandle, RawHandle, RawSocket,
     };
 
-    let io = match resource.kind {
+    let io = match resource.kind() {
         IoKind::Socket => {
-            let socket = unsafe { BorrowedSocket::borrow_raw(resource.raw as RawSocket) }
+            let socket = unsafe { BorrowedSocket::borrow_raw(resource.raw() as RawSocket) }
                 .try_clone_to_owned()?;
             let socket = std::net::UdpSocket::from(socket);
             let _guard = context.handle.enter();
             WindowsIo::Socket(Arc::new(tokio::net::UdpSocket::from_std(socket)?))
         }
         IoKind::Handle => {
-            let raw = resource.raw as usize as RawHandle;
+            let raw = resource.raw() as usize as RawHandle;
             let handle = unsafe { BorrowedHandle::borrow_raw(raw) }.try_clone_to_owned()?;
             let _guard = context.handle.enter();
             WindowsIo::Pipe(Arc::new(unsafe {
@@ -486,22 +486,24 @@ fn try_operate_inner(registration: &Registration, request: IoRequest) -> IoPoll 
             "socket operation is guest-owned",
         ));
     };
-    if request.data.is_null() && request.len != 0 {
+    if request.buffer().is_null() && request.buffer_len() != 0 {
         return pipe_error(io::Error::new(
             io::ErrorKind::InvalidInput,
             "I/O buffer is null",
         ));
     }
-    match request.kind {
+    match request.kind() {
         IoOperationKind::Read => {
-            let buffer = unsafe { std::slice::from_raw_parts_mut(request.data, request.len) };
+            let buffer =
+                unsafe { std::slice::from_raw_parts_mut(request.buffer(), request.buffer_len()) };
             match pipe.try_read(buffer) {
                 Ok(value) => io_poll_value(Poll::Ready, call_ok(), IoReady::empty(), value),
                 Err(error) => io_poll_error(Poll::Ready, error, IoReady::empty()),
             }
         }
         IoOperationKind::Write => {
-            let buffer = unsafe { std::slice::from_raw_parts(request.data, request.len) };
+            let buffer =
+                unsafe { std::slice::from_raw_parts(request.buffer(), request.buffer_len()) };
             match pipe.try_write(buffer) {
                 Ok(value) => io_poll_value(Poll::Ready, call_ok(), IoReady::empty(), value),
                 Err(error) => io_poll_error(Poll::Ready, error, IoReady::empty()),

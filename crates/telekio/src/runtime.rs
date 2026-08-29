@@ -25,7 +25,6 @@ pub struct RawHandle {
     pub(crate) api: *const RuntimeApi,
 }
 
-#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct RawRuntime {
     owner: *mut c_void,
@@ -104,41 +103,39 @@ pub struct MetricResult {
 
 #[repr(C)]
 pub struct OwnedBytes {
-    pub data: *mut u8,
-    pub len: usize,
-    pub release: unsafe extern "C" fn(*mut u8, usize),
+    data: *mut u8,
+    len: usize,
+    release: unsafe extern "C" fn(*mut u8, usize),
 }
 
-#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Future {
-    pub data: *mut c_void,
-    pub poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> Poll,
+    data: *mut c_void,
+    poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> Poll,
 }
 
 #[repr(C)]
 pub struct Task {
-    pub data: *mut c_void,
-    pub poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> Poll,
-    pub cancel: unsafe extern "C" fn(*mut c_void),
-    pub release: unsafe extern "C" fn(*mut c_void),
+    data: *mut c_void,
+    poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> Poll,
+    cancel: unsafe extern "C" fn(*mut c_void),
+    release: unsafe extern "C" fn(*mut c_void),
 }
 
 #[repr(C)]
 pub struct BlockingTask {
-    pub data: *mut c_void,
-    pub run: unsafe extern "C" fn(*mut c_void),
-    pub cancel: unsafe extern "C" fn(*mut c_void),
-    pub release: unsafe extern "C" fn(*mut c_void),
+    data: *mut c_void,
+    run: unsafe extern "C" fn(*mut c_void),
+    cancel: unsafe extern "C" fn(*mut c_void),
+    release: unsafe extern "C" fn(*mut c_void),
 }
 
 unsafe impl Send for BlockingTask {}
 
-#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Blocking {
-    pub data: *mut c_void,
-    pub run: unsafe extern "C" fn(*mut c_void) -> Status,
+    data: *mut c_void,
+    run: unsafe extern "C" fn(*mut c_void) -> Status,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -187,7 +184,137 @@ impl RawHandle {
     }
 }
 
+impl Future {
+    /// # Safety
+    ///
+    /// `data` must remain valid and exclusively accessible for every call to
+    /// `poll`.
+    #[doc(hidden)]
+    pub const unsafe fn from_raw(
+        data: *mut c_void,
+        poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> Poll,
+    ) -> Self {
+        Self { data, poll }
+    }
+
+    #[doc(hidden)]
+    pub fn poll(&mut self, waker: &Waker) -> Poll {
+        unsafe { (self.poll)(self.data, waker) }
+    }
+}
+
+impl Task {
+    /// # Safety
+    ///
+    /// `data` and the callbacks must describe one owned task state. `cancel`
+    /// may be called at most once before this value is dropped. The state must
+    /// be `Send` when passed to `Handle::spawn`; non-`Send` state may only be
+    /// passed to `Handle::spawn_local`.
+    #[doc(hidden)]
+    pub const unsafe fn from_raw(
+        data: *mut c_void,
+        poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> Poll,
+        cancel: unsafe extern "C" fn(*mut c_void),
+        release: unsafe extern "C" fn(*mut c_void),
+    ) -> Self {
+        Self {
+            data,
+            poll,
+            cancel,
+            release,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn poll(&mut self, waker: &Waker) -> Poll {
+        unsafe { (self.poll)(self.data, waker) }
+    }
+
+    /// # Safety
+    ///
+    /// The task must not have been cancelled or completed already.
+    #[doc(hidden)]
+    pub unsafe fn cancel(&mut self) {
+        unsafe { (self.cancel)(self.data) };
+    }
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        unsafe { (self.release)(self.data) };
+    }
+}
+
+impl BlockingTask {
+    /// # Safety
+    ///
+    /// `data` and the callbacks must describe one owned, `Send` blocking task
+    /// state. Exactly one of `run` or `cancel` may be called before this value
+    /// is dropped.
+    #[doc(hidden)]
+    pub const unsafe fn from_raw(
+        data: *mut c_void,
+        run: unsafe extern "C" fn(*mut c_void),
+        cancel: unsafe extern "C" fn(*mut c_void),
+        release: unsafe extern "C" fn(*mut c_void),
+    ) -> Self {
+        Self {
+            data,
+            run,
+            cancel,
+            release,
+        }
+    }
+
+    /// # Safety
+    ///
+    /// This task must not have been run or cancelled already.
+    #[doc(hidden)]
+    pub unsafe fn run(&mut self) {
+        unsafe { (self.run)(self.data) };
+    }
+
+    /// # Safety
+    ///
+    /// This task must not have been run or cancelled already.
+    #[doc(hidden)]
+    pub unsafe fn cancel(&mut self) {
+        unsafe { (self.cancel)(self.data) };
+    }
+}
+
+impl Drop for BlockingTask {
+    fn drop(&mut self) {
+        unsafe { (self.release)(self.data) };
+    }
+}
+
+impl Blocking {
+    /// # Safety
+    ///
+    /// `data` must remain valid for one call to `run`.
+    #[doc(hidden)]
+    pub const unsafe fn from_raw(
+        data: *mut c_void,
+        run: unsafe extern "C" fn(*mut c_void) -> Status,
+    ) -> Self {
+        Self { data, run }
+    }
+
+    /// # Safety
+    ///
+    /// The backing call state must still be valid and may be invoked once.
+    #[doc(hidden)]
+    pub unsafe fn run(self) -> Status {
+        unsafe { (self.run)(self.data) }
+    }
+}
+
 impl RawRuntime {
+    pub const fn is_empty(&self) -> bool {
+        self.owner.is_null() || self.handle.is_empty()
+    }
+
     pub const fn empty() -> Self {
         Self {
             owner: std::ptr::null_mut(),
@@ -443,10 +570,7 @@ fn block_on<F: RustFuture>(future: F, call: impl FnOnce(Future) -> CallResult) -
         future: Some(Box::pin(future)),
         result: None,
     };
-    let result = call(Future {
-        data: (&raw mut state).cast(),
-        poll: poll_future::<F>,
-    });
+    let result = call(unsafe { Future::from_raw((&raw mut state).cast(), poll_future::<F>) });
     match (result.status, state.result) {
         (Status::Ok, Some(Ok(output))) => {
             unsafe { result.payload.release() };
@@ -507,7 +631,11 @@ unsafe extern "C" fn poll_future<F: RustFuture>(data: *mut c_void, waker: *const
 }
 
 impl Waker {
-    pub fn from_ref(waker: &RustWaker) -> Self {
+    /// # Safety
+    ///
+    /// `waker` must outlive every use of the returned borrowed descriptor.
+    #[doc(hidden)]
+    pub unsafe fn from_ref(waker: &RustWaker) -> Self {
         Self {
             data: (waker as *const RustWaker).cast(),
             clone: clone_borrowed,

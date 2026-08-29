@@ -547,11 +547,11 @@ impl LocalSlot {
 
 impl CallbackOwner {
     fn is_some(&self) -> bool {
-        !self.0.data.is_null()
+        self.0.is_some()
     }
 
     fn call(&self) {
-        let result = unsafe { (self.0.call)(self.0.data) };
+        let result = self.0.call();
         match result.status {
             Status::Ok => unsafe { result.payload.release() },
             Status::Panicked | Status::HostPanicked | Status::Error => {
@@ -561,27 +561,15 @@ impl CallbackOwner {
     }
 }
 
-impl Drop for CallbackOwner {
-    fn drop(&mut self) {
-        unsafe { (self.0.release)(self.0.data) };
-    }
-}
-
 impl StringCallbackOwner {
     fn call(&self) -> String {
-        let result = unsafe { (self.0.call)(self.0.data) };
+        let result = self.0.call();
         match result.status {
             Status::Ok => unsafe { result.payload.into_string() },
             Status::Panicked | Status::HostPanicked | Status::Error => {
                 resume_unwind(Box::new(unsafe { result.payload.into_string() }));
             }
         }
-    }
-}
-
-impl Drop for StringCallbackOwner {
-    fn drop(&mut self) {
-        unsafe { (self.0.release)(self.0.data) };
     }
 }
 
@@ -815,7 +803,7 @@ unsafe extern "C" fn block_in_place(context: *const c_void, blocking: Blocking) 
     };
     context.owner.wake_activities();
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        tokio::task::block_in_place(|| unsafe { (blocking.run)(blocking.data) })
+        tokio::task::block_in_place(|| unsafe { blocking.run() })
     }));
     drop(activity);
     match outcome {
@@ -845,12 +833,7 @@ unsafe extern "C" fn build(context: *const c_void, config: RuntimeConfig) -> Bui
     let _activity = match context.owner.activity() {
         Ok(activity) => activity,
         Err(error) => {
-            release_runtime_config(config);
-            return BuildResult {
-                call: result(Status::Error, OwnedBytes::from_string(error)),
-                runtime: RawRuntime::empty(),
-                workers: 0,
-            };
+            return BuildResult::error(result(Status::Error, OwnedBytes::from_string(error)));
         }
     };
     match catch_unwind(AssertUnwindSafe(|| {
@@ -868,39 +851,29 @@ unsafe extern "C" fn build(context: *const c_void, config: RuntimeConfig) -> Bui
                     let closed =
                         std::thread::spawn(move || runtime.close(Shutdown::Wait, Duration::ZERO))
                             .join();
-                    return BuildResult {
-                        call: match closed {
-                            Ok(Ok(())) => result(Status::Error, OwnedBytes::from_string(error)),
-                            Ok(Err(error)) => {
-                                result(Status::Error, OwnedBytes::from_string(error.to_string()))
-                            }
-                            Err(payload) => host_panic(&*payload),
-                        },
-                        runtime: RawRuntime::empty(),
-                        workers: 0,
-                    };
+                    return BuildResult::error(match closed {
+                        Ok(Ok(())) => result(Status::Error, OwnedBytes::from_string(error)),
+                        Ok(Err(error)) => {
+                            result(Status::Error, OwnedBytes::from_string(error.to_string()))
+                        }
+                        Err(payload) => host_panic(&*payload),
+                    });
                 }
             };
             runtime.id.set(id).unwrap();
             let raw_handle = raw_handle(handle);
-            BuildResult {
-                call: result(Status::Ok, OwnedBytes::empty()),
-                runtime: unsafe {
+            BuildResult::success(
+                unsafe {
                     RawRuntime::from_raw(Arc::into_raw(runtime).cast_mut().cast(), raw_handle)
                 },
                 workers,
-            }
+            )
         }
-        Ok(Err(error)) => BuildResult {
-            call: result(Status::Error, OwnedBytes::from_string(error.to_string())),
-            runtime: RawRuntime::empty(),
-            workers: 0,
-        },
-        Err(payload) => BuildResult {
-            call: host_panic(&*payload),
-            runtime: RawRuntime::empty(),
-            workers: 0,
-        },
+        Ok(Err(error)) => BuildResult::error(result(
+            Status::Error,
+            OwnedBytes::from_string(error.to_string()),
+        )),
+        Err(payload) => BuildResult::error(host_panic(&*payload)),
     }
 }
 
@@ -959,12 +932,14 @@ unsafe extern "C" fn timer(context: *const c_void, duration: DurationParts) -> T
     })) {
         Ok(Ok(timer)) => TimerResult {
             call: result(Status::Ok, OwnedBytes::empty()),
-            timer: Timer {
-                data: Arc::into_raw(timer).cast_mut().cast(),
-                poll: poll_time_timer,
-                reset: reset_time_timer,
-                is_elapsed: time_timer_elapsed,
-                release: release_time_timer,
+            timer: unsafe {
+                Timer::from_raw(
+                    Arc::into_raw(timer).cast_mut().cast(),
+                    poll_time_timer,
+                    reset_time_timer,
+                    time_timer_elapsed,
+                    release_time_timer,
+                )
             },
         },
         Ok(Err(error)) => TimerResult {
@@ -1098,22 +1073,6 @@ unsafe extern "C" fn shutdown(
     }
 }
 
-fn release_runtime_config(config: RuntimeConfig) {
-    let RuntimeConfig {
-        thread_name,
-        after_start,
-        before_stop,
-        before_park,
-        after_unpark,
-        ..
-    } = config;
-    drop(StringCallbackOwner(thread_name));
-    drop(CallbackOwner(after_start));
-    drop(CallbackOwner(before_stop));
-    drop(CallbackOwner(before_park));
-    drop(CallbackOwner(after_unpark));
-}
-
 fn build_runtime(
     config: RuntimeConfig,
     owner: Arc<OwnerState>,
@@ -1155,7 +1114,7 @@ fn build_runtime(
     }
     builder.event_interval(config.event_interval);
     builder.max_io_events_per_tick(config.max_io_events_per_tick);
-    if config.name.len != 0 {
+    if !config.name.is_empty() {
         builder.name(unsafe { config.name.as_str() });
     }
 
@@ -1277,15 +1236,15 @@ impl GuestFuture {
 impl RustFuture for GuestFuture {
     type Output = Status;
 
-    fn poll(self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> RustPoll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> RustPoll<Self::Output> {
         if !self
             .owner
             .update_activity_waker(self.activity, context.waker())
         {
             return RustPoll::Ready(Status::Error);
         }
-        let waker = Waker::from_ref(context.waker());
-        match unsafe { (self.future.poll)(self.future.data, &raw const waker) } {
+        let waker = unsafe { Waker::from_ref(context.waker()) };
+        match self.future.poll(&waker) {
             Poll::Pending => RustPoll::Pending,
             Poll::Ready => RustPoll::Ready(Status::Ok),
             Poll::Panicked => RustPoll::Ready(Status::Panicked),
@@ -1318,8 +1277,8 @@ impl RustFuture for GuestTask {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> RustPoll<()> {
-        let waker = Waker::from_ref(context.waker());
-        match unsafe { (self.task.poll)(self.task.data, &raw const waker) } {
+        let waker = unsafe { Waker::from_ref(context.waker()) };
+        match self.task.poll(&waker) {
             Poll::Pending => RustPoll::Pending,
             Poll::Ready => {
                 self.complete = true;
@@ -1345,9 +1304,8 @@ impl RustFuture for TrackedTask {
 impl Drop for GuestTask {
     fn drop(&mut self) {
         if !self.complete {
-            unsafe { (self.task.cancel)(self.task.data) };
+            unsafe { self.task.cancel() };
         }
-        unsafe { (self.task.release)(self.task.data) };
     }
 }
 
@@ -1370,7 +1328,7 @@ impl GuestBlockingTask {
     }
 
     fn run(&mut self) {
-        unsafe { (self.task.run)(self.task.data) };
+        unsafe { self.task.run() };
         self.complete = true;
     }
 }
@@ -1387,8 +1345,7 @@ impl TrackedBlockingTask {
 impl Drop for GuestBlockingTask {
     fn drop(&mut self) {
         if !self.complete {
-            unsafe { (self.task.cancel)(self.task.data) };
+            unsafe { self.task.cancel() };
         }
-        unsafe { (self.task.release)(self.task.data) };
     }
 }

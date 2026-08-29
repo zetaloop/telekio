@@ -15,9 +15,8 @@ where
         function: Some(function),
         result: None,
     };
-    let call = host.block_in_place(::telekio::Blocking {
-        data: (&raw mut state).cast(),
-        run: run::<F, R>,
+    let call = host.block_in_place(unsafe {
+        ::telekio::Blocking::from_raw((&raw mut state).cast(), run::<F, R>)
     });
     context::telekio::restore();
     match (call.status, state.result) {

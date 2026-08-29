@@ -64,7 +64,9 @@ impl Signal {
 
     /// # Safety
     ///
-    /// `data` and both callbacks must describe one owned host signal receiver.
+    /// `data` and both callbacks must describe one owned host signal receiver
+    /// whose state is safe to move and access through shared references across
+    /// threads.
     pub const unsafe fn from_raw(
         data: *mut c_void,
         poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
@@ -87,7 +89,7 @@ impl Signal {
     }
 
     pub fn poll_recv(&mut self, context: &mut Context<'_>) -> RustPoll<()> {
-        let waker = Waker::from_ref(context.waker());
+        let waker = unsafe { Waker::from_ref(context.waker()) };
         let result = unsafe { (self.poll)(self.data, &raw const waker) };
         match result.state {
             Poll::Pending => {
