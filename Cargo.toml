@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/telekio", "crates/telekio-build", "crates/telekio-host"]
+members = [
+    "crates/telekio",
+    "crates/telekio-build",
+    "crates/telekio-host",
+    "crates/telekio-tokio",
+]
 resolver = "3"
 
 [workspace.package]

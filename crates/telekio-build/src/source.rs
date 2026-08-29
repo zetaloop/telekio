@@ -11,82 +11,110 @@ use sha2::{Digest, Sha256};
 use toml::Value;
 
 const PACKAGE: &str = "tokio";
+const TOKIO_VERSION: &str = "1.53.1";
 
 pub fn prepare_tokio() -> Result<PathBuf, Box<dyn Error>> {
-    let manifest = workspace_manifest()?;
-    let lock = manifest.with_file_name("Cargo.lock");
-    let version = supported_version()?;
-    let checksum = locked_checksum(&lock, &version)?;
-    let archive = registry_archive(&manifest, &version, &checksum)?;
+    prepare_tokio_version(TOKIO_VERSION)
+}
+
+pub fn prepare_tokio_host(version: &str) -> Result<PathBuf, Box<dyn Error>> {
+    if version != TOKIO_VERSION {
+        return Err(format!("telekio-tokio {version} requires Tokio {TOKIO_VERSION}").into());
+    }
+    let directory = prepare_tokio_version(version)?;
+    let path = directory.join("src/lib.rs");
+    let source = fs::read_to_string(&path)?;
+    fs::write(path, include_source(&source))?;
+    Ok(directory)
+}
+
+pub(crate) fn include_source(source: &str) -> String {
+    let mut depth = 0;
+    let start = source
+        .lines()
+        .enumerate()
+        .find_map(|(index, line)| {
+            let line = line.trim();
+            if depth != 0 {
+                depth += line.matches('[').count() as isize;
+                depth -= line.matches(']').count() as isize;
+                return None;
+            }
+            if line.is_empty() || line.starts_with("//") {
+                return None;
+            }
+            if line.starts_with("#![") {
+                depth = line.matches('[').count() as isize - line.matches(']').count() as isize;
+                return None;
+            }
+            Some(index)
+        })
+        .unwrap_or(0);
+    let mut output = source.lines().skip(start).collect::<Vec<_>>().join("\n");
+    output.push('\n');
+    output
+}
+
+fn prepare_tokio_version(version: &str) -> Result<PathBuf, Box<dyn Error>> {
+    let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unavailable")?)
+        .join(format!("tokio-source-{version}"));
+    fs::create_dir_all(out.join("src"))?;
+    let manifest = out.join("Cargo.toml");
+    if !manifest.is_file() {
+        fs::write(
+            &manifest,
+            format!(
+                "[package]\nname = \"telekio-tokio-source\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\ntokio = \"={version}\"\n"
+            ),
+        )?;
+        fs::write(out.join("src/lib.rs"), "")?;
+    } else {
+        let source = fs::read_to_string(&manifest)?;
+        if !source.contains("[workspace]") {
+            fs::write(&manifest, format!("{source}\n[workspace]\n"))?;
+        }
+    }
+    let lock = out.join("Cargo.lock");
+    if !lock.is_file() {
+        let cargo = env::var_os("CARGO").ok_or("CARGO is unavailable")?;
+        let status = Command::new(cargo)
+            .current_dir(&out)
+            .arg("generate-lockfile")
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .status()?;
+        if !status.success() {
+            return Err(format!("cargo generate-lockfile failed with {status}").into());
+        }
+    }
+    let (locked, checksum) = locked_package(&lock)?;
+    if locked != version {
+        return Err(format!("Cargo.lock selected Tokio {locked}, expected {version}").into());
+    }
+    prepare_archive(&manifest, &lock, version, &checksum)
+}
+
+fn prepare_archive(
+    manifest: &Path,
+    lock: &Path,
+    version: &str,
+    checksum: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let archive = registry_archive(manifest, version, checksum)?;
     let destination = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unavailable")?)
         .join(format!("{PACKAGE}-{version}"));
-
-    unpack(&archive, &destination, &version)?;
-    verify_manifest(&destination.join("Cargo.toml"), &version)?;
-
-    println!("cargo::rerun-if-changed={}", archive.display());
-    println!("cargo::rerun-if-changed={}", lock.display());
-    println!("cargo::rerun-if-env-changed=CARGO_HOME");
-
+    if destination.is_dir() {
+        fs::remove_dir_all(&destination)?;
+    }
+    unpack(&archive, &destination, version)?;
+    verify_manifest(&destination.join("Cargo.toml"), version)?;
+    println!("cargo:rerun-if-changed={}", archive.display());
+    println!("cargo:rerun-if-changed={}", lock.display());
+    println!("cargo:rerun-if-env-changed=CARGO_HOME");
     Ok(destination)
 }
 
-fn workspace_manifest() -> Result<PathBuf, Box<dyn Error>> {
-    let cargo = env::var_os("CARGO").ok_or("CARGO is unavailable")?;
-    let package = PathBuf::from(
-        env::var_os("CARGO_MANIFEST_DIR").ok_or("CARGO_MANIFEST_DIR is unavailable")?,
-    )
-    .join("Cargo.toml");
-    let output = Command::new(cargo)
-        .arg("locate-project")
-        .arg("--workspace")
-        .arg("--message-format=plain")
-        .arg("--manifest-path")
-        .arg(package)
-        .output()?;
-    if !output.status.success() {
-        return Err(format!(
-            "cargo locate-project failed with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-        .into());
-    }
-    let path = String::from_utf8(output.stdout)?;
-    let path = path.trim();
-    if path.is_empty() {
-        return Err("cargo locate-project returned an empty path".into());
-    }
-    Ok(PathBuf::from(path))
-}
-
-fn supported_version() -> Result<String, Box<dyn Error>> {
-    let manifest: Value = toml::from_str(include_str!("../Cargo.toml"))?;
-    let dependency = manifest
-        .get("target")
-        .and_then(|value| value.get("cfg(any())"))
-        .and_then(|value| value.get("dependencies"))
-        .and_then(|value| value.get(PACKAGE))
-        .ok_or("telekio-build has no cfg(any()) Tokio dependency")?;
-    let requirement = match dependency {
-        Value::String(requirement) => requirement.as_str(),
-        Value::Table(dependency) => dependency
-            .get("version")
-            .and_then(Value::as_str)
-            .ok_or("Telekio's Tokio dependency has no version")?,
-        _ => return Err("Telekio's Tokio dependency has an invalid form".into()),
-    };
-    requirement
-        .strip_prefix('=')
-        .map(str::trim)
-        .filter(|version| !version.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            format!("Telekio's Tokio dependency must be exact, got {requirement}").into()
-        })
-}
-
-fn locked_checksum(lock: &Path, supported: &str) -> Result<String, Box<dyn Error>> {
+fn locked_package(lock: &Path) -> Result<(String, String), Box<dyn Error>> {
     let lock: Value = toml::from_str(&fs::read_to_string(lock)?)?;
     let packages = lock
         .get("package")
@@ -94,36 +122,32 @@ fn locked_checksum(lock: &Path, supported: &str) -> Result<String, Box<dyn Error
         .ok_or("Cargo.lock has no packages")?;
     let tokio = packages
         .iter()
-        .filter(|package| package.get("name").and_then(Value::as_str) == Some(PACKAGE))
+        .filter(|package| {
+            package.get("name").and_then(Value::as_str) == Some(PACKAGE)
+                && package
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .is_some_and(|source| source.starts_with("registry+"))
+        })
         .collect::<Vec<_>>();
-    let versions = tokio
-        .iter()
-        .filter_map(|package| package.get("version").and_then(Value::as_str))
-        .collect::<Vec<_>>();
-    if versions != [supported] {
+    let [package] = tokio.as_slice() else {
         return Err(format!(
-            "Cargo.lock must select only Tokio {supported}, got {}",
-            if versions.is_empty() {
-                "none".to_owned()
-            } else {
-                versions.join(", ")
-            }
+            "Cargo.lock must select one registry Tokio package, got {}",
+            tokio.len()
         )
         .into());
-    }
-    let package = tokio[0];
-    let source = package
-        .get("source")
+    };
+    let version = package
+        .get("version")
         .and_then(Value::as_str)
-        .ok_or("locked Tokio has no source")?;
-    if !source.starts_with("registry+") {
-        return Err(format!("locked Tokio source is not a registry: {source}").into());
-    }
-    package
+        .ok_or("locked Tokio has no version")?
+        .to_owned();
+    let checksum = package
         .get("checksum")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| "locked Tokio has no checksum".into())
+        .ok_or("locked Tokio has no checksum")?;
+    Ok((version, checksum))
 }
 
 fn registry_archive(
@@ -138,6 +162,7 @@ fn registry_archive(
 
     let cargo = env::var_os("CARGO").ok_or("CARGO is unavailable")?;
     let status = Command::new(cargo)
+        .current_dir(manifest.parent().ok_or("manifest has no parent")?)
         .arg("fetch")
         .arg("--locked")
         .arg("--manifest-path")
