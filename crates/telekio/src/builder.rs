@@ -108,8 +108,12 @@ impl BuildResult {
         }
     }
 
+    /// # Safety
+    ///
+    /// A runtime built with [`Flavor::Local`] must remain on its originating
+    /// thread until it has shut down.
     #[doc(hidden)]
-    pub fn into_runtime(self) -> std::io::Result<(Runtime, usize)> {
+    pub unsafe fn into_runtime(self) -> std::io::Result<(Runtime, usize)> {
         self.call.into_io_result()?;
         Ok((unsafe { Runtime::from_abi(self.runtime) }, self.workers))
     }

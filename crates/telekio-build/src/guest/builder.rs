@@ -62,7 +62,7 @@ impl Builder {
             }
         };
         let keep_alive = self.keep_alive.unwrap_or_default();
-        attached()
+        let result = attached()
             .build(::telekio::RuntimeConfig {
                 flavor,
                 enable_io: self.enable_io.into(),
@@ -96,8 +96,9 @@ impl Builder {
                 event_interval: self.event_interval,
                 max_io_events_per_tick: self.nevents,
                 name: unsafe { ::telekio::Bytes::borrow(self.name.as_deref()) },
-            })
-            .into_runtime()
+            });
+        // Tokio's LocalRuntime keeps this value on its originating thread.
+        unsafe { result.into_runtime() }
             .map(|(runtime, _)| runtime)
     }
 }
