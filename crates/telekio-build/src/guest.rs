@@ -52,6 +52,10 @@ pub fn prepare_tests() -> Result<PathBuf, Box<dyn Error>> {
     Ok(generated)
 }
 
+pub(crate) fn prepare_artifact_guest() -> Result<PathBuf, Box<dyn Error>> {
+    prepare_guest_with(package_dependency("telekio", true))
+}
+
 fn prepare_guest_with(telekio: Value) -> Result<PathBuf, Box<dyn Error>> {
     let generated = prepare_tokio()?;
     patch_manifest(&generated.join("Cargo.toml"), telekio)?;
