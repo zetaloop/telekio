@@ -8,9 +8,53 @@ use toml::{Table, Value};
 
 use crate::{edit, prepare_tokio};
 
-pub fn prepare_guest(telekio: &Path, host: &Path) -> Result<PathBuf, Box<dyn Error>> {
+pub fn prepare_tests() -> Result<PathBuf, Box<dyn Error>> {
+    let generated = prepare_guest_with(package_dependency("telekio", true))?;
+    let path = generated.join("Cargo.toml");
+    let mut manifest: Value = toml::from_str(&fs::read_to_string(&path)?)?;
+    let features = manifest
+        .get_mut("features")
+        .and_then(Value::as_table_mut)
+        .ok_or("Tokio manifest has no features")?;
+    features.insert(
+        "telekio-test".to_owned(),
+        Value::Array(vec![Value::String("dep:telekio-host".to_owned())]),
+    );
+    let mut host_dependency = package_dependency("telekio-host", false);
+    host_dependency
+        .as_table_mut()
+        .ok_or("generated host dependency is not a table")?
+        .insert("optional".to_owned(), Value::Boolean(true));
+    manifest
+        .get_mut("dependencies")
+        .and_then(Value::as_table_mut)
+        .ok_or("Tokio manifest has no dependencies")?
+        .insert("telekio-host".to_owned(), host_dependency);
+    manifest
+        .as_table_mut()
+        .ok_or("Tokio manifest is not a table")?
+        .entry("patch")
+        .or_insert_with(|| Value::Table(Table::new()))
+        .as_table_mut()
+        .ok_or("Tokio patches are not a table")?
+        .entry("crates-io")
+        .or_insert_with(|| Value::Table(Table::new()))
+        .as_table_mut()
+        .ok_or("Tokio crates.io patches are not a table")?
+        .insert(
+            "tokio".to_owned(),
+            Value::Table(Table::from_iter([(
+                "path".to_owned(),
+                Value::String(".".to_owned()),
+            )])),
+        );
+    fs::write(path, toml::to_string(&manifest)?)?;
+    Ok(generated)
+}
+
+fn prepare_guest_with(telekio: Value) -> Result<PathBuf, Box<dyn Error>> {
     let generated = prepare_tokio()?;
-    patch_manifest(&generated.join("Cargo.toml"), telekio, host)?;
+    patch_manifest(&generated.join("Cargo.toml"), telekio)?;
     patch_task(&generated.join("src/runtime/task/mod.rs"))?;
     patch_current_thread(&generated.join("src/runtime/scheduler/current_thread/mod.rs"))?;
     patch_inject(&generated.join("src/runtime/scheduler/inject.rs"))?;
@@ -30,33 +74,24 @@ pub fn prepare_guest(telekio: &Path, host: &Path) -> Result<PathBuf, Box<dyn Err
     Ok(generated)
 }
 
-fn patch_manifest(path: &Path, telekio: &Path, host: &Path) -> Result<(), Box<dyn Error>> {
+fn patch_manifest(path: &Path, telekio: Value) -> Result<(), Box<dyn Error>> {
     let mut manifest: Value = toml::from_str(&fs::read_to_string(path)?)?;
     let dependencies = manifest
         .get_mut("dependencies")
         .and_then(Value::as_table_mut)
         .ok_or("Tokio manifest has no dependencies")?;
-    dependencies.insert("telekio".to_owned(), dependency(telekio));
-    let mut host_dependency = dependency(host);
-    host_dependency
-        .as_table_mut()
-        .ok_or("generated dependency is not a table")?
-        .insert("optional".to_owned(), Value::Boolean(true));
-    dependencies.insert("telekio-host".to_owned(), host_dependency);
+    dependencies.insert("telekio".to_owned(), telekio);
     manifest
         .get_mut("features")
         .and_then(Value::as_table_mut)
         .ok_or("Tokio manifest has no features")?
-        .insert(
-            "telekio-test".to_owned(),
-            Value::Array(vec![Value::String("dep:telekio-host".to_owned())]),
-        );
+        .insert("telekio-test".to_owned(), Value::Array(Vec::new()));
     fs::write(path, toml::to_string(&manifest)?)?;
     Ok(())
 }
 
-fn dependency(path: &Path) -> Value {
-    Value::Table(Table::from_iter([
+fn dependency(path: &Path, guest: bool) -> Value {
+    let mut dependency = Table::from_iter([
         (
             "path".to_owned(),
             Value::String(path.to_string_lossy().into_owned()),
@@ -65,7 +100,42 @@ fn dependency(path: &Path) -> Value {
             "version".to_owned(),
             Value::String(format!("={}", env!("CARGO_PKG_VERSION"))),
         ),
-    ]))
+    ]);
+    if guest {
+        dependency.insert(
+            "features".to_owned(),
+            Value::Array(vec![Value::String("guest".to_owned())]),
+        );
+    }
+    Value::Table(dependency)
+}
+
+fn package_dependency(name: &str, guest: bool) -> Value {
+    let sibling = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|parent| {
+            [
+                parent.join(name),
+                parent.join(format!("{name}-{}", env!("CARGO_PKG_VERSION"))),
+            ]
+            .into_iter()
+            .find(|path| path.join("Cargo.toml").is_file())
+        });
+    if let Some(sibling) = sibling {
+        dependency(&sibling, guest)
+    } else {
+        let mut dependency = Table::from_iter([(
+            "version".to_owned(),
+            Value::String(format!("={}", env!("CARGO_PKG_VERSION"))),
+        )]);
+        if guest {
+            dependency.insert(
+                "features".to_owned(),
+                Value::Array(vec![Value::String("guest".to_owned())]),
+            );
+        }
+        Value::Table(dependency)
+    }
 }
 
 fn patch_task(path: &Path) -> Result<(), Box<dyn Error>> {

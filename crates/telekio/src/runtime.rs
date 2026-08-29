@@ -168,6 +168,10 @@ struct FutureState<F: RustFuture> {
 }
 
 impl RawHandle {
+    pub const fn is_empty(self) -> bool {
+        self.context.is_null() || self.api.is_null()
+    }
+
     pub const fn empty() -> Self {
         Self {
             context: std::ptr::null(),
@@ -203,12 +207,34 @@ pub fn attach(handle: Handle) -> Result<(), Handle> {
     ATTACHED.set(handle)
 }
 
+#[cfg(feature = "guest")]
+/// # Safety
+///
+/// `raw` must be one owned host handle reference returned by its host API.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn telekio_guest_attach(raw: RawHandle) -> bool {
+    attach(unsafe { Handle::from_abi(raw) }).is_ok()
+}
+
 #[doc(hidden)]
 pub fn attached() -> Handle {
-    ATTACHED
-        .get()
-        .expect("Telekio runtime is not attached")
-        .clone()
+    if let Some(handle) = ATTACHED.get() {
+        return handle.clone();
+    }
+    #[cfg(feature = "guest")]
+    {
+        unsafe extern "C" {
+            fn telekio_test_handle() -> RawHandle;
+        }
+        let raw = unsafe { telekio_test_handle() };
+        if !raw.is_empty() {
+            let handle = unsafe { Handle::from_abi(raw) };
+            if attach(handle).is_ok() {
+                return ATTACHED.get().unwrap().clone();
+            }
+        }
+    }
+    panic!("Telekio runtime is not attached")
 }
 
 impl Handle {
@@ -217,6 +243,12 @@ impl Handle {
     /// `raw` must be one owned host handle reference returned by its host API.
     pub const unsafe fn from_abi(raw: RawHandle) -> Self {
         Self { raw }
+    }
+
+    pub fn into_abi(self) -> RawHandle {
+        let raw = self.raw;
+        std::mem::forget(self);
+        raw
     }
 
     pub fn block_on<F: RustFuture>(&self, future: F) -> F::Output {

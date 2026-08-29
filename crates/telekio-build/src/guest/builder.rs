@@ -6,10 +6,25 @@ fn attached() -> ::telekio::Handle {
 }
 
 #[cfg(feature = "telekio-test")]
+fn test_owner() -> &'static ::telekio_host::Owner {
+    use std::sync::OnceLock;
+
+    static OWNER: OnceLock<::telekio_host::Owner> = OnceLock::new();
+    OWNER.get_or_init(|| ::telekio_host::Runtime::new().unwrap().owner())
+}
+
+#[cfg(all(feature = "telekio-test", not(test)))]
+#[unsafe(no_mangle)]
+pub(super) extern "C" fn telekio_test_handle() -> ::telekio::RawHandle {
+    test_owner().runtime().into_abi()
+}
+
+#[cfg(feature = "telekio-test")]
 fn attached() -> ::telekio::Handle {
-    static HOST: std::sync::OnceLock<::telekio_host::Owner> = std::sync::OnceLock::new();
-    let owner = HOST.get_or_init(|| ::telekio_host::Runtime::new().unwrap().owner());
-    let _ = ::telekio::attach(owner.runtime());
+    let handle = test_owner().runtime();
+    if let Err(handle) = ::telekio::attach(handle) {
+        drop(handle);
+    }
     ::telekio::attached()
 }
 
