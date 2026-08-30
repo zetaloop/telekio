@@ -12,18 +12,22 @@ use toml::Value;
 
 use crate::edit;
 
-const PACKAGE: &str = "tokio";
 const TOKIO_VERSION: &str = "1.53.1";
+const TOKIO_MACROS_VERSION: &str = "2.7.2";
 
 pub fn prepare_tokio() -> Result<PathBuf, Box<dyn Error>> {
-    prepare_tokio_version(TOKIO_VERSION)
+    prepare_package("tokio", TOKIO_VERSION)
+}
+
+pub(crate) fn prepare_tokio_macros() -> Result<PathBuf, Box<dyn Error>> {
+    prepare_package("tokio-macros", TOKIO_MACROS_VERSION)
 }
 
 pub fn prepare_tokio_host(version: &str) -> Result<PathBuf, Box<dyn Error>> {
     if version != TOKIO_VERSION {
         return Err(format!("telekio-tokio {version} requires Tokio {TOKIO_VERSION}").into());
     }
-    let directory = prepare_tokio_version(version)?;
+    let directory = prepare_package("tokio", version)?;
     let path = directory.join("src/lib.rs");
     let source = fs::read_to_string(&path)?;
     fs::write(path, include_source(&source))?;
@@ -106,16 +110,16 @@ pub(crate) fn include_source(source: &str) -> String {
     output
 }
 
-fn prepare_tokio_version(version: &str) -> Result<PathBuf, Box<dyn Error>> {
+fn prepare_package(package: &str, version: &str) -> Result<PathBuf, Box<dyn Error>> {
     let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unavailable")?)
-        .join(format!("tokio-source-{version}"));
+        .join(format!("{package}-source-{version}"));
     fs::create_dir_all(out.join("src"))?;
     let manifest = out.join("Cargo.toml");
     if !manifest.is_file() {
         fs::write(
             &manifest,
             format!(
-                "[package]\nname = \"telekio-tokio-source\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\ntokio = \"={version}\"\n"
+                "[package]\nname = \"telekio-{package}-source\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\n{package} = \"={version}\"\n"
             ),
         )?;
         fs::write(out.join("src/lib.rs"), "")?;
@@ -138,76 +142,78 @@ fn prepare_tokio_version(version: &str) -> Result<PathBuf, Box<dyn Error>> {
             return Err(format!("cargo generate-lockfile failed with {status}").into());
         }
     }
-    let (locked, checksum) = locked_package(&lock)?;
+    let (locked, checksum) = locked_package(&lock, package)?;
     if locked != version {
-        return Err(format!("Cargo.lock selected Tokio {locked}, expected {version}").into());
+        return Err(format!("Cargo.lock selected {package} {locked}, expected {version}").into());
     }
-    prepare_archive(&manifest, &lock, version, &checksum)
+    prepare_archive(&manifest, &lock, package, version, &checksum)
 }
 
 fn prepare_archive(
     manifest: &Path,
     lock: &Path,
+    package: &str,
     version: &str,
     checksum: &str,
 ) -> Result<PathBuf, Box<dyn Error>> {
-    let archive = registry_archive(manifest, version, checksum)?;
+    let archive = registry_archive(manifest, package, version, checksum)?;
     let destination = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unavailable")?)
-        .join(format!("{PACKAGE}-{version}"));
+        .join(format!("{package}-{version}"));
     if destination.is_dir() {
         fs::remove_dir_all(&destination)?;
     }
-    unpack(&archive, &destination, version)?;
-    verify_manifest(&destination.join("Cargo.toml"), version)?;
+    unpack(&archive, &destination, package, version)?;
+    verify_manifest(&destination.join("Cargo.toml"), package, version)?;
     println!("cargo:rerun-if-changed={}", archive.display());
     println!("cargo:rerun-if-changed={}", lock.display());
     println!("cargo:rerun-if-env-changed=CARGO_HOME");
     Ok(destination)
 }
 
-fn locked_package(lock: &Path) -> Result<(String, String), Box<dyn Error>> {
+fn locked_package(lock: &Path, name: &str) -> Result<(String, String), Box<dyn Error>> {
     let lock: Value = toml::from_str(&fs::read_to_string(lock)?)?;
     let packages = lock
         .get("package")
         .and_then(Value::as_array)
         .ok_or("Cargo.lock has no packages")?;
-    let tokio = packages
+    let selected = packages
         .iter()
         .filter(|package| {
-            package.get("name").and_then(Value::as_str) == Some(PACKAGE)
+            package.get("name").and_then(Value::as_str) == Some(name)
                 && package
                     .get("source")
                     .and_then(Value::as_str)
                     .is_some_and(|source| source.starts_with("registry+"))
         })
         .collect::<Vec<_>>();
-    let [package] = tokio.as_slice() else {
+    let [package] = selected.as_slice() else {
         return Err(format!(
-            "Cargo.lock must select one registry Tokio package, got {}",
-            tokio.len()
+            "Cargo.lock must select one registry {name} package, got {}",
+            selected.len()
         )
         .into());
     };
     let version = package
         .get("version")
         .and_then(Value::as_str)
-        .ok_or("locked Tokio has no version")?
+        .ok_or_else(|| format!("locked {name} has no version"))?
         .to_owned();
     let checksum = package
         .get("checksum")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or("locked Tokio has no checksum")?;
+        .ok_or_else(|| format!("locked {name} has no checksum"))?;
     Ok((version, checksum))
 }
 
 fn registry_archive(
     manifest: &Path,
+    package: &str,
     version: &str,
     checksum: &str,
 ) -> Result<PathBuf, Box<dyn Error>> {
     let cargo_home = cargo_home()?;
-    if let Some(archive) = find_archive(&cargo_home, version, checksum)? {
+    if let Some(archive) = find_archive(&cargo_home, package, version, checksum)? {
         return Ok(archive);
     }
 
@@ -223,9 +229,9 @@ fn registry_archive(
         return Err(format!("cargo fetch --locked failed with {status}").into());
     }
 
-    find_archive(&cargo_home, version, checksum)?.ok_or_else(|| {
+    find_archive(&cargo_home, package, version, checksum)?.ok_or_else(|| {
         format!(
-            "could not find {PACKAGE}-{version}.crate under {}",
+            "could not find {package}-{version}.crate under {}",
             cargo_home.join("registry/cache").display()
         )
         .into()
@@ -242,6 +248,7 @@ fn cargo_home() -> Result<PathBuf, Box<dyn Error>> {
 
 fn find_archive(
     cargo_home: &Path,
+    package: &str,
     version: &str,
     checksum: &str,
 ) -> Result<Option<PathBuf>, Box<dyn Error>> {
@@ -251,7 +258,7 @@ fn find_archive(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let name = format!("{PACKAGE}-{version}.crate");
+    let name = format!("{package}-{version}.crate");
     let mut candidates = Vec::new();
     for registry in registries {
         let candidate = registry?.path().join(&name);
@@ -272,7 +279,7 @@ fn find_archive(
         mismatches.push(format!("{}: {actual}", candidate.display()));
     }
     Err(format!(
-        "Tokio archive checksum mismatch: expected {checksum}, got {}",
+        "{package} archive checksum mismatch: expected {checksum}, got {}",
         mismatches.join(", ")
     )
     .into())
@@ -285,10 +292,15 @@ fn digest(path: &Path) -> Result<String, Box<dyn Error>> {
         .collect())
 }
 
-fn unpack(archive: &Path, destination: &Path, version: &str) -> Result<(), Box<dyn Error>> {
+fn unpack(
+    archive: &Path,
+    destination: &Path,
+    package: &str,
+    version: &str,
+) -> Result<(), Box<dyn Error>> {
     let decoder = GzDecoder::new(fs::File::open(archive)?);
     let mut archive = tar::Archive::new(decoder);
-    let package_dir = format!("{PACKAGE}-{version}");
+    let package_dir = format!("{package}-{version}");
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -326,16 +338,16 @@ fn checked_path(path: &Path, package_dir: &str) -> Result<PathBuf, Box<dyn Error
     Ok(relative)
 }
 
-fn verify_manifest(path: &Path, version: &str) -> Result<(), Box<dyn Error>> {
+fn verify_manifest(path: &Path, package_name: &str, version: &str) -> Result<(), Box<dyn Error>> {
     let manifest: Value = toml::from_str(&fs::read_to_string(path)?)?;
     let package = manifest
         .get("package")
-        .ok_or("Tokio has no package table")?;
+        .ok_or_else(|| format!("{package_name} has no package table"))?;
     let name = package.get("name").and_then(Value::as_str);
     let actual_version = package.get("version").and_then(Value::as_str);
-    if name != Some(PACKAGE) || actual_version != Some(version) {
+    if name != Some(package_name) || actual_version != Some(version) {
         return Err(format!(
-            "archive manifest describes {} {}, expected {PACKAGE} {version}",
+            "archive manifest describes {} {}, expected {package_name} {version}",
             name.unwrap_or("<unknown>"),
             actual_version.unwrap_or("<unknown>")
         )

@@ -1,4 +1,5 @@
 mod artifact;
+mod compiler;
 mod edit;
 mod guest;
 mod linker;
