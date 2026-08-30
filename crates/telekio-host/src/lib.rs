@@ -66,11 +66,16 @@ struct OwnerState {
 
 struct OwnerStatus {
     accepting: bool,
-    tasks: HashMap<u64, Option<tokio::task::AbortHandle>>,
+    tasks: HashMap<u64, TaskRecord>,
     activities: HashMap<u64, Option<std::task::Waker>>,
     runtimes: HashMap<u64, Arc<RuntimeOwner>>,
     resources: HashMap<u64, Arc<dyn OwnerResource>>,
     next_id: u64,
+}
+
+struct TaskRecord {
+    guest_id: u64,
+    handle: Option<tokio::task::AbortHandle>,
 }
 
 trait OwnerResource: Send + Sync {
@@ -273,16 +278,21 @@ impl OwnerState {
         }
     }
 
-    fn reserve_task(&self, id: u64) -> Result<(), String> {
+    fn reserve_task(&self, guest_id: u64) -> Result<u64, String> {
         let mut state = self.state.lock().unwrap();
         if !state.accepting {
             return Err("Tokio owner is shutting down".to_owned());
         }
-        if state.tasks.contains_key(&id) {
-            return Err(format!("task {id} already exists"));
-        }
-        state.tasks.insert(id, None);
-        Ok(())
+        let id = state.next_id;
+        state.next_id += 1;
+        state.tasks.insert(
+            id,
+            TaskRecord {
+                guest_id,
+                handle: None,
+            },
+        );
+        Ok(id)
     }
 
     fn register_task(&self, id: u64, handle: tokio::task::AbortHandle) {
@@ -290,8 +300,8 @@ impl OwnerState {
         if !state.accepting {
             handle.abort();
         }
-        if let Some(slot) = state.tasks.get_mut(&id) {
-            *slot = Some(handle);
+        if let Some(task) = state.tasks.get_mut(&id) {
+            task.handle = Some(handle);
         }
     }
 
@@ -339,7 +349,11 @@ impl OwnerState {
     ) {
         let mut state = self.state.lock().unwrap();
         state.accepting = false;
-        let tasks = state.tasks.values().filter_map(Clone::clone).collect();
+        let tasks = state
+            .tasks
+            .values()
+            .filter_map(|task| task.handle.clone())
+            .collect();
         let resources = state
             .resources
             .drain()
@@ -649,16 +663,18 @@ unsafe extern "C" fn spawn(context: *const c_void, id: u64, task: Task) -> CallR
     let context = unsafe { &*context.cast::<HandleContext>() };
     match catch_unwind(AssertUnwindSafe(|| {
         let task = GuestTask::new(task);
-        context.owner.reserve_task(id)?;
+        let tracking_id = context.owner.reserve_task(id)?;
         let task = TrackedTask {
             task,
             cleanup: TaskCleanup {
                 owner: Arc::clone(&context.owner),
-                id,
+                id: tracking_id,
             },
         };
         let handle = context.handle.spawn(task);
-        context.owner.register_task(id, handle.abort_handle());
+        context
+            .owner
+            .register_task(tracking_id, handle.abort_handle());
         drop(handle);
         Ok::<_, String>(())
     })) {
@@ -672,12 +688,12 @@ unsafe extern "C" fn spawn_local(context: *const c_void, id: u64, task: Task) ->
     let context = unsafe { &*context.cast::<HandleContext>() };
     let spawned = catch_unwind(AssertUnwindSafe(|| {
         let task = GuestTask::new(task);
-        context.owner.reserve_task(id)?;
+        let tracking_id = context.owner.reserve_task(id)?;
         let task = TrackedTask {
             task,
             cleanup: TaskCleanup {
                 owner: Arc::clone(&context.owner),
-                id,
+                id: tracking_id,
             },
         };
         let local = context
@@ -685,7 +701,9 @@ unsafe extern "C" fn spawn_local(context: *const c_void, id: u64, task: Task) ->
             .as_ref()
             .ok_or_else(|| "spawn_local requires a LocalRuntime".to_owned())?;
         let handle = local.with(|runtime| runtime.spawn_local(task))?;
-        context.owner.register_task(id, handle.abort_handle());
+        context
+            .owner
+            .register_task(tracking_id, handle.abort_handle());
         drop(handle);
         Ok::<_, String>(())
     }));
@@ -704,16 +722,18 @@ unsafe extern "C" fn spawn_blocking(
     let context = unsafe { &*context.cast::<HandleContext>() };
     let spawned = catch_unwind(AssertUnwindSafe(|| {
         let task = GuestBlockingTask::new(task);
-        context.owner.reserve_task(id)?;
+        let tracking_id = context.owner.reserve_task(id)?;
         let task = TrackedBlockingTask {
             task,
             cleanup: TaskCleanup {
                 owner: Arc::clone(&context.owner),
-                id,
+                id: tracking_id,
             },
         };
         let handle = context.handle.spawn_blocking(move || task.run());
-        context.owner.register_task(id, handle.abort_handle());
+        context
+            .owner
+            .register_task(tracking_id, handle.abort_handle());
         drop(handle);
         Ok::<_, String>(())
     }));
@@ -822,7 +842,17 @@ unsafe extern "C" fn block_in_place(context: *const c_void, blocking: Blocking) 
 unsafe extern "C" fn abort(context: *const c_void, id: u64) -> CallResult {
     host_callback(|| {
         let context = unsafe { &*context.cast::<HandleContext>() };
-        if let Some(Some(handle)) = context.owner.state.lock().unwrap().tasks.get(&id) {
+        let handles = context
+            .owner
+            .state
+            .lock()
+            .unwrap()
+            .tasks
+            .values()
+            .filter(|task| task.guest_id == id)
+            .filter_map(|task| task.handle.clone())
+            .collect::<Vec<_>>();
+        for handle in handles {
             handle.abort();
         }
     })
@@ -831,11 +861,19 @@ unsafe extern "C" fn abort(context: *const c_void, id: u64) -> CallResult {
 unsafe extern "C" fn is_finished(context: *const c_void, id: u64) -> telekio::BoolResult {
     match catch_unwind(AssertUnwindSafe(|| {
         let context = unsafe { &*context.cast::<HandleContext>() };
-        match context.owner.state.lock().unwrap().tasks.get(&id) {
-            Some(Some(handle)) => handle.is_finished(),
-            Some(None) => false,
-            None => true,
-        }
+        let state = context.owner.state.lock().unwrap();
+        let mut found = false;
+        let finished = state
+            .tasks
+            .values()
+            .filter(|task| task.guest_id == id)
+            .all(|task| {
+                found = true;
+                task.handle
+                    .as_ref()
+                    .is_some_and(tokio::task::AbortHandle::is_finished)
+            });
+        !found || finished
     })) {
         Ok(value) => telekio::BoolResult {
             call: CallResult::ok(),
