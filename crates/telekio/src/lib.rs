@@ -6,8 +6,9 @@ mod time;
 
 pub use builder::{BuildResult, Bytes, Callback, Flavor, RuntimeConfig, Shutdown, StringCallback};
 pub use io::{
-    IO_DRIVER_DISABLED_ERROR, IoError, IoInterest, IoKind, IoOperation, IoOperationKind,
-    IoOperationResult, IoPoll, IoReady, IoRegistration, IoRequest, IoResource, IoResult,
+    IO_DRIVER_DISABLED_ERROR, IoCallResult, IoError, IoEvent, IoInterest, IoKind, IoOperation,
+    IoOperationKind, IoOperationResult, IoPoll, IoReady, IoRegistration, IoRequest, IoResource,
+    IoResult,
 };
 #[cfg(feature = "guest")]
 pub use runtime::telekio_guest_attach;

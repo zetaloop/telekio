@@ -10,6 +10,8 @@ use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use toml::Value;
 
+use crate::edit;
+
 const PACKAGE: &str = "tokio";
 const TOKIO_VERSION: &str = "1.53.1";
 
@@ -25,7 +27,56 @@ pub fn prepare_tokio_host(version: &str) -> Result<PathBuf, Box<dyn Error>> {
     let path = directory.join("src/lib.rs");
     let source = fs::read_to_string(&path)?;
     fs::write(path, include_source(&source))?;
+    mount_host_modules(&directory)?;
     Ok(directory)
+}
+
+fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
+    let helpers = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/host");
+    for (target, helper, visibility, attribute) in [
+        (
+            "src/runtime/io/registration.rs",
+            "registration.rs",
+            None,
+            None,
+        ),
+        (
+            "src/io/poll_evented.rs",
+            "poll_evented.rs",
+            None,
+            Some("#[cfg(windows)]"),
+        ),
+        ("src/io/async_fd.rs", "async_fd.rs", None, None),
+        (
+            "src/net/mod.rs",
+            "socket.rs",
+            Some("pub"),
+            Some("#[cfg(all(windows, feature = \"net\"))]"),
+        ),
+        ("src/net/windows/named_pipe.rs", "named_pipe.rs", None, None),
+    ] {
+        let helper = helpers.join(helper);
+        println!("cargo::rerun-if-changed={}", helper.display());
+        let target = source.join(target);
+        let mut contents = fs::read_to_string(&target)?;
+        edit::mount_module(&mut contents, visibility, "telekio", &helper)?;
+        if visibility.is_some() {
+            edit::add_attr(
+                &mut contents,
+                edit::AttrTarget::Module("telekio"),
+                "#[doc(hidden)]",
+            )?;
+        }
+        if let Some(attribute) = attribute {
+            edit::add_attr(
+                &mut contents,
+                edit::AttrTarget::Module("telekio"),
+                attribute,
+            )?;
+        }
+        fs::write(target, contents)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn include_source(source: &str) -> String {

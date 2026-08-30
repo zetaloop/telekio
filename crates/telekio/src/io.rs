@@ -118,7 +118,7 @@ pub struct IoRegistration {
     ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoOperationResult,
     try_operate: unsafe extern "C" fn(*mut c_void, IoRequest) -> IoPoll,
     try_ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoPoll,
-    clear: unsafe extern "C" fn(*mut c_void, IoReady) -> CallResult,
+    clear: unsafe extern "C" fn(*mut c_void, u8, IoReady) -> IoCallResult,
     release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
@@ -145,6 +145,13 @@ pub struct IoOperation {
     release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct IoEvent {
+    pub ready: IoReady,
+    pub tick: u8,
+}
+
 #[repr(C)]
 pub struct IoResult {
     pub call: CallResult,
@@ -159,11 +166,18 @@ pub struct IoOperationResult {
 }
 
 #[repr(C)]
+pub struct IoCallResult {
+    pub call: CallResult,
+    pub error: IoError,
+}
+
+#[repr(C)]
 pub struct IoPoll {
     pub state: Poll,
     pub call: CallResult,
     pub error: IoError,
     pub ready: IoReady,
+    pub tick: u8,
     pub value: usize,
 }
 
@@ -187,7 +201,7 @@ impl IoResource {
 
     /// # Safety
     ///
-    /// `raw` must remain a valid socket until the registration call returns.
+    /// `raw` must remain a valid socket until the resulting registration is dropped.
     #[doc(hidden)]
     pub const unsafe fn socket(raw: u64) -> Self {
         Self {
@@ -330,6 +344,12 @@ impl IoError {
     }
 }
 
+impl IoCallResult {
+    fn into_io_result(self) -> std::io::Result<()> {
+        self.error.into_io_result(self.call)
+    }
+}
+
 impl IoRegistration {
     pub fn empty() -> Self {
         Self {
@@ -353,7 +373,7 @@ impl IoRegistration {
         ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoOperationResult,
         try_operate: unsafe extern "C" fn(*mut c_void, IoRequest) -> IoPoll,
         try_ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoPoll,
-        clear: unsafe extern "C" fn(*mut c_void, IoReady) -> CallResult,
+        clear: unsafe extern "C" fn(*mut c_void, u8, IoReady) -> IoCallResult,
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
@@ -396,8 +416,8 @@ impl IoRegistration {
         unsafe { (self.try_ready)(self.data, interest) }
     }
 
-    pub fn clear(&self, ready: IoReady) {
-        unsafe { (self.clear)(self.data, ready) }.resume("failed to clear Tokio I/O readiness");
+    pub fn clear(&self, tick: u8, ready: IoReady) -> std::io::Result<()> {
+        unsafe { (self.clear)(self.data, tick, ready) }.into_io_result()
     }
 
     pub fn close(&mut self) {
@@ -451,7 +471,7 @@ impl IoOperation {
 }
 
 impl Future for IoOperation {
-    type Output = std::io::Result<IoReady>;
+    type Output = std::io::Result<IoEvent>;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> RustPoll<Self::Output> {
         let waker = unsafe { Waker::from_ref(context.waker()) };
@@ -462,7 +482,10 @@ impl Future for IoOperation {
                 RustPoll::Pending
             }
             Poll::Ready => match result.error.into_io_result(result.call) {
-                Ok(()) => RustPoll::Ready(Ok(result.ready)),
+                Ok(()) => RustPoll::Ready(Ok(IoEvent {
+                    ready: result.ready,
+                    tick: result.tick,
+                })),
                 Err(error) => RustPoll::Ready(Err(error)),
             },
             Poll::Panicked => {
@@ -525,6 +548,7 @@ fn empty_poll() -> IoPoll {
         },
         error: IoError::none(),
         ready: IoReady::SHUTDOWN,
+        tick: 0,
         value: 0,
     }
 }
@@ -533,8 +557,11 @@ unsafe extern "C" fn try_ready_empty(_: *mut c_void, _: IoInterest) -> IoPoll {
     empty_poll()
 }
 
-unsafe extern "C" fn clear_empty(_: *mut c_void, _: IoReady) -> CallResult {
-    CallResult::ok()
+unsafe extern "C" fn clear_empty(_: *mut c_void, _: u8, _: IoReady) -> IoCallResult {
+    IoCallResult {
+        call: CallResult::ok(),
+        error: IoError::none(),
+    }
 }
 unsafe extern "C" fn release_empty(_: *mut c_void) -> CallResult {
     CallResult::ok()

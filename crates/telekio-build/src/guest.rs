@@ -616,7 +616,7 @@ fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
                 &[edit::Field {
                     visibility: None,
                     name: "telekio",
-                    ty: "std::sync::Mutex<Option<::telekio::IoRegistration>>",
+                    ty: "std::sync::Mutex<telekio::State>",
                 }],
             )?;
             edit::append_record_fields(
@@ -628,7 +628,7 @@ fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
                 "ScheduledIo",
                 &[edit::FieldInit {
                     name: "telekio",
-                    value: "std::sync::Mutex::new(None)",
+                    value: "std::sync::Mutex::new(telekio::State::default())",
                 }],
             )?;
             mount(source, "telekio", "scheduled_io.rs")

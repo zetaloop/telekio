@@ -49,6 +49,9 @@ impl Registration {
         cx: &mut Context<'_>,
         interest: Interest,
     ) -> Poll<io::Result<ReadyEvent>> {
+        if let Some(error) = self.shared.take_telekio_error() {
+            return Poll::Ready(Err(error));
+        }
         let waker = unsafe { ::telekio::Waker::from_ref(cx.waker()) };
         let result = self.shared.poll_telekio(telekio_interest(interest), &waker);
         match result.state {
@@ -61,7 +64,7 @@ impl Registration {
                 if result.ready.contains(::telekio::IoReady::SHUTDOWN) {
                     Poll::Ready(Err(gone()))
                 } else {
-                    Poll::Ready(Ok(ready_event(result.ready)))
+                    Poll::Ready(Ok(ready_event(result.ready, result.tick)))
                 }
             }
             ::telekio::Poll::Panicked => {
@@ -72,14 +75,17 @@ impl Registration {
     }
 
     pub(crate) async fn readiness(&self, interest: Interest) -> io::Result<ReadyEvent> {
-        let ready = self
+        if let Some(error) = self.shared.take_telekio_error() {
+            return Err(error);
+        }
+        let event = self
             .shared
             .ready_telekio(telekio_interest(interest))
             .await?;
-        if ready.contains(::telekio::IoReady::SHUTDOWN) {
+        if event.ready.contains(::telekio::IoReady::SHUTDOWN) {
             Err(gone())
         } else {
-            Ok(ready_event(ready))
+            Ok(ready_event(event.ready, event.tick))
         }
     }
 
@@ -92,6 +98,9 @@ impl Registration {
         interest: Interest,
         f: impl FnOnce() -> io::Result<R>,
     ) -> io::Result<R> {
+        if let Some(error) = self.shared.take_telekio_error() {
+            return Err(error);
+        }
         let result = self.shared.try_ready_telekio(telekio_interest(interest));
         match result.state {
             ::telekio::Poll::Pending => {
@@ -102,7 +111,8 @@ impl Registration {
                 result.call.into_io_result()?;
                 match f() {
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        self.shared.clear_telekio(result.ready);
+                        self.shared
+                            .clear_telekio_result(result.tick, result.ready)?;
                         Err(error)
                     }
                     result => result,
@@ -116,14 +126,16 @@ impl Registration {
     }
 
     pub(crate) fn clear_readiness(&self, event: ReadyEvent) {
-        self.shared
-            .clear_telekio(::telekio::IoReady::from_bits(event.ready.as_usize() as u8));
+        self.shared.clear_telekio(
+            event.tick,
+            ::telekio::IoReady::from_bits(event.ready.as_usize() as u8),
+        );
     }
 }
 
-fn ready_event(ready: ::telekio::IoReady) -> ReadyEvent {
+fn ready_event(ready: ::telekio::IoReady, tick: u8) -> ReadyEvent {
     ReadyEvent {
-        tick: 0,
+        tick,
         ready: Ready::from_usize(ready.bits() as usize),
         is_shutdown: false,
     }
