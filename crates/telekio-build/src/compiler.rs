@@ -374,6 +374,10 @@ fn main() {{
     if !arguments.iter().any(|argument| argument == "--target") {{
         passthrough(arguments);
     }}
+    arguments.extend([
+        OsString::from("-L"),
+        OsString::from(format!("dependency={{}}", Path::new(MACROS).parent().unwrap().display())),
+    ]);
     if package == "tokio" && crate_name == "tokio" {{
         replace_source(&mut arguments, GUEST);
         replace_extern(&mut arguments, "tokio_macros", MACROS);

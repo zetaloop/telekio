@@ -10,24 +10,28 @@ use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use toml::Value;
 
-use crate::edit;
+use crate::{edit, invocation::Invocation};
 
 const TOKIO_VERSION: &str = "1.53.1";
 const TOKIO_MACROS_VERSION: &str = "2.7.2";
 
 pub fn prepare_tokio() -> Result<PathBuf, Box<dyn Error>> {
-    prepare_package("tokio", TOKIO_VERSION)
+    prepare_tokio_artifact(Invocation::detect()?.offline())
 }
 
-pub(crate) fn prepare_tokio_macros() -> Result<PathBuf, Box<dyn Error>> {
-    prepare_package("tokio-macros", TOKIO_MACROS_VERSION)
+pub(crate) fn prepare_tokio_artifact(offline: bool) -> Result<PathBuf, Box<dyn Error>> {
+    prepare_package("tokio", TOKIO_VERSION, offline)
+}
+
+pub(crate) fn prepare_tokio_macros(offline: bool) -> Result<PathBuf, Box<dyn Error>> {
+    prepare_package("tokio-macros", TOKIO_MACROS_VERSION, offline)
 }
 
 pub fn prepare_tokio_host(version: &str) -> Result<PathBuf, Box<dyn Error>> {
     if version != TOKIO_VERSION {
         return Err(format!("telekio-tokio {version} requires Tokio {TOKIO_VERSION}").into());
     }
-    let directory = prepare_package("tokio", version)?;
+    let directory = prepare_package("tokio", version, Invocation::detect()?.offline())?;
     let path = directory.join("src/lib.rs");
     let source = fs::read_to_string(&path)?;
     fs::write(path, include_source(&source))?;
@@ -110,7 +114,7 @@ pub(crate) fn include_source(source: &str) -> String {
     output
 }
 
-fn prepare_package(package: &str, version: &str) -> Result<PathBuf, Box<dyn Error>> {
+fn prepare_package(package: &str, version: &str, offline: bool) -> Result<PathBuf, Box<dyn Error>> {
     let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unavailable")?)
         .join(format!("{package}-source-{version}"));
     fs::create_dir_all(out.join("src"))?;
@@ -137,6 +141,7 @@ fn prepare_package(package: &str, version: &str) -> Result<PathBuf, Box<dyn Erro
             .arg("generate-lockfile")
             .arg("--manifest-path")
             .arg(&manifest)
+            .args(offline.then_some("--offline"))
             .status()?;
         if !status.success() {
             return Err(format!("cargo generate-lockfile failed with {status}").into());
@@ -146,7 +151,7 @@ fn prepare_package(package: &str, version: &str) -> Result<PathBuf, Box<dyn Erro
     if locked != version {
         return Err(format!("Cargo.lock selected {package} {locked}, expected {version}").into());
     }
-    prepare_archive(&manifest, &lock, package, version, &checksum)
+    prepare_archive(&manifest, &lock, package, version, &checksum, offline)
 }
 
 fn prepare_archive(
@@ -155,8 +160,9 @@ fn prepare_archive(
     package: &str,
     version: &str,
     checksum: &str,
+    offline: bool,
 ) -> Result<PathBuf, Box<dyn Error>> {
-    let archive = registry_archive(manifest, package, version, checksum)?;
+    let archive = registry_archive(manifest, package, version, checksum, offline)?;
     let destination = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unavailable")?)
         .join(format!("{package}-{version}"));
     if destination.is_dir() {
@@ -211,6 +217,7 @@ fn registry_archive(
     package: &str,
     version: &str,
     checksum: &str,
+    offline: bool,
 ) -> Result<PathBuf, Box<dyn Error>> {
     let cargo_home = cargo_home()?;
     if let Some(archive) = find_archive(&cargo_home, package, version, checksum)? {
@@ -224,6 +231,7 @@ fn registry_archive(
         .arg("--locked")
         .arg("--manifest-path")
         .arg(manifest)
+        .args(offline.then_some("--offline"))
         .status()?;
     if !status.success() {
         return Err(format!("cargo fetch --locked failed with {status}").into());

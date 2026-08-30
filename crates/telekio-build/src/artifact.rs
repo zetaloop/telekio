@@ -1,10 +1,10 @@
 use std::{
     env,
     error::Error,
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process::{self, Command},
+    process::Command,
 };
 
 use ra_ap_syntax::{
@@ -12,12 +12,12 @@ use ra_ap_syntax::{
     ast::{self, HasName},
 };
 use serde_json::Value as Json;
-use sysinfo::{Pid, System};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 use crate::{
     compiler, edit,
     guest::prepare_artifact_guest,
+    invocation::{Invocation, Operation},
     linker,
     source::{include_source, prepare_tokio_macros},
 };
@@ -503,23 +503,13 @@ fn remove_package_include(manifest: &mut DocumentMut) {
 }
 
 fn build(artifact: Artifact, root: &Path, targets: &[Target]) -> Result<(), Box<dyn Error>> {
-    let command = cargo_command()?;
-    let operation = command
-        .get(1)
-        .and_then(|argument| argument.to_str())
-        .unwrap_or("build");
+    let invocation = Invocation::detect()?;
+    let operation = invocation.operation();
     let out =
         PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unavailable")?).join("telekio");
     fs::create_dir_all(&out)?;
-    let guest = prepare_artifact_guest()?;
-    let verifying = matches!(operation, "check" | "clippy" | "test" | "bench" | "doc");
-    let building = matches!(
-        operation,
-        "build" | "run" | "install" | "package" | "publish"
-    );
-    if !verifying && !building {
-        return Err(format!("cargo {operation} is not supported").into());
-    }
+    let guest = prepare_artifact_guest(invocation.offline())?;
+    let building = operation.building();
 
     let plugin = targets
         .iter()
@@ -534,8 +524,8 @@ fn build(artifact: Artifact, root: &Path, targets: &[Target]) -> Result<(), Box<
         .unwrap_or_default();
     write_outer_sources(&out, targets, artifact, &exports, building)?;
 
-    let test_backend = matches!(operation, "test" | "bench")
-        .then(|| build_test_backend(&out.join("test-backend"), &command))
+    let test_backend = matches!(operation, Operation::Test | Operation::Bench)
+        .then(|| build_test_backend(&out.join("test-backend"), &invocation))
         .transpose()?;
     let records = out.join("artifacts");
     if records.is_dir() {
@@ -546,12 +536,11 @@ fn build(artifact: Artifact, root: &Path, targets: &[Target]) -> Result<(), Box<
         artifact,
         root,
         &out,
-        &command,
-        operation,
+        &invocation,
         (&guest, test_backend.as_deref()),
         targets,
     )?;
-    if operation == "doc" {
+    if operation == Operation::Doc {
         copy_docs(&out.join("inner-target"), &out)?;
     }
     let artifacts = artifacts(&records, targets)?;
@@ -565,77 +554,13 @@ fn build(artifact: Artifact, root: &Path, targets: &[Target]) -> Result<(), Box<
     Ok(())
 }
 
-fn cargo_command() -> Result<Vec<OsString>, Box<dyn Error>> {
-    let system = System::new_all();
-    let process = system
-        .process(Pid::from_u32(process::id()))
-        .and_then(|process| process.parent())
-        .and_then(|parent| system.process(parent))
-        .ok_or("parent Cargo process is unavailable")?;
-    if process
-        .cmd()
-        .get(1)
-        .is_some_and(|argument| argument == "check")
-        && let Some(clippy) = process.parent().and_then(|parent| system.process(parent))
-        && clippy.name().to_string_lossy().starts_with("cargo-clippy")
-    {
-        return Ok(clippy.cmd().to_vec());
-    }
-    Ok(process.cmd().to_vec())
-}
-
-fn argument<'a>(arguments: &'a [OsString], name: &str) -> Option<&'a OsStr> {
-    arguments
-        .iter()
-        .position(|argument| argument == name)
-        .and_then(|index| arguments.get(index + 1))
-        .map(OsString::as_os_str)
-}
-
-fn workspace_lock(root: &Path, parent: &[OsString]) -> Result<PathBuf, Box<dyn Error>> {
-    let cargo = env::var_os("CARGO").ok_or("CARGO is unavailable")?;
-    let output = Command::new(cargo)
-        .current_dir(root)
-        .args(["metadata", "--no-deps", "--format-version", "1"])
-        .arg("--manifest-path")
-        .arg(root.join("Cargo.toml"))
-        .args(config_options(parent))
-        .args(resolution_options(parent))
-        .output()?;
-    if !output.status.success() {
-        return Err(format!(
-            "cargo metadata failed with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-        .into());
-    }
-    let metadata: Json = serde_json::from_slice(&output.stdout)?;
-    let lock = metadata["workspace_root"]
-        .as_str()
-        .map(PathBuf::from)
-        .ok_or("cargo metadata omitted the workspace root")?
-        .join("Cargo.lock");
-    lock.is_file()
-        .then_some(lock)
-        .ok_or_else(|| "outer Cargo.lock is unavailable".into())
-}
-
 fn write_inner_sources(
     out: &Path,
     targets: &[Target],
     artifact: Artifact,
 ) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(out)?;
-    let building = cargo_command()?
-        .get(1)
-        .and_then(|argument| argument.to_str())
-        .is_some_and(|operation| {
-            matches!(
-                operation,
-                "build" | "run" | "install" | "package" | "publish"
-            )
-        });
+    let building = Invocation::detect()?.operation().building();
     for target in targets {
         let source = if building && artifact_target(&target.source, artifact) {
             let (source, _) = artifact_source(&out.join("sources"), &target.source, artifact)?;
@@ -799,30 +724,24 @@ fn run_inner(
     artifact: Artifact,
     root: &Path,
     out: &Path,
-    parent: &[OsString],
-    operation: &str,
+    invocation: &Invocation,
     runtime: (&Path, Option<&Path>),
     targets: &[Target],
 ) -> Result<(), Box<dyn Error>> {
     let (guest, backend) = runtime;
     let target_dir = out.join("inner-target");
-    let lock = out.join("inner-lock/Cargo.lock");
     let cargo = env::var_os("CARGO").ok_or("CARGO is unavailable")?;
-    fs::create_dir_all(lock.parent().ok_or("inner lock has no parent")?)?;
     fs::create_dir_all(&target_dir)?;
     fs::write(target_dir.join(".telekio-inner"), [])?;
-    fs::copy(workspace_lock(root, parent)?, &lock)?;
 
-    let building = matches!(
-        operation,
-        "build" | "run" | "install" | "package" | "publish"
-    );
+    let operation = invocation.operation();
+    let building = operation.building();
     let linker = building.then(|| build_linker(out, targets, artifact));
     let linker = linker.transpose()?;
     let original_flags = env::var_os("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
-    let configs = config_options(parent);
-    let resolution = resolution_options(parent);
-    let macros = prepare_tokio_macros()?;
+    let configs = invocation.configs();
+    let resolution = invocation.resolution();
+    let macros = prepare_tokio_macros(invocation.offline())?;
     let compiler = compiler::build(
         out,
         guest,
@@ -875,29 +794,30 @@ fn run_inner(
     }
 
     let config = [
-        format!("resolver.lockfile-path={lock:?}"),
         format!("build.rustc={:?}", compiler.rustc),
         format!("build.rustdoc={:?}", compiler.rustdoc),
     ];
 
-    let command_name = if matches!(operation, "run" | "install" | "package" | "publish") {
-        "build"
-    } else {
-        operation
-    };
+    let inner = invocation.inner()?;
     let mut command = Command::new(&cargo);
-    command
-        .current_dir(root)
-        .arg(command_name)
-        .arg("--manifest-path")
-        .arg(root.join("Cargo.toml"))
-        .arg("--target-dir")
-        .arg(&target_dir);
+    command.current_dir(invocation.cwd()).args(inner.global);
     for option in &config {
         command.arg("--config").arg(option);
     }
     command
-        .args(inner_options(parent, operation)?)
+        .arg(inner.command)
+        .arg("--manifest-path")
+        .arg(root.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(&target_dir);
+    if !resolution
+        .iter()
+        .any(|option| matches!(option.to_str(), Some("--locked" | "--frozen")))
+    {
+        command.arg("--locked");
+    }
+    command
+        .args(inner.options)
         .env("CARGO_ENCODED_RUSTFLAGS", flags)
         .env_remove("RUSTC")
         .env_remove("RUSTDOC")
@@ -906,155 +826,8 @@ fn run_inner(
     if status.success() {
         Ok(())
     } else {
-        Err(format!("inner cargo {operation} failed with {status}").into())
+        Err(format!("inner cargo {} failed with {status}", operation.name()).into())
     }
-}
-
-fn inner_options(parent: &[OsString], operation: &str) -> Result<Vec<OsString>, Box<dyn Error>> {
-    let distribution = matches!(operation, "install" | "package" | "publish");
-    let mut options = Vec::new();
-    let mut index = 2;
-    while index < parent.len() {
-        let argument = parent[index].to_string_lossy();
-        if argument == "--" && matches!(operation, "run" | "install" | "package" | "publish") {
-            break;
-        }
-        if matches!(argument.as_ref(), "--manifest-path" | "--target-dir") {
-            index += 2;
-            continue;
-        }
-        if argument.starts_with("--manifest-path=") || argument.starts_with("--target-dir=") {
-            index += 1;
-            continue;
-        }
-        if distribution {
-            if let Some(takes_value) = outer_option(operation, &argument) {
-                index += usize::from(takes_value) + 1;
-                continue;
-            }
-            if !argument.starts_with('-') {
-                index += 1;
-                continue;
-            }
-            if common_option_takes_value(&argument)
-                && !argument.contains('=')
-                && let Some(value) = parent.get(index + 1)
-            {
-                options.extend([parent[index].clone(), value.clone()]);
-                index += 2;
-                continue;
-            }
-        }
-        options.push(parent[index].clone());
-        index += 1;
-    }
-    if matches!(operation, "run" | "install" | "package" | "publish")
-        && env::var("PROFILE").as_deref() == Ok("release")
-        && !options
-            .iter()
-            .any(|argument| matches!(argument.to_str(), Some("--release" | "--profile")))
-    {
-        options.push("--release".into());
-    }
-    if !options.iter().any(|argument| argument == "--target") {
-        options.extend([
-            OsString::from("--target"),
-            env::var_os("TARGET").ok_or("TARGET is unavailable")?,
-        ]);
-    }
-    Ok(options)
-}
-
-fn resolution_options(arguments: &[OsString]) -> Vec<OsString> {
-    arguments
-        .iter()
-        .filter(|argument| {
-            matches!(
-                argument.to_str(),
-                Some("--locked" | "--frozen" | "--offline")
-            )
-        })
-        .cloned()
-        .collect()
-}
-
-fn config_options(arguments: &[OsString]) -> Vec<OsString> {
-    let mut options = Vec::new();
-    let mut index = 2;
-    while index < arguments.len() {
-        let argument = arguments[index].to_string_lossy();
-        if argument == "--config" {
-            if let Some(value) = arguments.get(index + 1) {
-                options.extend([arguments[index].clone(), value.clone()]);
-            }
-            index += 2;
-        } else {
-            if argument.starts_with("--config=") {
-                options.push(arguments[index].clone());
-            }
-            index += 1;
-        }
-    }
-    options
-}
-
-fn outer_option(operation: &str, argument: &str) -> Option<bool> {
-    let (flags, values): (&[&str], &[&str]) = match operation {
-        "install" => (
-            &["--list", "--force", "--no-track", "--debug", "--dry-run"],
-            &[
-                "--root",
-                "--path",
-                "--git",
-                "--branch",
-                "--tag",
-                "--rev",
-                "--version",
-                "--registry",
-                "--index",
-            ],
-        ),
-        "package" => (
-            &["--allow-dirty", "--no-verify", "--no-metadata", "--list"],
-            &[],
-        ),
-        "publish" => (
-            &["--allow-dirty", "--no-verify", "--dry-run"],
-            &["--token", "--registry", "--index"],
-        ),
-        _ => return None,
-    };
-    if flags.contains(&argument) {
-        return Some(false);
-    }
-    if values.contains(&argument) {
-        return Some(true);
-    }
-    values
-        .iter()
-        .any(|option| argument.starts_with(&format!("{option}=")))
-        .then_some(false)
-}
-
-fn common_option_takes_value(argument: &str) -> bool {
-    matches!(
-        argument,
-        "--package"
-            | "-p"
-            | "--exclude"
-            | "--jobs"
-            | "-j"
-            | "--target"
-            | "--profile"
-            | "--features"
-            | "-F"
-            | "--bin"
-            | "--example"
-            | "--color"
-            | "--message-format"
-            | "--config"
-            | "-Z"
-    )
 }
 
 fn artifact_target(proxy: &Path, artifact: Artifact) -> bool {
@@ -1090,7 +863,7 @@ fn original_source_path(proxy: &Path) -> Result<PathBuf, Box<dyn Error>> {
     )?)
 }
 
-fn build_test_backend(out: &Path, parent: &[OsString]) -> Result<PathBuf, Box<dyn Error>> {
+fn build_test_backend(out: &Path, invocation: &Invocation) -> Result<PathBuf, Box<dyn Error>> {
     fs::create_dir_all(out.join("src"))?;
     fs::write(
         out.join("Cargo.toml"),
@@ -1104,8 +877,8 @@ fn build_test_backend(out: &Path, parent: &[OsString]) -> Result<PathBuf, Box<dy
         out.join("src/lib.rs"),
         "// Generated by Telekio. Provides the host test runtime.\n\nuse std::sync::OnceLock;\n\nstatic OWNER: OnceLock<telekio_host::Owner> = OnceLock::new();\n\n#[unsafe(no_mangle)]\npub extern \"C-unwind\" fn telekio_test_handle() -> telekio::RawHandle {\n    OWNER\n        .get_or_init(|| telekio_host::Runtime::new().unwrap().owner())\n        .runtime()\n        .into_abi()\n}\n",
     )?;
-    run_helper(out, parent)?;
-    let output = profile_output(&out.join("target"), parent);
+    run_helper(out, invocation)?;
+    let output = profile_output(&out.join("target"));
     let (prefix, extension) = if env::var("TARGET").is_ok_and(|target| target.contains("windows")) {
         ("", "lib")
     } else {
@@ -1118,8 +891,29 @@ fn build_test_backend(out: &Path, parent: &[OsString]) -> Result<PathBuf, Box<dy
         .ok_or_else(|| "test backend static library was not produced".into())
 }
 
-fn run_helper(root: &Path, parent: &[OsString]) -> Result<(), Box<dyn Error>> {
+fn run_helper(root: &Path, invocation: &Invocation) -> Result<(), Box<dyn Error>> {
     let cargo = env::var_os("CARGO").ok_or("CARGO is unavailable")?;
+    let configs = invocation.configs();
+    let resolution = invocation.resolution();
+    if !root.join("Cargo.lock").is_file() {
+        let mut command = Command::new(&cargo);
+        command
+            .current_dir(root)
+            .arg("generate-lockfile")
+            .arg("--manifest-path")
+            .arg(root.join("Cargo.toml"))
+            .args(&configs);
+        if resolution
+            .iter()
+            .any(|option| matches!(option.to_str(), Some("--frozen" | "--offline")))
+        {
+            command.arg("--offline");
+        }
+        let status = command.status()?;
+        if !status.success() {
+            return Err(format!("helper lock generation failed with {status}").into());
+        }
+    }
     let status = Command::new(cargo)
         .current_dir(root)
         .arg("build")
@@ -1127,7 +921,9 @@ fn run_helper(root: &Path, parent: &[OsString]) -> Result<(), Box<dyn Error>> {
         .arg(root.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(root.join("target"))
-        .args(helper_options(parent)?)
+        .args(helper_options(invocation)?)
+        .args(configs)
+        .args(resolution)
         .status()?;
     if status.success() {
         Ok(())
@@ -1136,23 +932,17 @@ fn run_helper(root: &Path, parent: &[OsString]) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn helper_options(parent: &[OsString]) -> Result<Vec<OsString>, Box<dyn Error>> {
+fn helper_options(invocation: &Invocation) -> Result<Vec<OsString>, Box<dyn Error>> {
     let mut options = Vec::new();
-    if env::var("PROFILE").as_deref() == Ok("release") {
+    if env::var("PROFILE").as_deref() != Ok("debug") {
         options.push("--release".into());
     }
-    if parent
-        .iter()
-        .any(|argument| matches!(argument.to_str(), Some("-v" | "-vv" | "--verbose")))
-    {
+    if invocation.verbose() {
         options.push("--verbose".into());
     }
     options.extend([
         OsString::from("--target"),
-        argument(parent, "--target")
-            .map(OsStr::to_owned)
-            .or_else(|| env::var_os("TARGET"))
-            .ok_or("TARGET is unavailable")?,
+        env::var_os("TARGET").ok_or("TARGET is unavailable")?,
     ]);
     Ok(options)
 }
@@ -1181,15 +971,14 @@ fn package_sibling(name: &str) -> Option<PathBuf> {
         })
 }
 
-fn profile_output(root: &Path, parent: &[OsString]) -> PathBuf {
+fn profile_output(root: &Path) -> PathBuf {
     let mut output = root.to_owned();
-    output.push(
-        argument(parent, "--target")
-            .map(OsStr::to_owned)
-            .or_else(|| env::var_os("TARGET"))
-            .expect("TARGET is unavailable"),
-    );
-    output.push(env::var("PROFILE").unwrap_or_else(|_| "debug".to_owned()));
+    output.push(env::var_os("TARGET").expect("TARGET is unavailable"));
+    output.push(if env::var("PROFILE").as_deref() == Ok("debug") {
+        "debug"
+    } else {
+        "release"
+    });
     output
 }
 

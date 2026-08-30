@@ -6,10 +6,10 @@ use std::{
 
 use toml::{Table, Value};
 
-use crate::{edit, prepare_tokio};
+use crate::{edit, prepare_tokio, source::prepare_tokio_artifact};
 
 pub fn prepare_tests() -> Result<PathBuf, Box<dyn Error>> {
-    let generated = prepare_guest_with(package_dependency("telekio", true))?;
+    let generated = prepare_guest_with(prepare_tokio()?, package_dependency("telekio", true))?;
     let path = generated.join("Cargo.toml");
     let mut manifest: Value = toml::from_str(&fs::read_to_string(&path)?)?;
     let features = manifest
@@ -52,12 +52,14 @@ pub fn prepare_tests() -> Result<PathBuf, Box<dyn Error>> {
     Ok(generated)
 }
 
-pub(crate) fn prepare_artifact_guest() -> Result<PathBuf, Box<dyn Error>> {
-    prepare_guest_with(package_dependency("telekio", true))
+pub(crate) fn prepare_artifact_guest(offline: bool) -> Result<PathBuf, Box<dyn Error>> {
+    prepare_guest_with(
+        prepare_tokio_artifact(offline)?,
+        package_dependency("telekio", true),
+    )
 }
 
-fn prepare_guest_with(telekio: Value) -> Result<PathBuf, Box<dyn Error>> {
-    let generated = prepare_tokio()?;
+fn prepare_guest_with(generated: PathBuf, telekio: Value) -> Result<PathBuf, Box<dyn Error>> {
     patch_manifest(&generated.join("Cargo.toml"), telekio)?;
     patch_task(&generated.join("src/runtime/task/mod.rs"))?;
     patch_current_thread(&generated.join("src/runtime/scheduler/current_thread/mod.rs"))?;
