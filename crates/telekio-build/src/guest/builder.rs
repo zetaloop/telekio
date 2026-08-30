@@ -62,43 +62,41 @@ impl Builder {
             }
         };
         let keep_alive = self.keep_alive.unwrap_or_default();
-        let result = attached()
-            .build(::telekio::RuntimeConfig {
-                flavor,
-                enable_io: self.enable_io.into(),
-                enable_time: self.enable_time.into(),
-                start_paused: self.start_paused.into(),
-                worker_threads: self.worker_threads.unwrap_or_default(),
-                max_blocking_threads: self.max_blocking_threads,
-                thread_name: ::telekio::StringCallback::from_arc(self.thread_name.clone()),
-                thread_stack_size: self.thread_stack_size.unwrap_or_default(),
-                has_thread_stack_size: self.thread_stack_size.is_some().into(),
-                after_start: self
-                    .after_start
-                    .clone()
-                    .map_or_else(::telekio::Callback::none, ::telekio::Callback::from_arc),
-                before_stop: self
-                    .before_stop
-                    .clone()
-                    .map_or_else(::telekio::Callback::none, ::telekio::Callback::from_arc),
-                before_park: self
-                    .before_park
-                    .clone()
-                    .map_or_else(::telekio::Callback::none, ::telekio::Callback::from_arc),
-                after_unpark: self
-                    .after_unpark
-                    .clone()
-                    .map_or_else(::telekio::Callback::none, ::telekio::Callback::from_arc),
-                keep_alive_secs: keep_alive.as_secs(),
-                keep_alive_nanos: keep_alive.subsec_nanos(),
-                has_keep_alive: self.keep_alive.is_some().into(),
-                global_queue_interval: self.global_queue_interval.unwrap_or_default(),
-                event_interval: self.event_interval,
-                max_io_events_per_tick: self.nevents,
-                name: unsafe { ::telekio::Bytes::borrow(self.name.as_deref()) },
-            });
+        let result = attached().build(::telekio::RuntimeConfig {
+            flavor,
+            enable_io: self.enable_io.into(),
+            enable_time: self.enable_time.into(),
+            start_paused: self.start_paused.into(),
+            worker_threads: self.worker_threads.unwrap_or_default(),
+            max_blocking_threads: self.max_blocking_threads,
+            thread_name: ::telekio::StringCallback::from_arc(self.thread_name.clone()),
+            thread_stack_size: self.thread_stack_size.unwrap_or_default(),
+            has_thread_stack_size: self.thread_stack_size.is_some().into(),
+            after_start: self
+                .after_start
+                .clone()
+                .map_or_else(::telekio::Callback::none, ::telekio::Callback::from_arc),
+            before_stop: self
+                .before_stop
+                .clone()
+                .map_or_else(::telekio::Callback::none, ::telekio::Callback::from_arc),
+            before_park: self
+                .before_park
+                .clone()
+                .map_or_else(::telekio::Callback::none, ::telekio::Callback::from_arc),
+            after_unpark: self
+                .after_unpark
+                .clone()
+                .map_or_else(::telekio::Callback::none, ::telekio::Callback::from_arc),
+            keep_alive_secs: keep_alive.as_secs(),
+            keep_alive_nanos: keep_alive.subsec_nanos(),
+            has_keep_alive: self.keep_alive.is_some().into(),
+            global_queue_interval: self.global_queue_interval.unwrap_or_default(),
+            event_interval: self.event_interval,
+            max_io_events_per_tick: self.nevents,
+            name: unsafe { ::telekio::Bytes::borrow(self.name.as_deref()) },
+        });
         // Tokio's LocalRuntime keeps this value on its originating thread.
-        unsafe { result.into_runtime() }
-            .map(|(runtime, _)| runtime)
+        unsafe { result.into_runtime() }.map(|(runtime, _)| runtime)
     }
 }

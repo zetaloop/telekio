@@ -132,7 +132,8 @@ pub(crate) fn operation(
     data: *mut u8,
     len: usize,
 ) -> std::io::Result<usize> {
-    let result = registration.try_operate(unsafe { ::telekio::IoRequest::from_raw(kind, data, len) });
+    let result =
+        registration.try_operate(unsafe { ::telekio::IoRequest::from_raw(kind, data, len) });
     match result.state {
         ::telekio::Poll::Pending => {
             unsafe { result.call.payload.release() };
