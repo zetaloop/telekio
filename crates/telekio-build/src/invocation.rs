@@ -213,6 +213,7 @@ impl Invocation {
             env::var_os("CARGO_PKG_NAME").ok_or("CARGO_PKG_NAME is unavailable")?,
         ];
         if env::var("PROFILE").as_deref() == Ok("release")
+            && self.operation != Operation::Bench
             && !cargo_options.iter().any(|argument| {
                 matches!(argument.to_str(), Some("-r" | "--release" | "--profile"))
                     || argument.to_string_lossy().starts_with("--profile=")

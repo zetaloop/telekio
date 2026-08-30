@@ -1,181 +1,42 @@
 use std::{
     env,
     error::Error,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
-pub(crate) fn build(
-    out: &Path,
-    records: &Path,
-    mappings: &[(String, String)],
-    windows: bool,
-) -> Result<PathBuf, Box<dyn Error>> {
-    let linker = env::var_os("RUSTC_LINKER").unwrap_or_else(|| {
-        if windows {
-            "link.exe".into()
-        } else {
-            "cc".into()
-        }
-    });
-    let source = out.join("linker.rs");
-    let executable = out.join(if cfg!(windows) {
-        "linker.exe"
-    } else {
-        "linker"
-    });
-    let mappings = mappings
-        .iter()
-        .map(|(name, proxy)| format!("({name:?}, {proxy:?})"))
-        .collect::<Vec<_>>()
-        .join(",");
-    fs::write(
-        &source,
-        format!(
-            r###"use std::{{env, ffi::{{OsStr, OsString}}, fs, io::Write, path::Path, process::{{self, Command}}}};
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct Spec {
+    duplicate: Vec<&'static str>,
+}
 
-const LINKER: &str = {linker:?};
-const RECORDS: &str = {records:?};
-const MAPPINGS: &[(&str, &str)] = &[{mappings}];
-const WINDOWS_LINKER: bool = {windows};
+pub(crate) struct Mapping {
+    pub proxy: String,
+    pub entry: String,
+}
 
-fn main() {{
-    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
-    let output = Command::new(LINKER).args(&arguments).output().unwrap();
-    if !output.status.success() {{
-        std::io::stdout().write_all(&output.stdout).unwrap();
-        std::io::stderr().write_all(&output.stderr).unwrap();
-        process::exit(output.status.code().unwrap_or(1));
-    }}
-    let Some(crate_name) = env::var("CARGO_CRATE_NAME").ok() else {{ return }};
-    let Some((_, proxy)) = MAPPINGS.iter().find(|(name, _)| *name == crate_name) else {{ return }};
-    let arguments = response_arguments(&arguments);
-    let directory = Path::new(RECORDS).join(format!("{{proxy}}.inputs"));
-    fs::create_dir_all(&directory).unwrap();
-    let mut recorded = Vec::new();
-    let mut skip = false;
-    for (index, argument) in arguments.into_iter().enumerate() {{
-        if skip {{
-            skip = false;
-            continue;
-        }}
-        if output_argument(&argument) {{
-            skip = !WINDOWS_LINKER && argument == "-o";
-            continue;
-        }}
-        let path = Path::new(&argument);
-        if linker_input(path) {{
-            recorded.push(persist_input(path, &directory, index).into_os_string());
-        }} else {{
-            recorded.push(argument);
-        }}
-    }}
-    write_record(&Path::new(RECORDS).join(format!("{{proxy}}.record")), &recorded);
-}}
+pub(crate) struct Record {
+    pub arguments: Vec<OsString>,
+    pub spec: Spec,
+}
 
-fn linker_input(path: &Path) -> bool {{
-    path.is_file()
-        && path
-            .extension()
-            .is_some_and(|extension| matches!(extension.to_str(), Some("o" | "obj" | "rlib" | "lib" | "a")))
-}}
-
-fn persist_input(path: &Path, directory: &Path, index: usize) -> std::path::PathBuf {{
-    let extension = path.extension().and_then(OsStr::to_str);
-    if !matches!(extension, Some("o" | "obj")) && temporary_path(path) {{
-        let stable = path
-            .parent()
-            .and_then(Path::parent)
-            .expect("temporary linker input has no stable parent")
-            .join(path.file_name().expect("linker input has no name"));
-        if stable.is_file() {{
-            return stable;
-        }}
-    }}
-    if matches!(extension, Some("o" | "obj")) || temporary_path(path) {{
-        let destination = directory.join(format!("{{index}}-{{}}", path.file_name().unwrap().to_string_lossy()));
-        if destination.is_file() {{
-            fs::remove_file(&destination).unwrap();
-        }}
-        fs::hard_link(path, &destination).unwrap();
-        destination
-    }} else {{
-        path.to_owned()
-    }}
-}}
-
-fn output_argument(argument: &OsStr) -> bool {{
-    let argument = argument.to_string_lossy();
-    if WINDOWS_LINKER {{
-        let upper = argument.to_ascii_uppercase();
-        ["/OUT:", "/PDB:", "/IMPLIB:", "/ILK:", "/NATVIS:"]
-            .iter()
-            .any(|prefix| upper.starts_with(prefix))
-            || upper.strip_prefix("/DEF:").is_some_and(|path| temporary_path(Path::new(path)))
-    }} else {{
-        argument == "-o"
-            || argument.starts_with("--output=")
-            || argument.starts_with("-Wl,-o,")
-            || argument.starts_with("-Wl,--out-implib,")
-            || argument.starts_with("-Wl,-Map,")
-            || argument.starts_with("-Wl,--version-script=")
-            || argument.starts_with("-Wl,--dynamic-list=")
-    }}
-}}
-
-fn temporary_path(path: &Path) -> bool {{
-    path.parent()
-        .and_then(Path::file_name)
-        .is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().starts_with("rustc"))
-}}
-
-fn response_arguments(arguments: &[OsString]) -> Vec<OsString> {{
-    let Some(response) = arguments.first().and_then(|argument| argument.to_str()?.strip_prefix('@')) else {{ return arguments.to_owned() }};
-    if WINDOWS_LINKER {{
-        let bytes = fs::read(response).unwrap();
-        let bytes = if bytes.starts_with(&[0xff, 0xfe]) {{ &bytes[2..] }} else {{ &bytes }};
-        let words = bytes.chunks_exact(2).map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]])).collect::<Vec<_>>();
-        String::from_utf16(&words).unwrap().lines().map(|line| OsString::from(line.trim_matches('"'))).collect()
-    }} else {{
-        fs::read_to_string(response).unwrap().lines().map(|line| OsString::from(line.trim_matches('"'))).collect()
-    }}
-}}
-
-fn write_record(path: &Path, arguments: &[OsString]) {{
-    let mut record = Vec::new();
-    for argument in arguments {{
-        let bytes = argument.as_encoded_bytes();
-        record.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-        record.extend_from_slice(bytes);
-    }}
-    fs::write(path, record).unwrap();
-}}
-"###,
-            linker = linker.to_string_lossy(),
-            records = records.display(),
-        ),
-    )?;
-    let rustc = env::var_os("RUSTC").ok_or("RUSTC is unavailable")?;
-    let status = Command::new(rustc)
-        .arg("--edition")
-        .arg("2024")
-        .arg(&source)
-        .arg("-o")
-        .arg(&executable)
-        .status()?;
-    if status.success() {
-        Ok(executable)
-    } else {
-        Err(format!("linker helper compilation failed with {status}").into())
+impl Spec {
+    pub fn replay(&self, arguments: &[OsString]) -> Vec<OsString> {
+        let mut arguments = arguments.to_vec();
+        arguments.extend(self.duplicate.iter().map(OsString::from));
+        arguments
     }
 }
 
-pub(crate) fn read_record(path: &Path) -> Result<Vec<OsString>, Box<dyn Error>> {
+pub(crate) fn archive(records: &Path, entry: &str) -> PathBuf {
+    records.join(format!("{entry}.telekio"))
+}
+
+pub(crate) fn read_record(path: &Path, archive: PathBuf) -> Result<Record, Box<dyn Error>> {
     let record = fs::read(path)?;
     let mut position = 0;
-    let mut arguments = Vec::new();
+    let mut command = Vec::new();
     while position < record.len() {
         let length = u64::from_le_bytes(
             record
@@ -187,12 +48,233 @@ pub(crate) fn read_record(path: &Path) -> Result<Vec<OsString>, Box<dyn Error>> 
         let bytes = record
             .get(position..position + length)
             .ok_or("linker record ended inside an argument")?;
-        // The record is written and read on the same host using OsStr's encoded bytes.
-        arguments.push(unsafe { OsString::from_encoded_bytes_unchecked(bytes.to_vec()) });
+        // The generated proxy and this reader use the same host and Rust toolchain.
+        command.push(unsafe { OsString::from_encoded_bytes_unchecked(bytes.to_vec()) });
         position += length;
     }
-    if arguments.is_empty() {
-        return Err(format!("{} recorded no linker inputs", path.display()).into());
+    let program = command
+        .first()
+        .cloned()
+        .ok_or("rustc recorded an empty linker command")?;
+    let arguments = command.into_iter().skip(1).collect::<Vec<_>>();
+
+    let msvc_output = arguments.iter().any(|argument| {
+        argument
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("/OUT:")
+    });
+    let linker = Path::new(&program)
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let uses_cc = arguments
+        .iter()
+        .any(|argument| argument.to_string_lossy().starts_with("-Wl,"))
+        || linker.ends_with("cc")
+        || linker.contains("gcc")
+        || linker.contains("clang");
+    let apple = env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple");
+    let duplicate = if msvc_output {
+        vec!["/FORCE:MULTIPLE"]
+    } else if apple {
+        Vec::new()
+    } else if uses_cc {
+        vec!["-Wl,--allow-multiple-definition"]
+    } else {
+        vec!["--allow-multiple-definition"]
+    };
+
+    Ok(Record {
+        arguments: filter_arguments(arguments, archive, msvc_output)?,
+        spec: Spec { duplicate },
+    })
+}
+
+fn filter_arguments(
+    arguments: Vec<OsString>,
+    archive: PathBuf,
+    msvc_output: bool,
+) -> Result<Vec<OsString>, Box<dyn Error>> {
+    let arguments = remove_outputs(arguments, msvc_output);
+    let mut recorded = Vec::new();
+    let mut first_file = None;
+    let mut static_file = None;
+    let mut static_mode = msvc_output;
+    for argument in arguments {
+        if linker_input(Path::new(&argument)) {
+            first_file.get_or_insert(recorded.len());
+            if static_mode {
+                static_file.get_or_insert(recorded.len());
+            }
+        } else {
+            static_mode |= argument == "-Wl,-Bstatic";
+            static_mode &= argument != "-Wl,-Bdynamic";
+            recorded.push(argument);
+        }
     }
-    Ok(arguments)
+    let position = static_file
+        .or(first_file)
+        .ok_or("linker invocation contained no file inputs")?;
+    recorded.insert(position, archive.into_os_string());
+    Ok(recorded)
+}
+
+fn linker_input(path: &Path) -> bool {
+    let located = path.is_absolute()
+        || path
+            .parent()
+            .is_some_and(|parent| !parent.as_os_str().is_empty());
+    located
+        && path.extension().is_some_and(|extension| {
+            matches!(
+                extension.to_str(),
+                Some("o" | "obj" | "rlib" | "lib" | "a" | "telekio")
+            )
+        })
+}
+
+fn remove_outputs(mut arguments: Vec<OsString>, msvc_output: bool) -> Vec<OsString> {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "-flavor")
+        && arguments.len() > 1
+    {
+        arguments.drain(..2);
+    }
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        if arguments[index] == "-Xlinker"
+            && let Some(argument) = arguments.get(index + 1)
+        {
+            let next = (arguments.get(index + 2) == Some(&OsString::from("-Xlinker")))
+                .then(|| arguments.get(index + 3))
+                .flatten();
+            if output_pair(argument, next) {
+                index += 4;
+                continue;
+            }
+            if output_argument(argument, msvc_output) {
+                index += 2;
+                continue;
+            }
+            filtered.extend_from_slice(&arguments[index..index + 2]);
+            index += 2;
+            continue;
+        }
+        if output_pair(&arguments[index], arguments.get(index + 1)) {
+            index += 2;
+            continue;
+        }
+        if output_argument(&arguments[index], msvc_output) {
+            index += 1;
+            continue;
+        }
+        if arguments[index]
+            .to_str()
+            .is_some_and(|argument| argument.starts_with("-Wl,"))
+        {
+            if let Some(argument) = filter_driver_argument(&arguments[index]) {
+                filtered.push(argument);
+            }
+        } else {
+            filtered.push(arguments[index].clone());
+        }
+        index += 1;
+    }
+    filtered
+}
+
+fn output_pair(argument: &OsStr, next: Option<&OsString>) -> bool {
+    let Some(next) = next else { return false };
+    if argument == "-o" || argument == "--out-implib" {
+        return true;
+    }
+    matches!(
+        argument.to_str(),
+        Some("-exported_symbols_list" | "--dynamic-list" | "-M" | "-Map")
+    ) && temporary_path(Path::new(next))
+}
+
+fn output_argument(argument: &OsStr, msvc_output: bool) -> bool {
+    let argument = argument.to_string_lossy();
+    let upper = argument.to_ascii_uppercase();
+    if msvc_output
+        && (["/OUT:", "/PDB:", "/IMPLIB:", "/ILK:"]
+            .iter()
+            .any(|prefix| upper.starts_with(prefix))
+            || upper
+                .strip_prefix("/DEF:")
+                .is_some_and(|path| temporary_path(Path::new(path)))
+            || upper.strip_prefix("/NATVIS:").is_some_and(rustc_natvis))
+    {
+        return true;
+    }
+    argument.starts_with("--output=")
+        || argument.starts_with("--out-implib=")
+        || temporary_linker_output(&argument, "-Map=")
+        || temporary_linker_output(&argument, "--version-script=")
+        || temporary_linker_output(&argument, "--dynamic-list=")
+}
+
+fn filter_driver_argument(argument: &OsStr) -> Option<OsString> {
+    let argument = argument.to_str()?;
+    let parts = argument
+        .strip_prefix("-Wl,")?
+        .split(',')
+        .collect::<Vec<_>>();
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < parts.len() {
+        let part = parts[index];
+        let next = parts.get(index + 1).copied();
+        if matches!(part, "-o" | "--out-implib") && next.is_some() {
+            index += 2;
+            continue;
+        }
+        if matches!(
+            part,
+            "-exported_symbols_list" | "--dynamic-list" | "-M" | "-Map"
+        ) && next.is_some_and(|path| temporary_path(Path::new(path)))
+        {
+            index += 2;
+            continue;
+        }
+        if temporary_linker_output(part, "-Map=")
+            || temporary_linker_output(part, "--version-script=")
+            || temporary_linker_output(part, "--dynamic-list=")
+        {
+            index += 1;
+            continue;
+        }
+        filtered.push(part);
+        index += 1;
+    }
+    (!filtered.is_empty()).then(|| format!("-Wl,{}", filtered.join(",")).into())
+}
+
+fn temporary_linker_output(argument: &str, prefix: &str) -> bool {
+    argument
+        .strip_prefix(prefix)
+        .is_some_and(|path| temporary_path(Path::new(path)))
+}
+
+fn temporary_path(path: &Path) -> bool {
+    path.parent().and_then(Path::file_name).is_some_and(|name| {
+        name.to_string_lossy()
+            .to_ascii_lowercase()
+            .starts_with("rustc")
+    })
+}
+
+fn rustc_natvis(path: &str) -> bool {
+    let path = Path::new(path);
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|parent| parent == "etc")
+        && path
+            .ancestors()
+            .any(|ancestor| ancestor.file_name() == Some("rustlib".as_ref()))
 }
