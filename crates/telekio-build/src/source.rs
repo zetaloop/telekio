@@ -3,14 +3,12 @@ use std::{
     error::Error,
     ffi::OsString,
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::Command,
 };
 
-use flate2::read::GzDecoder;
 use ra_ap_syntax::{AstNode, Edition, SourceFile, ast::HasModuleItem};
-use sha2::{Digest, Sha256};
-use toml::Value;
+use serde_json::Value as Json;
 
 use crate::{edit, invocation};
 
@@ -155,7 +153,7 @@ fn prepare_package(
     let lock = out.join("Cargo.lock");
     if !lock.is_file() {
         let status = Command::new(cargo())
-            .current_dir(&out)
+            .current_dir(env::temp_dir())
             .arg("generate-lockfile")
             .arg("--manifest-path")
             .arg(&manifest)
@@ -165,231 +163,99 @@ fn prepare_package(
             return Err(format!("cargo generate-lockfile failed with {status}").into());
         }
     }
-    let (locked, checksum) = locked_package(&lock, package)?;
-    if locked != version {
-        return Err(format!("Cargo.lock selected {package} {locked}, expected {version}").into());
-    }
-    prepare_archive(
-        output,
-        &manifest,
-        &lock,
-        (package, version, &checksum),
-        offline,
-        emit,
-    )
-}
-
-fn prepare_archive(
-    output: &Path,
-    manifest: &Path,
-    lock: &Path,
-    package: (&str, &str, &str),
-    offline: bool,
-    emit: bool,
-) -> Result<PathBuf, Box<dyn Error>> {
-    let (name, version, checksum) = package;
-    let archive = registry_archive(manifest, name, version, checksum, offline)?;
-    let destination = output.join(format!("{name}-{version}"));
+    let source = package_source(&manifest, package, version, offline)?;
+    let destination = output.join(format!("{package}-{version}"));
     if destination.is_dir() {
         fs::remove_dir_all(&destination)?;
     }
-    unpack(&archive, &destination, name, version)?;
-    verify_manifest(&destination.join("Cargo.toml"), name, version)?;
+    copy_directory(&source, &destination)?;
     if emit {
-        println!("cargo:rerun-if-changed={}", archive.display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            source.join("Cargo.toml").display()
+        );
         println!("cargo:rerun-if-changed={}", lock.display());
         println!("cargo:rerun-if-env-changed=CARGO_HOME");
     }
     Ok(destination)
 }
 
-fn locked_package(lock: &Path, name: &str) -> Result<(String, String), Box<dyn Error>> {
-    let lock: Value = toml::from_str(&fs::read_to_string(lock)?)?;
-    let packages = lock
-        .get("package")
-        .and_then(Value::as_array)
-        .ok_or("Cargo.lock has no packages")?;
+fn package_source(
+    manifest: &Path,
+    package: &str,
+    version: &str,
+    offline: bool,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let output = Command::new(cargo())
+        .current_dir(env::temp_dir())
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--locked",
+            "--manifest-path",
+        ])
+        .arg(manifest)
+        .args(offline.then_some("--offline"))
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    let metadata: Json = serde_json::from_slice(&output.stdout)?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or("Cargo metadata has no packages")?;
     let selected = packages
         .iter()
-        .filter(|package| {
-            package.get("name").and_then(Value::as_str) == Some(name)
-                && package
-                    .get("source")
-                    .and_then(Value::as_str)
+        .filter(|candidate| {
+            candidate["name"].as_str() == Some(package)
+                && candidate["version"].as_str() == Some(version)
+                && candidate["source"]
+                    .as_str()
                     .is_some_and(|source| source.starts_with("registry+"))
         })
         .collect::<Vec<_>>();
-    let [package] = selected.as_slice() else {
+    let [selected] = selected.as_slice() else {
         return Err(format!(
-            "Cargo.lock must select one registry {name} package, got {}",
+            "Cargo metadata must select one registry {package} {version}, got {}",
             selected.len()
         )
         .into());
     };
-    let version = package
-        .get("version")
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("locked {name} has no version"))?
-        .to_owned();
-    let checksum = package
-        .get("checksum")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| format!("locked {name} has no checksum"))?;
-    Ok((version, checksum))
+    let manifest = selected["manifest_path"]
+        .as_str()
+        .ok_or("registry package has no manifest path")?;
+    Path::new(manifest)
+        .parent()
+        .map(Path::to_owned)
+        .ok_or_else(|| "registry package manifest has no parent".into())
 }
 
-fn registry_archive(
-    manifest: &Path,
-    package: &str,
-    version: &str,
-    checksum: &str,
-    offline: bool,
-) -> Result<PathBuf, Box<dyn Error>> {
-    let cargo_home = cargo_home()?;
-    if let Some(archive) = find_archive(&cargo_home, package, version, checksum)? {
-        return Ok(archive);
+fn copy_directory(source: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_directory(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), target)?;
+        } else {
+            return Err(format!(
+                "unsupported package source entry {}",
+                entry.path().display()
+            )
+            .into());
+        }
     }
-
-    let status = Command::new(cargo())
-        .current_dir(manifest.parent().ok_or("manifest has no parent")?)
-        .arg("fetch")
-        .arg("--locked")
-        .arg("--manifest-path")
-        .arg(manifest)
-        .args(offline.then_some("--offline"))
-        .status()?;
-    if !status.success() {
-        return Err(format!("cargo fetch --locked failed with {status}").into());
-    }
-
-    find_archive(&cargo_home, package, version, checksum)?.ok_or_else(|| {
-        format!(
-            "could not find {package}-{version}.crate under {}",
-            cargo_home.join("registry/cache").display()
-        )
-        .into()
-    })
+    Ok(())
 }
 
 fn cargo() -> OsString {
     env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"))
-}
-
-fn cargo_home() -> Result<PathBuf, Box<dyn Error>> {
-    env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
-        .or_else(|| env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".cargo")))
-        .ok_or_else(|| "CARGO_HOME is unavailable".into())
-}
-
-fn find_archive(
-    cargo_home: &Path,
-    package: &str,
-    version: &str,
-    checksum: &str,
-) -> Result<Option<PathBuf>, Box<dyn Error>> {
-    let cache = cargo_home.join("registry/cache");
-    let registries = match fs::read_dir(cache) {
-        Ok(registries) => registries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    let name = format!("{package}-{version}.crate");
-    let mut candidates = Vec::new();
-    for registry in registries {
-        let candidate = registry?.path().join(&name);
-        if candidate.is_file() {
-            candidates.push(candidate);
-        }
-    }
-    candidates.sort();
-    if candidates.is_empty() {
-        return Ok(None);
-    }
-    let mut mismatches = Vec::new();
-    for candidate in candidates {
-        let actual = digest(&candidate)?;
-        if actual == checksum {
-            return Ok(Some(candidate));
-        }
-        mismatches.push(format!("{}: {actual}", candidate.display()));
-    }
-    Err(format!(
-        "{package} archive checksum mismatch: expected {checksum}, got {}",
-        mismatches.join(", ")
-    )
-    .into())
-}
-
-fn digest(path: &Path) -> Result<String, Box<dyn Error>> {
-    Ok(Sha256::digest(fs::read(path)?)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
-}
-
-fn unpack(
-    archive: &Path,
-    destination: &Path,
-    package: &str,
-    version: &str,
-) -> Result<(), Box<dyn Error>> {
-    let decoder = GzDecoder::new(fs::File::open(archive)?);
-    let mut archive = tar::Archive::new(decoder);
-    let package_dir = format!("{package}-{version}");
-
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.into_owned();
-        let relative = checked_path(&path, &package_dir)?;
-        let destination = destination.join(relative);
-        let kind = entry.header().entry_type();
-        if kind.is_dir() {
-            fs::create_dir_all(&destination)?;
-        } else if kind.is_file() {
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            entry.unpack(destination)?;
-        } else {
-            return Err(format!("unsupported archive entry {}", path.display()).into());
-        }
-    }
-    Ok(())
-}
-
-fn checked_path(path: &Path, package_dir: &str) -> Result<PathBuf, Box<dyn Error>> {
-    let mut components = path.components();
-    match components.next() {
-        Some(Component::Normal(component)) if component == package_dir => {}
-        _ => return Err(format!("unexpected archive path {}", path.display()).into()),
-    }
-    let mut relative = PathBuf::new();
-    for component in components {
-        match component {
-            Component::Normal(component) => relative.push(component),
-            _ => return Err(format!("unsupported archive path {}", path.display()).into()),
-        }
-    }
-    Ok(relative)
-}
-
-fn verify_manifest(path: &Path, package_name: &str, version: &str) -> Result<(), Box<dyn Error>> {
-    let manifest: Value = toml::from_str(&fs::read_to_string(path)?)?;
-    let package = manifest
-        .get("package")
-        .ok_or_else(|| format!("{package_name} has no package table"))?;
-    let name = package.get("name").and_then(Value::as_str);
-    let actual_version = package.get("version").and_then(Value::as_str);
-    if name != Some(package_name) || actual_version != Some(version) {
-        return Err(format!(
-            "archive manifest describes {} {}, expected {package_name} {version}",
-            name.unwrap_or("<unknown>"),
-            actual_version.unwrap_or("<unknown>")
-        )
-        .into());
-    }
-    Ok(())
 }
