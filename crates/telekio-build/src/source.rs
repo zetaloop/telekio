@@ -1,40 +1,51 @@
 use std::{
     env,
     error::Error,
+    ffi::OsString,
     fs,
     path::{Component, Path, PathBuf},
     process::Command,
 };
 
 use flate2::read::GzDecoder;
+use ra_ap_syntax::{AstNode, Edition, SourceFile, ast::HasModuleItem};
 use sha2::{Digest, Sha256};
 use toml::Value;
 
-use crate::{edit, invocation::Invocation};
+use crate::{edit, invocation};
 
 const TOKIO_VERSION: &str = "1.53.1";
-const TOKIO_MACROS_VERSION: &str = "2.7.2";
 
 pub fn prepare_tokio() -> Result<PathBuf, Box<dyn Error>> {
-    prepare_tokio_artifact(Invocation::detect()?.offline())
+    prepare_tokio_artifact(invocation::offline()?)
 }
 
 pub(crate) fn prepare_tokio_artifact(offline: bool) -> Result<PathBuf, Box<dyn Error>> {
-    prepare_package("tokio", TOKIO_VERSION, offline)
+    prepare_tokio_in(&output_directory()?, offline, true)
 }
 
-pub(crate) fn prepare_tokio_macros(offline: bool) -> Result<PathBuf, Box<dyn Error>> {
-    prepare_package("tokio-macros", TOKIO_MACROS_VERSION, offline)
+pub(crate) fn prepare_tokio_in(
+    output: &Path,
+    offline: bool,
+    emit: bool,
+) -> Result<PathBuf, Box<dyn Error>> {
+    prepare_package(output, "tokio", TOKIO_VERSION, offline, emit)
 }
 
 pub fn prepare_tokio_host(version: &str) -> Result<PathBuf, Box<dyn Error>> {
     if version != TOKIO_VERSION {
         return Err(format!("telekio-tokio {version} requires Tokio {TOKIO_VERSION}").into());
     }
-    let directory = prepare_package("tokio", version, Invocation::detect()?.offline())?;
+    let directory = prepare_package(
+        &output_directory()?,
+        "tokio",
+        version,
+        invocation::offline()?,
+        true,
+    )?;
     let path = directory.join("src/lib.rs");
     let source = fs::read_to_string(&path)?;
-    fs::write(path, include_source(&source))?;
+    fs::write(path, include_source(&source)?)?;
     mount_host_modules(&directory)?;
     Ok(directory)
 }
@@ -87,36 +98,44 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-pub(crate) fn include_source(source: &str) -> String {
-    let mut depth = 0;
-    let start = source
-        .lines()
-        .enumerate()
-        .find_map(|(index, line)| {
-            let line = line.trim();
-            if depth != 0 {
-                depth += line.matches('[').count() as isize;
-                depth -= line.matches(']').count() as isize;
-                return None;
-            }
-            if line.is_empty() || line.starts_with("//") {
-                return None;
-            }
-            if line.starts_with("#![") {
-                depth = line.matches('[').count() as isize - line.matches(']').count() as isize;
-                return None;
-            }
-            Some(index)
-        })
-        .unwrap_or(0);
-    let mut output = source.lines().skip(start).collect::<Vec<_>>().join("\n");
-    output.push('\n');
-    output
+pub(crate) fn crate_preamble(source: &str) -> Result<&str, Box<dyn Error>> {
+    let (preamble, _) = source_parts(source)?;
+    Ok(preamble)
 }
 
-fn prepare_package(package: &str, version: &str, offline: bool) -> Result<PathBuf, Box<dyn Error>> {
-    let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unavailable")?)
-        .join(format!("{package}-source-{version}"));
+pub(crate) fn include_source(source: &str) -> Result<String, Box<dyn Error>> {
+    let (_, body) = source_parts(source)?;
+    Ok(body.to_owned())
+}
+
+fn source_parts(source: &str) -> Result<(&str, &str), Box<dyn Error>> {
+    let parsed = SourceFile::parse(source, Edition::CURRENT);
+    if !parsed.errors().is_empty() {
+        return Err(format!("crate source has syntax errors: {:?}", parsed.errors()).into());
+    }
+    let start = parsed
+        .tree()
+        .items()
+        .next()
+        .map(|item| usize::from(item.syntax().text_range().start()))
+        .unwrap_or(source.len());
+    Ok(source.split_at(start))
+}
+
+fn output_directory() -> Result<PathBuf, Box<dyn Error>> {
+    env::var_os("OUT_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| "OUT_DIR is unavailable".into())
+}
+
+fn prepare_package(
+    output: &Path,
+    package: &str,
+    version: &str,
+    offline: bool,
+    emit: bool,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let out = output.join(format!("{package}-source-{version}"));
     fs::create_dir_all(out.join("src"))?;
     let manifest = out.join("Cargo.toml");
     if !manifest.is_file() {
@@ -135,8 +154,7 @@ fn prepare_package(package: &str, version: &str, offline: bool) -> Result<PathBu
     }
     let lock = out.join("Cargo.lock");
     if !lock.is_file() {
-        let cargo = env::var_os("CARGO").ok_or("CARGO is unavailable")?;
-        let status = Command::new(cargo)
+        let status = Command::new(cargo())
             .current_dir(&out)
             .arg("generate-lockfile")
             .arg("--manifest-path")
@@ -151,28 +169,37 @@ fn prepare_package(package: &str, version: &str, offline: bool) -> Result<PathBu
     if locked != version {
         return Err(format!("Cargo.lock selected {package} {locked}, expected {version}").into());
     }
-    prepare_archive(&manifest, &lock, package, version, &checksum, offline)
+    prepare_archive(
+        output,
+        &manifest,
+        &lock,
+        (package, version, &checksum),
+        offline,
+        emit,
+    )
 }
 
 fn prepare_archive(
+    output: &Path,
     manifest: &Path,
     lock: &Path,
-    package: &str,
-    version: &str,
-    checksum: &str,
+    package: (&str, &str, &str),
     offline: bool,
+    emit: bool,
 ) -> Result<PathBuf, Box<dyn Error>> {
-    let archive = registry_archive(manifest, package, version, checksum, offline)?;
-    let destination = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unavailable")?)
-        .join(format!("{package}-{version}"));
+    let (name, version, checksum) = package;
+    let archive = registry_archive(manifest, name, version, checksum, offline)?;
+    let destination = output.join(format!("{name}-{version}"));
     if destination.is_dir() {
         fs::remove_dir_all(&destination)?;
     }
-    unpack(&archive, &destination, package, version)?;
-    verify_manifest(&destination.join("Cargo.toml"), package, version)?;
-    println!("cargo:rerun-if-changed={}", archive.display());
-    println!("cargo:rerun-if-changed={}", lock.display());
-    println!("cargo:rerun-if-env-changed=CARGO_HOME");
+    unpack(&archive, &destination, name, version)?;
+    verify_manifest(&destination.join("Cargo.toml"), name, version)?;
+    if emit {
+        println!("cargo:rerun-if-changed={}", archive.display());
+        println!("cargo:rerun-if-changed={}", lock.display());
+        println!("cargo:rerun-if-env-changed=CARGO_HOME");
+    }
     Ok(destination)
 }
 
@@ -224,8 +251,7 @@ fn registry_archive(
         return Ok(archive);
     }
 
-    let cargo = env::var_os("CARGO").ok_or("CARGO is unavailable")?;
-    let status = Command::new(cargo)
+    let status = Command::new(cargo())
         .current_dir(manifest.parent().ok_or("manifest has no parent")?)
         .arg("fetch")
         .arg("--locked")
@@ -244,6 +270,10 @@ fn registry_archive(
         )
         .into()
     })
+}
+
+fn cargo() -> OsString {
+    env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"))
 }
 
 fn cargo_home() -> Result<PathBuf, Box<dyn Error>> {

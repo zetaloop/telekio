@@ -1,12 +1,12 @@
 use super::*;
 
-#[cfg(not(feature = "telekio-test"))]
+#[cfg(not(any(telekio_host, feature = "telekio-test")))]
 fn attached() -> ::telekio::Handle {
     ::telekio::attached()
 }
 
-#[cfg(feature = "telekio-test")]
-fn test_owner() -> &'static ::telekio_host::Owner {
+#[cfg(any(telekio_host, feature = "telekio-test"))]
+fn host_owner() -> &'static ::telekio_host::Owner {
     use std::sync::OnceLock;
 
     static OWNER: OnceLock<::telekio_host::Owner> = OnceLock::new();
@@ -15,13 +15,19 @@ fn test_owner() -> &'static ::telekio_host::Owner {
 
 #[cfg(all(feature = "telekio-test", not(test)))]
 #[unsafe(no_mangle)]
-pub(super) extern "C-unwind" fn telekio_test_handle() -> ::telekio::RawHandle {
-    test_owner().runtime().into_abi()
+pub(super) extern "C-unwind" fn telekio_default_handle() -> ::telekio::RawHandle {
+    host_owner().runtime().into_abi()
 }
 
-#[cfg(feature = "telekio-test")]
+#[cfg(all(not(feature = "telekio-test"), any(telekio_host, not(test))))]
+#[unsafe(no_mangle)]
+pub(super) extern "C-unwind" fn telekio_default_handle() -> ::telekio::RawHandle {
+    ::telekio::RawHandle::empty()
+}
+
+#[cfg(any(telekio_host, feature = "telekio-test"))]
 fn attached() -> ::telekio::Handle {
-    let handle = test_owner().runtime();
+    let handle = host_owner().runtime();
     if let Err(handle) = ::telekio::attach(handle) {
         drop(handle);
     }

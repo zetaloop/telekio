@@ -122,6 +122,7 @@ impl Host {
         self.handle.signal(request)
     }
 
+    #[cfg(any(feature = "net", feature = "process", feature = "signal"))]
     #[track_caller]
     pub(crate) fn register_io(
         &self,

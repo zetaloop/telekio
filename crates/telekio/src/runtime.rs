@@ -346,14 +346,23 @@ pub fn attach(handle: Handle) -> Result<(), Handle> {
     ATTACHED.set(handle)
 }
 
-#[cfg(feature = "guest")]
 /// # Safety
 ///
 /// `raw` must be one owned host handle reference returned by its host API.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn telekio_guest_attach(raw: RawHandle) -> BoolResult {
     match catch_unwind(AssertUnwindSafe(|| {
-        attach(unsafe { Handle::from_abi(raw) }).is_ok()
+        let handle = unsafe { Handle::from_abi(raw) };
+        #[cfg(feature = "guest")]
+        {
+            attach(handle).is_ok()
+        }
+        #[cfg(not(feature = "guest"))]
+        {
+            drop(handle);
+            crate::require_package("This package");
+            false
+        }
     })) {
         Ok(value) => BoolResult {
             call: CallResult::ok(),
@@ -374,9 +383,9 @@ pub fn attached() -> Handle {
     #[cfg(feature = "guest")]
     {
         unsafe extern "C-unwind" {
-            fn telekio_test_handle() -> RawHandle;
+            fn telekio_default_handle() -> RawHandle;
         }
-        let raw = unsafe { telekio_test_handle() };
+        let raw = unsafe { telekio_default_handle() };
         if !raw.is_empty() {
             let handle = unsafe { Handle::from_abi(raw) };
             if attach(handle).is_ok() {

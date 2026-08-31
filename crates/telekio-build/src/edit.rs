@@ -2,7 +2,7 @@ use std::{error::Error, path::Path};
 
 use ra_ap_syntax::{
     AstNode, Edition, SourceFile, SyntaxElement, SyntaxKind, SyntaxNode,
-    ast::{self, HasArgList, HasAttrs, HasGenericParams, HasName, edit::IndentLevel, make},
+    ast::{self, HasArgList, HasGenericParams, HasName, edit::IndentLevel, make},
     syntax_editor::{Position, SyntaxEditor},
 };
 
@@ -205,127 +205,6 @@ pub fn rename_method(
     let (editor, root) = open(source)?;
     let method = method(&root, owner, name)?;
     let name = method.name().ok_or("method has no name")?;
-    editor.replace(name.syntax(), make::name(replacement).syntax().clone());
-    commit(source, editor)
-}
-
-pub fn replace_attr(
-    source: &mut String,
-    target: AttrTarget<'_>,
-    name: &str,
-    replacement: &str,
-) -> Result<(), Box<dyn Error>> {
-    let (editor, root) = open(source)?;
-    let items = attr_targets(&root, target)?;
-    let [item] = items.as_slice() else {
-        return Err("attribute target was not found exactly once".into());
-    };
-    let attributes = item
-        .children()
-        .filter_map(ast::Attr::cast)
-        .filter(|attribute| attr_name(attribute).as_deref() == Some(name))
-        .collect::<Vec<_>>();
-    let [attribute] = attributes.as_slice() else {
-        return Err(format!("attribute `{name}` was not found exactly once").into());
-    };
-    let replacement = parse(&format!("{replacement}\nfn replacement() {{}}"))?
-        .syntax()
-        .descendants()
-        .find_map(ast::Attr::cast)
-        .ok_or("replacement has no attribute")?;
-    editor.replace(attribute.syntax(), replacement.syntax().clone());
-    commit(source, editor)
-}
-
-pub fn has_attr(item: &impl HasAttrs, name: &str) -> bool {
-    item.attrs()
-        .any(|attribute| attr_name(&attribute).as_deref() == Some(name))
-}
-
-fn attr_name(attribute: &ast::Attr) -> Option<String> {
-    fn meta_name(meta: ast::Meta) -> Option<String> {
-        let path = match meta {
-            ast::Meta::KeyValueMeta(meta) => meta.path(),
-            ast::Meta::PathMeta(meta) => meta.path(),
-            ast::Meta::TokenTreeMeta(meta) => meta.path(),
-            ast::Meta::UnsafeMeta(meta) => return meta.meta().and_then(meta_name),
-            ast::Meta::CfgAttrMeta(_) | ast::Meta::CfgMeta(_) => None,
-        }?;
-        Some(path.syntax().text().to_string())
-    }
-
-    attribute.meta().and_then(meta_name)
-}
-
-pub fn resolve_modules(source: &mut String, base: &Path) -> Result<(), Box<dyn Error>> {
-    let (editor, root) = open(source)?;
-    for module in root
-        .children()
-        .filter_map(ast::Module::cast)
-        .filter(|module| module.semicolon_token().is_some())
-    {
-        let name = module
-            .name()
-            .ok_or("module has no name")?
-            .text()
-            .to_string();
-        let existing = module.attrs().find(|attribute| {
-            attribute
-                .meta()
-                .is_some_and(|meta| matches!(meta, ast::Meta::KeyValueMeta(meta) if meta.path().is_some_and(|path| path.syntax().text() == "path")))
-        });
-        let path = if let Some(attribute) = &existing {
-            let text = attribute.syntax().text().to_string();
-            let path = text
-                .split_once('"')
-                .and_then(|(_, text)| text.rsplit_once('"'))
-                .map(|(path, _)| path)
-                .ok_or("module path attribute is invalid")?;
-            base.join(path)
-        } else {
-            let file = base.join(format!("{name}.rs"));
-            let directory = base.join(&name).join("mod.rs");
-            match (file.is_file(), directory.is_file()) {
-                (true, false) => file,
-                (false, true) => directory,
-                (false, false) => {
-                    return Err(format!("module `{name}` source was not found").into());
-                }
-                (true, true) => return Err(format!("module `{name}` has two source files").into()),
-            }
-        };
-        let path = path.canonicalize()?;
-        let attribute = parse(&format!(
-            "#[path = {:?}]\nmod replacement;",
-            path.to_string_lossy().replace('\\', "/")
-        ))?
-        .syntax()
-        .descendants()
-        .find_map(ast::Attr::cast)
-        .ok_or("replacement has no path attribute")?;
-        if let Some(existing) = existing {
-            editor.replace(existing.syntax(), attribute.syntax().clone());
-        } else {
-            editor.insert_all(
-                Position::first_child_of(module.syntax()),
-                vec![
-                    attribute.syntax().clone().into(),
-                    make::tokens::whitespace("\n").into(),
-                ],
-            );
-        }
-    }
-    commit(source, editor)
-}
-
-pub fn rename_function(
-    source: &mut String,
-    name: &str,
-    replacement: &str,
-) -> Result<(), Box<dyn Error>> {
-    let (editor, root) = open(source)?;
-    let function = function(&root, name)?.ok_or_else(|| format!("no function `{name}`"))?;
-    let name = function.name().ok_or("function has no name")?;
     editor.replace(name.syntax(), make::name(replacement).syntax().clone());
     commit(source, editor)
 }
