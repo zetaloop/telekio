@@ -2,13 +2,13 @@
 mod host_io;
 #[path = "signal.rs"]
 mod host_signal;
+mod task;
 
 use std::{
     any::Any,
     cell::{Cell, UnsafeCell},
     collections::HashMap,
     ffi::c_void,
-    future::Future as RustFuture,
     io,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
@@ -19,10 +19,9 @@ use std::{
 };
 
 use telekio::{
-    Blocking, BlockingTask, BuildResult, CallResult, Callback, ClockSample, DurationParts, Flavor,
-    Future, InstantOffset, Metric, MetricResult, OperationPoll, OwnedBytes, Poll, RawHandle,
-    RawRuntime, RuntimeApi, RuntimeConfig, Shutdown, Status, StringCallback, Task, Timer,
-    TimerResult, Waker,
+    Blocking, BuildResult, CallResult, Callback, ClockSample, DurationParts, Flavor, InstantOffset,
+    Metric, MetricResult, OperationPoll, OwnedBytes, Poll, RawHandle, RawRuntime, RuntimeApi,
+    RuntimeConfig, Shutdown, Status, StringCallback, Timer, TimerResult, Waker,
 };
 
 pub struct Runtime {
@@ -133,14 +132,14 @@ thread_local! {
 static CLOCK_ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
 
 static RUNTIME_API: RuntimeApi = RuntimeApi {
-    runtime_block_on,
-    handle_block_on,
+    runtime_block_on: task::runtime_block_on,
+    handle_block_on: task::handle_block_on,
     retain_handle,
     release_handle,
     release_runtime,
-    spawn,
-    spawn_local,
-    spawn_blocking,
+    spawn: task::spawn,
+    spawn_local: task::spawn_local,
+    spawn_blocking: task::spawn_blocking,
     block_in_place,
     build,
     clock,
@@ -593,142 +592,6 @@ unsafe extern "C" fn release_runtime(owner: *mut c_void) -> CallResult {
             owner.unregister_runtime(*runtime.id.get().unwrap());
         }
     })
-}
-
-unsafe extern "C" fn runtime_block_on(owner: *mut c_void, future: Future) -> CallResult {
-    let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<Status, String> {
-        let runtime = unsafe { &*owner.cast::<RuntimeOwner>() };
-        let owner = runtime
-            .owner
-            .upgrade()
-            .ok_or_else(|| "Tokio owner has gone away".to_owned())?;
-        let activity = owner.activity()?;
-        let kind = runtime.kind.read().unwrap();
-        let status = match &*kind {
-            RuntimeKind::Runtime(runtime) => runtime
-                .as_ref()
-                .expect("Tokio runtime has shut down")
-                .block_on(GuestFuture::new(future, &activity)),
-            RuntimeKind::Local(runtime) => runtime
-                .with(|runtime| runtime.block_on(GuestFuture::new(future, &activity)))
-                .unwrap_or_else(|error| panic!("{error}")),
-            RuntimeKind::Closed => panic!("Tokio runtime has shut down"),
-        };
-        drop(activity);
-        Ok(status)
-    }));
-    match outcome {
-        Ok(Ok(status)) => block_on_result(Ok(status)),
-        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
-        Err(payload) => host_panic(&*payload),
-    }
-}
-
-unsafe extern "C" fn handle_block_on(context: *const c_void, future: Future) -> CallResult {
-    let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<Status, String> {
-        let context = unsafe { &*context.cast::<HandleContext>() };
-        let activity = context.owner.activity()?;
-        let status = context.handle.block_on(GuestFuture::new(future, &activity));
-        drop(activity);
-        Ok(status)
-    }));
-    match outcome {
-        Ok(Ok(status)) => block_on_result(Ok(status)),
-        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
-        Err(payload) => host_panic(&*payload),
-    }
-}
-
-fn block_on_result(outcome: Result<Status, Box<dyn Any + Send>>) -> CallResult {
-    match outcome {
-        Ok(Status::Error) => result(
-            Status::Error,
-            OwnedBytes::from_string("Tokio owner is shutting down".to_owned()),
-        ),
-        Ok(status) => result(status, OwnedBytes::empty()),
-        Err(payload) => host_panic(&*payload),
-    }
-}
-
-unsafe extern "C" fn spawn(context: *const c_void, task: Task) -> CallResult {
-    let context = unsafe { &*context.cast::<HandleContext>() };
-    match catch_unwind(AssertUnwindSafe(|| {
-        let task = GuestTask::new(task);
-        let tracking_id = context.owner.reserve_task()?;
-        let task = TrackedTask {
-            task,
-            cleanup: TaskCleanup {
-                owner: Arc::clone(&context.owner),
-                id: tracking_id,
-            },
-        };
-        let handle = context.handle.spawn(task);
-        context
-            .owner
-            .register_task(tracking_id, handle.abort_handle());
-        drop(handle);
-        Ok::<_, String>(())
-    })) {
-        Ok(Ok(())) => result(Status::Ok, OwnedBytes::empty()),
-        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
-        Err(payload) => host_panic(&*payload),
-    }
-}
-
-unsafe extern "C" fn spawn_local(context: *const c_void, task: Task) -> CallResult {
-    let context = unsafe { &*context.cast::<HandleContext>() };
-    let spawned = catch_unwind(AssertUnwindSafe(|| {
-        let task = GuestTask::new(task);
-        let tracking_id = context.owner.reserve_task()?;
-        let task = TrackedTask {
-            task,
-            cleanup: TaskCleanup {
-                owner: Arc::clone(&context.owner),
-                id: tracking_id,
-            },
-        };
-        let local = context
-            .local
-            .as_ref()
-            .ok_or_else(|| "spawn_local requires a LocalRuntime".to_owned())?;
-        let handle = local.with(|runtime| runtime.spawn_local(task))?;
-        context
-            .owner
-            .register_task(tracking_id, handle.abort_handle());
-        drop(handle);
-        Ok::<_, String>(())
-    }));
-    match spawned {
-        Ok(Ok(())) => result(Status::Ok, OwnedBytes::empty()),
-        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
-        Err(payload) => host_panic(&*payload),
-    }
-}
-
-unsafe extern "C" fn spawn_blocking(context: *const c_void, task: BlockingTask) -> CallResult {
-    let context = unsafe { &*context.cast::<HandleContext>() };
-    let spawned = catch_unwind(AssertUnwindSafe(|| {
-        let task = GuestBlockingTask::new(task);
-        let tracking_id = context.owner.reserve_task()?;
-        let task = TrackedBlockingTask {
-            task,
-            cleanup: TaskCleanup {
-                owner: Arc::clone(&context.owner),
-                id: tracking_id,
-            },
-        };
-        let handle = context.handle.spawn_blocking(move || task.run());
-        context
-            .owner
-            .register_task(tracking_id, handle.abort_handle());
-        drop(handle);
-        Ok::<_, String>(())
-    }));
-    match spawned {
-        Ok(Ok(())) => result(Status::Ok, OwnedBytes::empty()),
-        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
-        Err(payload) => host_panic(&*payload),
-    }
 }
 
 unsafe extern "C" fn defer(context: *const c_void, waker: *const Waker) -> CallResult {
@@ -1263,137 +1126,4 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
                 .map(|message| (*message).to_owned())
         })
         .unwrap_or_else(|| "Box<dyn Any>".to_owned())
-}
-
-struct GuestFuture {
-    future: Future,
-    owner: Arc<OwnerState>,
-    activity: u64,
-}
-
-impl GuestFuture {
-    fn new(future: Future, activity: &Activity) -> Self {
-        Self {
-            future,
-            owner: Arc::clone(&activity.owner),
-            activity: activity.id,
-        }
-    }
-}
-
-impl RustFuture for GuestFuture {
-    type Output = Status;
-
-    fn poll(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> RustPoll<Self::Output> {
-        if !self
-            .owner
-            .update_activity_waker(self.activity, context.waker())
-        {
-            return RustPoll::Ready(Status::Error);
-        }
-        let waker = unsafe { Waker::from_ref(context.waker()) };
-        match self.future.poll(&waker) {
-            Poll::Pending => RustPoll::Pending,
-            Poll::Ready => RustPoll::Ready(Status::Ok),
-            Poll::Panicked => RustPoll::Ready(Status::Panicked),
-        }
-    }
-}
-
-struct GuestTask {
-    task: Task,
-    complete: bool,
-}
-
-struct TrackedTask {
-    task: GuestTask,
-    cleanup: TaskCleanup,
-}
-
-unsafe impl Send for TrackedTask {}
-
-impl GuestTask {
-    fn new(task: Task) -> Self {
-        Self {
-            task,
-            complete: false,
-        }
-    }
-}
-
-impl RustFuture for GuestTask {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> RustPoll<()> {
-        let waker = unsafe { Waker::from_ref(context.waker()) };
-        match self.task.poll(&waker) {
-            Poll::Pending => RustPoll::Pending,
-            Poll::Ready => {
-                self.complete = true;
-                RustPoll::Ready(())
-            }
-            Poll::Panicked => RustPoll::Ready(()),
-        }
-    }
-}
-
-impl RustFuture for TrackedTask {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> RustPoll<()> {
-        let _owner = OwnerContext::enter(&self.cleanup.owner);
-        if !self.cleanup.owner.is_accepting() {
-            return RustPoll::Ready(());
-        }
-        Pin::new(&mut self.task).poll(context)
-    }
-}
-
-impl Drop for GuestTask {
-    fn drop(&mut self) {
-        if !self.complete {
-            unsafe { self.task.cancel() };
-        }
-    }
-}
-
-struct GuestBlockingTask {
-    task: BlockingTask,
-    complete: bool,
-}
-
-struct TrackedBlockingTask {
-    task: GuestBlockingTask,
-    cleanup: TaskCleanup,
-}
-
-impl GuestBlockingTask {
-    fn new(task: BlockingTask) -> Self {
-        Self {
-            task,
-            complete: false,
-        }
-    }
-
-    fn run(&mut self) {
-        unsafe { self.task.run() };
-        self.complete = true;
-    }
-}
-
-impl TrackedBlockingTask {
-    fn run(mut self) {
-        let _owner = OwnerContext::enter(&self.cleanup.owner);
-        if self.cleanup.owner.is_accepting() {
-            self.task.run();
-        }
-    }
-}
-
-impl Drop for GuestBlockingTask {
-    fn drop(&mut self) {
-        if !self.complete {
-            unsafe { self.task.cancel() };
-        }
-    }
 }
