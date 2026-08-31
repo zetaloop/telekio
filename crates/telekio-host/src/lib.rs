@@ -74,7 +74,6 @@ struct OwnerStatus {
 }
 
 struct TaskRecord {
-    guest_id: u64,
     handle: Option<tokio::task::AbortHandle>,
 }
 
@@ -143,8 +142,6 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     spawn_local,
     spawn_blocking,
     block_in_place,
-    abort,
-    is_finished,
     build,
     clock,
     pause,
@@ -278,20 +275,14 @@ impl OwnerState {
         }
     }
 
-    fn reserve_task(&self, guest_id: u64) -> Result<u64, String> {
+    fn reserve_task(&self) -> Result<u64, String> {
         let mut state = self.state.lock().unwrap();
         if !state.accepting {
             return Err("Tokio owner is shutting down".to_owned());
         }
         let id = state.next_id;
         state.next_id += 1;
-        state.tasks.insert(
-            id,
-            TaskRecord {
-                guest_id,
-                handle: None,
-            },
-        );
+        state.tasks.insert(id, TaskRecord { handle: None });
         Ok(id)
     }
 
@@ -659,11 +650,11 @@ fn block_on_result(outcome: Result<Status, Box<dyn Any + Send>>) -> CallResult {
     }
 }
 
-unsafe extern "C" fn spawn(context: *const c_void, id: u64, task: Task) -> CallResult {
+unsafe extern "C" fn spawn(context: *const c_void, task: Task) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     match catch_unwind(AssertUnwindSafe(|| {
         let task = GuestTask::new(task);
-        let tracking_id = context.owner.reserve_task(id)?;
+        let tracking_id = context.owner.reserve_task()?;
         let task = TrackedTask {
             task,
             cleanup: TaskCleanup {
@@ -684,11 +675,11 @@ unsafe extern "C" fn spawn(context: *const c_void, id: u64, task: Task) -> CallR
     }
 }
 
-unsafe extern "C" fn spawn_local(context: *const c_void, id: u64, task: Task) -> CallResult {
+unsafe extern "C" fn spawn_local(context: *const c_void, task: Task) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     let spawned = catch_unwind(AssertUnwindSafe(|| {
         let task = GuestTask::new(task);
-        let tracking_id = context.owner.reserve_task(id)?;
+        let tracking_id = context.owner.reserve_task()?;
         let task = TrackedTask {
             task,
             cleanup: TaskCleanup {
@@ -714,15 +705,11 @@ unsafe extern "C" fn spawn_local(context: *const c_void, id: u64, task: Task) ->
     }
 }
 
-unsafe extern "C" fn spawn_blocking(
-    context: *const c_void,
-    id: u64,
-    task: BlockingTask,
-) -> CallResult {
+unsafe extern "C" fn spawn_blocking(context: *const c_void, task: BlockingTask) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     let spawned = catch_unwind(AssertUnwindSafe(|| {
         let task = GuestBlockingTask::new(task);
-        let tracking_id = context.owner.reserve_task(id)?;
+        let tracking_id = context.owner.reserve_task()?;
         let task = TrackedBlockingTask {
             task,
             cleanup: TaskCleanup {
@@ -836,53 +823,6 @@ unsafe extern "C" fn block_in_place(context: *const c_void, blocking: Blocking) 
         Ok(Ok(status)) => result(status, OwnedBytes::empty()),
         Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
         Err(payload) => host_panic(&*payload),
-    }
-}
-
-unsafe extern "C" fn abort(context: *const c_void, id: u64) -> CallResult {
-    host_callback(|| {
-        let context = unsafe { &*context.cast::<HandleContext>() };
-        let handles = context
-            .owner
-            .state
-            .lock()
-            .unwrap()
-            .tasks
-            .values()
-            .filter(|task| task.guest_id == id)
-            .filter_map(|task| task.handle.clone())
-            .collect::<Vec<_>>();
-        for handle in handles {
-            handle.abort();
-        }
-    })
-}
-
-unsafe extern "C" fn is_finished(context: *const c_void, id: u64) -> telekio::BoolResult {
-    match catch_unwind(AssertUnwindSafe(|| {
-        let context = unsafe { &*context.cast::<HandleContext>() };
-        let state = context.owner.state.lock().unwrap();
-        let mut found = false;
-        let finished = state
-            .tasks
-            .values()
-            .filter(|task| task.guest_id == id)
-            .all(|task| {
-                found = true;
-                task.handle
-                    .as_ref()
-                    .is_some_and(tokio::task::AbortHandle::is_finished)
-            });
-        !found || finished
-    })) {
-        Ok(value) => telekio::BoolResult {
-            call: CallResult::ok(),
-            value,
-        },
-        Err(payload) => telekio::BoolResult {
-            call: host_panic(&*payload),
-            value: false,
-        },
     }
 }
 

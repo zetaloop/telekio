@@ -187,9 +187,9 @@ impl<S: HostSchedule> Registry<S> {
             )
         };
         let result = if local {
-            self.host().handle.spawn_local(id.as_u64(), task)
+            self.host().handle.spawn_local(task)
         } else {
-            self.host().handle.spawn(id.as_u64(), task)
+            self.host().handle.spawn(task)
         };
         result
             .into_io_result()
@@ -235,7 +235,7 @@ impl<S: HostSchedule> Registry<S> {
         };
         self.host()
             .handle
-            .spawn_blocking(id.as_u64(), task)
+            .spawn_blocking(task)
             .into_io_result()
             .unwrap_or_else(|error| panic!("failed to spawn blocking Tokio task {id}: {error}"));
         join

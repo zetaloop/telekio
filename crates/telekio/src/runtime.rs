@@ -51,12 +51,10 @@ pub struct RuntimeApi {
     pub retain_handle: unsafe extern "C" fn(*const c_void),
     pub release_handle: unsafe extern "C" fn(*const c_void) -> CallResult,
     pub release_runtime: unsafe extern "C" fn(*mut c_void) -> CallResult,
-    pub spawn: unsafe extern "C" fn(*const c_void, u64, Task) -> CallResult,
-    pub spawn_local: unsafe extern "C" fn(*const c_void, u64, Task) -> CallResult,
-    pub spawn_blocking: unsafe extern "C" fn(*const c_void, u64, BlockingTask) -> CallResult,
+    pub spawn: unsafe extern "C" fn(*const c_void, Task) -> CallResult,
+    pub spawn_local: unsafe extern "C" fn(*const c_void, Task) -> CallResult,
+    pub spawn_blocking: unsafe extern "C" fn(*const c_void, BlockingTask) -> CallResult,
     pub block_in_place: unsafe extern "C" fn(*const c_void, Blocking) -> CallResult,
-    pub abort: unsafe extern "C" fn(*const c_void, u64) -> CallResult,
-    pub is_finished: unsafe extern "C" fn(*const c_void, u64) -> BoolResult,
     pub build: unsafe extern "C" fn(*const c_void, RuntimeConfig) -> BuildResult,
     pub clock: unsafe extern "C" fn(*const c_void) -> ClockResult,
     pub pause: unsafe extern "C" fn(*const c_void) -> CallResult,
@@ -421,18 +419,18 @@ impl Handle {
         unsafe { ((*self.raw.api).reap_process)(self.raw.context, id) }
     }
 
-    pub fn spawn(&self, id: u64, task: Task) -> CallResult {
-        unsafe { ((*self.raw.api).spawn)(self.raw.context, id, task) }
+    pub fn spawn(&self, task: Task) -> CallResult {
+        unsafe { ((*self.raw.api).spawn)(self.raw.context, task) }
     }
 
     #[doc(hidden)]
-    pub fn spawn_local(&self, id: u64, task: Task) -> CallResult {
-        unsafe { ((*self.raw.api).spawn_local)(self.raw.context, id, task) }
+    pub fn spawn_local(&self, task: Task) -> CallResult {
+        unsafe { ((*self.raw.api).spawn_local)(self.raw.context, task) }
     }
 
     #[doc(hidden)]
-    pub fn spawn_blocking(&self, id: u64, task: BlockingTask) -> CallResult {
-        unsafe { ((*self.raw.api).spawn_blocking)(self.raw.context, id, task) }
+    pub fn spawn_blocking(&self, task: BlockingTask) -> CallResult {
+        unsafe { ((*self.raw.api).spawn_blocking)(self.raw.context, task) }
     }
 
     #[doc(hidden)]
@@ -450,19 +448,6 @@ impl Handle {
 
     pub fn block_in_place(&self, blocking: Blocking) -> CallResult {
         unsafe { ((*self.raw.api).block_in_place)(self.raw.context, blocking) }
-    }
-
-    #[doc(hidden)]
-    pub fn abort(&self, id: u64) {
-        unsafe { ((*self.raw.api).abort)(self.raw.context, id) }
-            .resume("failed to abort Tokio task");
-    }
-
-    #[doc(hidden)]
-    pub fn is_finished(&self, id: u64) -> bool {
-        let result = unsafe { ((*self.raw.api).is_finished)(self.raw.context, id) };
-        result.call.resume("failed to inspect Tokio task");
-        result.value
     }
 
     #[doc(hidden)]
