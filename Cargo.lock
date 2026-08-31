@@ -637,6 +637,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "telekio-cli"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "telekio-build",
+ "toml",
+]
+
+[[package]]
 name = "telekio-host"
 version = "0.1.0"
 dependencies = [

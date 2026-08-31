@@ -2,6 +2,7 @@
 members = [
     "crates/telekio",
     "crates/telekio-build",
+    "crates/telekio-cli",
     "crates/telekio-host",
     "crates/telekio-tokio",
 ]
