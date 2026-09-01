@@ -12,4 +12,4 @@ telekio = { version = "=0.1.0", path = "../telekio" }
 tokio = { version = "=0.1.0", path = "../telekio-tokio", package = "telekio-tokio", features = ["net", "rt", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
 
 [target."cfg(unix)".dependencies]
-libc = "0.2.189"
+libc = "0.2.168"

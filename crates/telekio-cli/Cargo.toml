@@ -12,6 +12,6 @@ name = "telekio"
 path = "src/main.rs"
 
 [dependencies]
-serde_json = "1.0.151"
+serde_json = "1"
 telekio-build = { version = "=0.1.0", path = "../telekio-build" }
 toml = "1.1.4"
