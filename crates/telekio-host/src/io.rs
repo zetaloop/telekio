@@ -119,7 +119,7 @@ pub(super) unsafe extern "C" fn register(
             error: IoError::none(),
             registration: unsafe {
                 IoRegistration::from_raw(
-                    Arc::into_raw(registration).cast_mut().cast(),
+                    Arc::as_ptr(&registration).cast_mut().cast(),
                     poll_registration,
                     ready,
                     try_operate,
@@ -327,7 +327,7 @@ unsafe extern "C" fn ready(data: *mut std::ffi::c_void, interest: IoInterest) ->
         let operation = HostResource::new(&owner, Operation { future })?;
         Ok::<_, String>(unsafe {
             telekio::IoOperation::from_raw(
-                Arc::into_raw(operation).cast_mut().cast(),
+                Arc::as_ptr(&operation).cast_mut().cast(),
                 poll_operation,
                 release_operation,
             )
@@ -611,7 +611,7 @@ unsafe extern "C" fn clear(_: *mut std::ffi::c_void, _: u8, _: IoReady) -> IoCal
 #[cfg(any(unix, windows))]
 unsafe extern "C" fn release_registration(data: *mut std::ffi::c_void) -> CallResult {
     super::host_callback(|| {
-        unsafe { Arc::from_raw(data.cast::<HostResource<Registration>>()) }.release();
+        unsafe { &*data.cast::<HostResource<Registration>>() }.release();
     })
 }
 
@@ -624,7 +624,7 @@ unsafe extern "C" fn release_registration(_: *mut std::ffi::c_void) -> CallResul
 #[cfg(any(unix, windows))]
 unsafe extern "C" fn release_operation(data: *mut std::ffi::c_void) -> CallResult {
     super::host_callback(|| {
-        unsafe { Arc::from_raw(data.cast::<HostResource<Operation>>()) }.release();
+        unsafe { &*data.cast::<HostResource<Operation>>() }.release();
     })
 }
 

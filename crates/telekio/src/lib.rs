@@ -12,9 +12,9 @@ pub use io::{
 };
 pub use runtime::telekio_guest_attach;
 pub use runtime::{
-    Blocking, BlockingTask, BoolResult, CallResult, ClockResult, Future, Handle, Metric,
-    MetricResult, OwnedBytes, Poll, RawHandle, RawRuntime, Runtime, RuntimeApi, Status, Task,
-    Waker, attach, attached,
+    AttachResult, Blocking, BlockingTask, BoolResult, CallResult, ClockResult, Future, Handle,
+    Metric, MetricResult, OwnedBytes, Poll, RawAttachment, RawHandle, RawRuntime, Runtime,
+    RuntimeApi, Status, Task, Waker, attach, attached,
 };
 pub use signal::{Signal, SignalKind, SignalRequest, SignalResult};
 pub use time::{ClockSample, DurationParts, InstantOffset, OperationPoll, Timer, TimerResult};
@@ -45,7 +45,7 @@ macro_rules! require {
 macro_rules! plugin {
     () => {
         #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn telekio_attach(raw: $crate::RawHandle) -> $crate::BoolResult {
+        pub unsafe extern "C" fn telekio_attach(raw: $crate::RawHandle) -> $crate::AttachResult {
             unsafe { $crate::telekio_guest_attach(raw) }
         }
     };

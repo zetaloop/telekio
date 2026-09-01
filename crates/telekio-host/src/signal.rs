@@ -61,11 +61,7 @@ pub(super) unsafe extern "C" fn signal(
                 call: call_ok(),
                 error: IoError::none(),
                 signal: unsafe {
-                    telekio::Signal::from_raw(
-                        Arc::into_raw(signal).cast_mut().cast(),
-                        poll,
-                        release,
-                    )
+                    telekio::Signal::from_raw(Arc::as_ptr(&signal).cast_mut().cast(), poll, release)
                 },
             },
             Err(error) => SignalResult {
@@ -166,7 +162,7 @@ unsafe extern "C" fn poll(data: *mut c_void, waker: *const Waker) -> OperationPo
 }
 
 unsafe extern "C" fn release(data: *mut c_void) -> CallResult {
-    super::host_callback(|| unsafe { Arc::from_raw(data.cast::<HostResource<Signal>>()) }.release())
+    super::host_callback(|| unsafe { &*data.cast::<HostResource<Signal>>() }.release())
 }
 
 fn call_ok() -> CallResult {

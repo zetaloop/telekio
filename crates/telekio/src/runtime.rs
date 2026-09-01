@@ -12,11 +12,11 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
     slice,
-    sync::OnceLock,
+    sync::Mutex,
     task::{Context, Poll as RustPoll, RawWaker, RawWakerVTable, Waker as RustWaker},
 };
 
-static ATTACHED: OnceLock<Handle> = OnceLock::new();
+static ATTACHED: Mutex<Option<Handle>> = Mutex::new(None);
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -29,6 +29,17 @@ pub struct RawHandle {
 pub struct RawRuntime {
     owner: *mut c_void,
     handle: RawHandle,
+}
+
+#[repr(C)]
+pub struct RawAttachment {
+    detach: unsafe extern "C" fn() -> CallResult,
+}
+
+#[repr(C)]
+pub struct AttachResult {
+    pub call: CallResult,
+    pub attachment: RawAttachment,
 }
 
 pub struct Handle {
@@ -48,9 +59,10 @@ unsafe impl Sync for Runtime {}
 pub struct RuntimeApi {
     pub runtime_block_on: unsafe extern "C" fn(*mut c_void, Future) -> CallResult,
     pub handle_block_on: unsafe extern "C" fn(*const c_void, Future) -> CallResult,
-    pub retain_handle: unsafe extern "C" fn(*const c_void),
+    pub retain_handle: unsafe extern "C" fn(*const c_void) -> CallResult,
     pub release_handle: unsafe extern "C" fn(*const c_void) -> CallResult,
     pub release_runtime: unsafe extern "C" fn(*mut c_void) -> CallResult,
+    pub detach: unsafe extern "C" fn(*const c_void) -> CallResult,
     pub spawn: unsafe extern "C" fn(*const c_void, Task) -> CallResult,
     pub spawn_local: unsafe extern "C" fn(*const c_void, Task) -> CallResult,
     pub spawn_blocking: unsafe extern "C" fn(*const c_void, BlockingTask) -> CallResult,
@@ -172,6 +184,31 @@ unsafe impl Sync for Waker {}
 struct FutureState<F: RustFuture> {
     future: Option<Pin<Box<F>>>,
     result: Option<Result<F::Output, Box<dyn Any + Send>>>,
+}
+
+impl RawAttachment {
+    pub const fn empty() -> Self {
+        Self {
+            detach: detach_empty,
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `detach` must remain callable until the attachment is detached.
+    #[doc(hidden)]
+    pub const unsafe fn from_raw(detach: unsafe extern "C" fn() -> CallResult) -> Self {
+        Self { detach }
+    }
+
+    /// # Safety
+    ///
+    /// The plugin defining this callback must remain loaded, and its owner must
+    /// have completed shutdown.
+    #[doc(hidden)]
+    pub unsafe fn detach(&self) -> CallResult {
+        unsafe { (self.detach)() }
+    }
 }
 
 impl RawHandle {
@@ -341,41 +378,77 @@ impl RawRuntime {
 }
 
 pub fn attach(handle: Handle) -> Result<(), Handle> {
-    ATTACHED.set(handle)
+    let mut attached = ATTACHED.lock().unwrap();
+    if attached.is_some() {
+        Err(handle)
+    } else {
+        *attached = Some(handle);
+        Ok(())
+    }
 }
 
 /// # Safety
 ///
 /// `raw` must be one owned host handle reference returned by its host API.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn telekio_guest_attach(raw: RawHandle) -> BoolResult {
+pub unsafe extern "C" fn telekio_guest_attach(raw: RawHandle) -> AttachResult {
     match catch_unwind(AssertUnwindSafe(|| {
         let handle = unsafe { Handle::from_abi(raw) };
         #[cfg(feature = "guest")]
         {
-            attach(handle).is_ok()
+            attach(handle).map_err(|handle| {
+                drop(handle);
+                "Telekio runtime is already attached"
+            })?;
+            Ok(unsafe { RawAttachment::from_raw(telekio_guest_detach) })
         }
         #[cfg(not(feature = "guest"))]
         {
             drop(handle);
             crate::require_package("This package");
-            false
+            Err("Telekio guest is not enabled")
         }
     })) {
-        Ok(value) => BoolResult {
+        Ok(Ok(attachment)) => AttachResult {
             call: CallResult::ok(),
-            value,
+            attachment,
         },
-        Err(payload) => BoolResult {
+        Ok(Err(error)) => AttachResult {
+            call: CallResult::error(error),
+            attachment: RawAttachment::empty(),
+        },
+        Err(payload) => AttachResult {
             call: CallResult::panicked(&*payload),
-            value: false,
+            attachment: RawAttachment::empty(),
         },
+    }
+}
+
+#[cfg(feature = "guest")]
+unsafe extern "C" fn telekio_guest_detach() -> CallResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let handle = ATTACHED
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or("Telekio runtime is not attached")?;
+        let result = unsafe { ((*handle.raw.api).detach)(handle.raw.context) };
+        if result.status == Status::Ok {
+            std::mem::forget(handle);
+        } else {
+            *ATTACHED.lock().unwrap() = Some(handle);
+        }
+        Ok::<_, &str>(result)
+    })) {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => CallResult::error(error),
+        Err(payload) => CallResult::panicked(&*payload),
     }
 }
 
 #[doc(hidden)]
 pub fn attached() -> Handle {
-    if let Some(handle) = ATTACHED.get() {
+    if let Some(handle) = ATTACHED.lock().unwrap().as_ref() {
         return handle.clone();
     }
     #[cfg(feature = "guest")]
@@ -387,7 +460,7 @@ pub fn attached() -> Handle {
         if !raw.is_empty() {
             let handle = unsafe { Handle::from_abi(raw) };
             if attach(handle).is_ok() {
-                return ATTACHED.get().unwrap().clone();
+                return ATTACHED.lock().unwrap().as_ref().unwrap().clone();
             }
         }
     }
@@ -458,7 +531,8 @@ impl Handle {
 
 impl Clone for Handle {
     fn clone(&self) -> Self {
-        unsafe { ((*self.raw.api).retain_handle)(self.raw.context) };
+        unsafe { ((*self.raw.api).retain_handle)(self.raw.context) }
+            .resume("failed to retain Tokio handle");
         Self { raw: self.raw }
     }
 }
@@ -479,7 +553,8 @@ impl Runtime {
     }
 
     pub fn handle(&self) -> Handle {
-        unsafe { ((*self.raw.handle.api).retain_handle)(self.raw.handle.context) };
+        unsafe { ((*self.raw.handle.api).retain_handle)(self.raw.handle.context) }
+            .resume("failed to retain Tokio handle");
         Handle {
             raw: self.raw.handle,
         }
@@ -512,6 +587,14 @@ impl CallResult {
         Self {
             status: Status::Ok,
             payload: OwnedBytes::empty(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn error(message: &str) -> Self {
+        Self {
+            status: Status::Error,
+            payload: OwnedBytes::from_string(message.to_owned()),
         }
     }
 
@@ -769,6 +852,10 @@ unsafe fn raw_wake_by_ref(data: *const ()) {
 unsafe fn raw_drop(data: *const ()) {
     let waker = unsafe { Box::from_raw(data.cast_mut().cast::<Waker>()) };
     unsafe { (waker.release)(waker.data) }.resume("failed to release Tokio waker");
+}
+
+unsafe extern "C" fn detach_empty() -> CallResult {
+    CallResult::ok()
 }
 
 fn callback(call: impl FnOnce()) -> CallResult {
