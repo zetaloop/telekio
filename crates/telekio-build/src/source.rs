@@ -30,14 +30,11 @@ pub(crate) fn prepare_tokio_in(
     prepare_package(output, "tokio", TOKIO_VERSION, offline, emit)
 }
 
-pub fn prepare_tokio_host(version: &str) -> Result<PathBuf, Box<dyn Error>> {
-    if version != TOKIO_VERSION {
-        return Err(format!("telekio-tokio {version} requires Tokio {TOKIO_VERSION}").into());
-    }
+pub fn prepare_tokio_host() -> Result<PathBuf, Box<dyn Error>> {
     let directory = prepare_package(
         &output_directory()?,
         "tokio",
-        version,
+        TOKIO_VERSION,
         invocation::offline()?,
         true,
     )?;

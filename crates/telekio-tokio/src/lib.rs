@@ -27,9 +27,4 @@
 #![cfg_attr(loom, allow(dead_code, unreachable_pub))]
 #![cfg_attr(windows, allow(rustdoc::broken_intra_doc_links))]
 
-include!(concat!(
-    env!("OUT_DIR"),
-    "/tokio-",
-    env!("CARGO_PKG_VERSION"),
-    "/src/lib.rs"
-));
+include!(env!("TELEKIO_TOKIO_SOURCE"));
