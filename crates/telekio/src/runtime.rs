@@ -1,6 +1,6 @@
 use crate::{
-    BuildResult, ClockSample, DurationParts, IoInterest, IoResource, IoResult, RuntimeConfig,
-    Shutdown, SignalRequest, SignalResult, TimerResult,
+    BuildResult, ClockSample, DurationParts, InstantOffset, IoInterest, IoResource, IoResult,
+    RuntimeConfig, Shutdown, SignalRequest, SignalResult, TimerResult,
 };
 
 use std::{
@@ -72,7 +72,7 @@ pub struct RuntimeApi {
     pub pause: unsafe extern "C" fn(*const c_void) -> CallResult,
     pub resume: unsafe extern "C" fn(*const c_void) -> CallResult,
     pub advance: unsafe extern "C" fn(*const c_void, DurationParts) -> CallResult,
-    pub timer: unsafe extern "C" fn(*const c_void, DurationParts) -> TimerResult,
+    pub timer: unsafe extern "C" fn(*const c_void, InstantOffset) -> TimerResult,
     pub register_io: unsafe extern "C" fn(*const c_void, IoResource, IoInterest) -> IoResult,
     pub signal: unsafe extern "C" fn(*const c_void, SignalRequest) -> SignalResult,
     pub reap_process: unsafe extern "C" fn(*const c_void, u32) -> CallResult,

@@ -109,8 +109,8 @@ impl Host {
         self.handle.advance(duration).into_io_result().unwrap();
     }
 
-    pub(crate) fn timer(&self, duration: Duration) -> ::telekio::Timer {
-        ::telekio::Timer::from_result(self.handle.timer(duration))
+    pub(crate) fn timer(&self, deadline: std::time::Instant) -> ::telekio::Timer {
+        ::telekio::Timer::from_result(self.handle.timer(deadline))
     }
 
     #[cfg(feature = "signal")]

@@ -942,7 +942,7 @@ unsafe extern "C" fn advance(context: *const c_void, duration: DurationParts) ->
     }
 }
 
-unsafe extern "C" fn timer(context: *const c_void, duration: DurationParts) -> TimerResult {
+unsafe extern "C" fn timer(context: *const c_void, deadline: InstantOffset) -> TimerResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     match catch_unwind(AssertUnwindSafe(|| {
         let _guard = context.handle.enter();
@@ -950,7 +950,7 @@ unsafe extern "C" fn timer(context: *const c_void, duration: DurationParts) -> T
             &context.owner,
             TimeTimer {
                 handle: context.handle.clone(),
-                sleep: Box::pin(tokio::time::sleep(duration.duration())),
+                sleep: Box::pin(tokio::time::sleep_until(time_instant(deadline))),
             },
         )
     })) {
@@ -999,15 +999,12 @@ unsafe extern "C" fn poll_time_timer(data: *mut c_void, waker: *const Waker) -> 
     }
 }
 
-unsafe extern "C" fn reset_time_timer(data: *mut c_void, duration: DurationParts) -> CallResult {
+unsafe extern "C" fn reset_time_timer(data: *mut c_void, deadline: InstantOffset) -> CallResult {
     let timer = unsafe { &*data.cast::<HostResource<TimeTimer>>() };
     match catch_unwind(AssertUnwindSafe(|| {
         timer.with_mut(|timer| {
             let _guard = timer.handle.enter();
-            timer
-                .sleep
-                .as_mut()
-                .reset(tokio::time::Instant::now() + duration.duration());
+            timer.sleep.as_mut().reset(time_instant(deadline));
         })
     })) {
         Ok(Ok(())) => result(Status::Ok, OwnedBytes::empty()),
@@ -1035,6 +1032,11 @@ unsafe extern "C" fn time_timer_elapsed(data: *const c_void) -> telekio::BoolRes
 
 unsafe extern "C" fn release_time_timer(data: *mut c_void) -> CallResult {
     host_callback(|| unsafe { &*data.cast::<HostResource<TimeTimer>>() }.release())
+}
+
+fn time_instant(offset: InstantOffset) -> tokio::time::Instant {
+    let origin = *CLOCK_ORIGIN.get_or_init(std::time::Instant::now);
+    tokio::time::Instant::from_std(offset.apply(origin))
 }
 
 fn time_poll(state: Poll, call: CallResult) -> OperationPoll {

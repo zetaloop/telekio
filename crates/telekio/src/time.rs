@@ -34,7 +34,7 @@ pub struct ClockSample {
 pub struct Timer {
     data: *mut c_void,
     poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
-    reset: unsafe extern "C" fn(*mut c_void, DurationParts) -> CallResult,
+    reset: unsafe extern "C" fn(*mut c_void, InstantOffset) -> CallResult,
     is_elapsed: unsafe extern "C" fn(*const c_void) -> BoolResult,
     release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
@@ -55,6 +55,19 @@ unsafe impl Send for Timer {}
 unsafe impl Sync for Timer {}
 
 impl InstantOffset {
+    fn between(origin: std::time::Instant, instant: std::time::Instant) -> Self {
+        match instant.checked_duration_since(origin) {
+            Some(duration) => Self {
+                duration: DurationParts::new(duration),
+                negative: 0,
+            },
+            None => Self {
+                duration: DurationParts::new(origin.duration_since(instant)),
+                negative: 1,
+            },
+        }
+    }
+
     pub fn apply(self, instant: std::time::Instant) -> std::time::Instant {
         if self.negative == 0 {
             instant + self.duration.duration()
@@ -117,8 +130,12 @@ impl Handle {
     }
 
     #[doc(hidden)]
-    pub fn timer(&self, duration: Duration) -> TimerResult {
-        unsafe { ((*self.raw.api).timer)(self.raw.context, DurationParts::new(duration)) }
+    pub fn timer(&self, deadline: std::time::Instant) -> TimerResult {
+        _ = self.now();
+        let origin = *CLOCK_ORIGIN.get().unwrap();
+        unsafe {
+            ((*self.raw.api).timer)(self.raw.context, InstantOffset::between(origin, deadline))
+        }
     }
 }
 
@@ -141,7 +158,7 @@ impl Timer {
     pub const unsafe fn from_raw(
         data: *mut c_void,
         poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
-        reset: unsafe extern "C" fn(*mut c_void, DurationParts) -> CallResult,
+        reset: unsafe extern "C" fn(*mut c_void, InstantOffset) -> CallResult,
         is_elapsed: unsafe extern "C" fn(*const c_void) -> BoolResult,
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
@@ -168,8 +185,9 @@ impl Timer {
         poll_result(result)
     }
 
-    pub fn reset(&mut self, duration: Duration) {
-        unsafe { (self.reset)(self.data, DurationParts::new(duration)) }
+    pub fn reset(&mut self, deadline: std::time::Instant) {
+        let origin = *CLOCK_ORIGIN.get().expect("Tokio clock is not initialized");
+        unsafe { (self.reset)(self.data, InstantOffset::between(origin, deadline)) }
             .into_io_result()
             .expect("failed to reset Tokio timer");
     }
@@ -197,7 +215,7 @@ unsafe extern "C" fn poll_empty(_: *mut c_void, _: *const Waker) -> OperationPol
     }
 }
 
-unsafe extern "C" fn reset_empty(_: *mut c_void, _: DurationParts) -> CallResult {
+unsafe extern "C" fn reset_empty(_: *mut c_void, _: InstantOffset) -> CallResult {
     CallResult {
         status: Status::Ok,
         payload: crate::OwnedBytes::empty(),
