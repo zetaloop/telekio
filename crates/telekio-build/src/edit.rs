@@ -25,6 +25,7 @@ pub enum AttrTarget<'a> {
     Module(&'a str),
     Modules(&'a str),
     Method { owner: &'a str, name: &'a str },
+    Methods { owner: &'a str, name: &'a str },
     Impl { owner: &'a str, method: &'a str },
 }
 
@@ -33,11 +34,51 @@ pub fn add_attr(
     target: AttrTarget<'_>,
     attribute: &str,
 ) -> Result<(), Box<dyn Error>> {
+    let count = count_attr_targets(source, target)?;
+    if count == 0 {
+        return Err("attribute target was not found".into());
+    }
+    if count > 1 {
+        return Err("attribute target appears more than once".into());
+    }
     if add_attr_in(source, target, attribute)? {
         Ok(())
     } else {
         Err("attribute target was not found".into())
     }
+}
+
+fn count_attr_targets(source: &str, target: AttrTarget<'_>) -> Result<usize, Box<dyn Error>> {
+    let root = parse(source)?;
+    let mut groups = usize::from(!attr_targets(root.syntax(), target)?.is_empty());
+    for tree in outer_token_trees(root.syntax()) {
+        groups += usize::from(token_tree_has_attr_target(&tree, target)?);
+    }
+    Ok(groups)
+}
+
+fn token_tree_has_attr_target(
+    tree: &ast::TokenTree,
+    target: AttrTarget<'_>,
+) -> Result<bool, Box<dyn Error>> {
+    if let Some(inner) = token_tree_source(tree) {
+        let owner = tree
+            .syntax()
+            .ancestors()
+            .find_map(ast::Impl::cast)
+            .and_then(|implementation| implementation.self_ty())
+            .map(|ty| ty.syntax().text().to_string());
+        let wrapped = owner.map_or(inner.clone(), |owner| format!("impl {owner} {{ {inner} }}"));
+        if parse(&wrapped).is_ok() && count_attr_targets(&wrapped, target)? > 0 {
+            return Ok(true);
+        }
+    }
+    for tree in immediate_token_trees(tree) {
+        if token_tree_has_attr_target(&tree, target)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn add_attr_in(
@@ -120,21 +161,7 @@ fn add_attr_in(
             .find_map(ast::MacroCall::cast)
             .and_then(|call| call.token_tree())
             .ok_or("replacement macro has no token tree")?;
-        let range = source_tree.syntax().text_range();
-        if replacements
-            .iter()
-            .any(|(existing, _): &(ast::TokenTree, ast::TokenTree)| {
-                let existing = existing.syntax().text_range();
-                existing.start() <= range.start() && existing.end() >= range.end()
-            })
-        {
-            continue;
-        }
-        replacements.retain(|(existing, _)| {
-            let existing = existing.syntax().text_range();
-            !(range.start() <= existing.start() && range.end() >= existing.end())
-        });
-        replacements.push((source_tree, replacement_tree));
+        retain_outermost(&mut replacements, source_tree, replacement_tree);
     }
     if replacements.is_empty() {
         return Ok(false);
@@ -316,11 +343,38 @@ pub fn remove_use(source: &mut String, name: &str) -> Result<(), Box<dyn Error>>
 }
 
 pub fn retarget_use(source: &mut String, name: &str, path: &str) -> Result<(), Box<dyn Error>> {
-    if retarget_use_in(source, name, path)? {
-        Ok(())
-    } else {
-        Err(format!("use tree `{name}` was not found").into())
+    match count_use_targets(source, name)? {
+        0 => Err(format!("use tree `{name}` was not found").into()),
+        1 => {
+            if retarget_use_in(source, name, path)? {
+                Ok(())
+            } else {
+                Err(format!("use tree `{name}` was not found").into())
+            }
+        }
+        _ => Err(format!("found multiple use trees `{name}`").into()),
     }
+}
+
+fn count_use_targets(source: &str, name: &str) -> Result<usize, Box<dyn Error>> {
+    count_targets(
+        source,
+        name,
+        &|root, name| {
+            Ok(root
+                .descendants()
+                .filter_map(ast::UseTree::cast)
+                .filter(|tree| {
+                    tree.path()
+                        .and_then(|path| path.segment())
+                        .and_then(|segment| segment.name_ref())
+                        .is_some_and(|candidate| candidate.text() == name)
+                        && tree.rename().is_none()
+                })
+                .count())
+        },
+        &|name, _, inner| Some((name, inner)),
+    )
 }
 
 fn retarget_use_in(source: &mut String, name: &str, path: &str) -> Result<bool, Box<dyn Error>> {
@@ -386,7 +440,7 @@ fn retarget_use_in(source: &mut String, name: &str, path: &str) -> Result<bool, 
             .find_map(ast::MacroCall::cast)
             .and_then(|call| call.token_tree())
             .ok_or("replacement macro has no token tree")?;
-        replacements.push((source_tree, replacement));
+        retain_outermost(&mut replacements, source_tree, replacement);
     }
     if replacements.is_empty() {
         return Ok(false);
@@ -412,11 +466,50 @@ pub fn delegate_closure(
     helper: &str,
     context: &[&str],
 ) -> Result<(), Box<dyn Error>> {
-    if delegate_closure_in(source, scope, call, index, helper, context)? {
-        Ok(())
-    } else {
-        Err("closure call was not found in selected scope".into())
+    match count_delegate_targets(source, scope, call, index)? {
+        0 => Err("closure call was not found in selected scope".into()),
+        1 => {
+            if delegate_closure_in(source, scope, call, index, helper, context)? {
+                Ok(())
+            } else {
+                Err("closure call was not found in selected scope".into())
+            }
+        }
+        _ => Err("closure call appears more than once in selected scope".into()),
     }
+}
+
+fn count_delegate_targets(
+    source: &str,
+    scope: Scope<'_>,
+    call: Call<'_>,
+    index: usize,
+) -> Result<usize, Box<dyn Error>> {
+    count_targets(
+        source,
+        (scope, call, index),
+        &|root, (scope, call, index)| {
+            let Some(scope) = scope.resolve(root)? else {
+                return Ok(0);
+            };
+            let Some(arguments) = call_arguments(&scope, call)? else {
+                return Ok(0);
+            };
+            let argument = arguments
+                .args()
+                .nth(index)
+                .ok_or_else(|| format!("closure argument {index} is missing"))?;
+            if !matches!(argument, ast::Expr::ClosureExpr(_)) {
+                return Err("selected argument is not a closure".into());
+            }
+            Ok(1)
+        },
+        &|(scope, call, index), tree, inner| {
+            scope
+                .inside(tree)
+                .map(|scope| ((scope, call, index), inner))
+        },
+    )
 }
 
 fn delegate_closure_in(
@@ -593,11 +686,56 @@ pub fn redirect_call(
     from: &str,
     to: &str,
 ) -> Result<(), Box<dyn Error>> {
-    if redirect_call_in(source, scope, from, to)? {
-        Ok(())
-    } else {
-        Err(format!("scope for `{from}` call was not found").into())
+    match count_redirect_targets(source, scope, from)? {
+        0 => Err(format!("scope for `{from}` call was not found").into()),
+        1 => {
+            if redirect_call_in(source, scope, from, to)? {
+                Ok(())
+            } else {
+                Err(format!("scope for `{from}` call was not found").into())
+            }
+        }
+        _ => Err(format!("more than one `{from}` call in selected scope").into()),
     }
+}
+
+fn count_redirect_targets(
+    source: &str,
+    scope: Scope<'_>,
+    from: &str,
+) -> Result<usize, Box<dyn Error>> {
+    count_targets(
+        source,
+        (scope, from),
+        &|root, (scope, from)| {
+            Ok(scope
+                .resolve(root)?
+                .map_or(0, |scope| matching_calls(&scope, from).count()))
+        },
+        &|(scope, from), tree, inner| scope.inside(tree).map(|scope| ((scope, from), inner)),
+    )
+}
+
+fn matching_calls<'a>(
+    scope: &'a SyntaxNode,
+    name: &'a str,
+) -> impl Iterator<Item = (SyntaxNode, bool)> + 'a {
+    let methods = scope_descendants(scope)
+        .filter_map(ast::MethodCallExpr::cast)
+        .filter(move |call| {
+            call.name_ref()
+                .is_some_and(|candidate| candidate.text() == name)
+        })
+        .filter_map(|call| call.name_ref().map(|name| (name.syntax().clone(), true)));
+    let functions = scope_descendants(scope)
+        .filter_map(ast::CallExpr::cast)
+        .filter_map(|call| match call.expr() {
+            Some(ast::Expr::PathExpr(expression)) => expression.path(),
+            _ => None,
+        })
+        .filter(move |path| path.syntax().text() == name)
+        .map(|path| (path.syntax().clone(), false));
+    methods.chain(functions)
 }
 
 fn redirect_call_in(
@@ -608,19 +746,7 @@ fn redirect_call_in(
 ) -> Result<bool, Box<dyn Error>> {
     let (editor, root) = open(source)?;
     if let Some(scope) = scope.resolve(&root)? {
-        let methods = scope_descendants(&scope)
-            .filter_map(ast::MethodCallExpr::cast)
-            .filter(|call| call.name_ref().is_some_and(|name| name.text() == from))
-            .filter_map(|call| call.name_ref().map(|name| (name.syntax().clone(), true)));
-        let functions = scope_descendants(&scope)
-            .filter_map(ast::CallExpr::cast)
-            .filter_map(|call| match call.expr() {
-                Some(ast::Expr::PathExpr(expression)) => expression.path(),
-                _ => None,
-            })
-            .filter(|path| path.syntax().text() == from)
-            .map(|path| (path.syntax().clone(), false));
-        let calls = methods.chain(functions).collect::<Vec<_>>();
+        let calls = matching_calls(&scope, from).collect::<Vec<_>>();
         let (callee, method) = match calls.as_slice() {
             [] => return Ok(false),
             [call] => call.clone(),
@@ -660,21 +786,7 @@ fn redirect_call_in(
             .find_map(ast::MacroCall::cast)
             .and_then(|call| call.token_tree())
             .ok_or("replacement macro has no token tree")?;
-        let range = source_tree.syntax().text_range();
-        if replacements
-            .iter()
-            .any(|(existing, _): &(ast::TokenTree, ast::TokenTree)| {
-                let existing = existing.syntax().text_range();
-                existing.start() <= range.start() && existing.end() >= range.end()
-            })
-        {
-            continue;
-        }
-        replacements.retain(|(existing, _)| {
-            let existing = existing.syntax().text_range();
-            !(range.start() <= existing.start() && range.end() >= existing.end())
-        });
-        replacements.push((source_tree, replacement));
+        retain_outermost(&mut replacements, source_tree, replacement);
     }
     if replacements.is_empty() {
         return Ok(false);
@@ -756,6 +868,71 @@ fn closure_argument(
         &format!("closure argument to `{call_name}` in `{owner}`"),
     )?;
     Ok(Some(closure.syntax().clone()))
+}
+
+fn count_targets<C: Copy>(
+    source: &str,
+    context: C,
+    direct: &impl Fn(&SyntaxNode, C) -> Result<usize, Box<dyn Error>>,
+    nested: &impl Fn(C, &ast::TokenTree, String) -> Option<(C, String)>,
+) -> Result<usize, Box<dyn Error>> {
+    let root = parse(source)?;
+    let mut count = direct(root.syntax(), context)?;
+    for tree in outer_token_trees(root.syntax()) {
+        count += count_token_tree(&tree, context, direct, nested)?;
+    }
+    Ok(count)
+}
+
+fn count_token_tree<C: Copy>(
+    tree: &ast::TokenTree,
+    context: C,
+    direct: &impl Fn(&SyntaxNode, C) -> Result<usize, Box<dyn Error>>,
+    nested: &impl Fn(C, &ast::TokenTree, String) -> Option<(C, String)>,
+) -> Result<usize, Box<dyn Error>> {
+    if let Some(inner) = token_tree_source(tree)
+        && let Some((context, inner)) = nested(context, tree, inner)
+        && parse(&inner).is_ok()
+    {
+        return count_targets(&inner, context, direct, nested);
+    }
+    immediate_token_trees(tree)
+        .map(|tree| count_token_tree(&tree, context, direct, nested))
+        .sum()
+}
+
+fn outer_token_trees(root: &SyntaxNode) -> impl Iterator<Item = ast::TokenTree> + '_ {
+    root.descendants()
+        .filter_map(ast::TokenTree::cast)
+        .filter(|tree| {
+            tree.syntax()
+                .ancestors()
+                .skip(1)
+                .all(|ancestor| !ast::TokenTree::can_cast(ancestor.kind()))
+        })
+}
+
+fn immediate_token_trees(tree: &ast::TokenTree) -> impl Iterator<Item = ast::TokenTree> + '_ {
+    tree.syntax()
+        .descendants()
+        .filter_map(ast::TokenTree::cast)
+        .filter(|candidate| {
+            candidate
+                .syntax()
+                .ancestors()
+                .skip(1)
+                .find_map(ast::TokenTree::cast)
+                .is_some_and(|parent| parent == *tree)
+        })
+}
+
+fn token_tree_source(tree: &ast::TokenTree) -> Option<String> {
+    tree.syntax()
+        .text()
+        .to_string()
+        .strip_prefix('{')
+        .and_then(|source| source.strip_suffix('}'))
+        .map(str::to_owned)
 }
 
 fn retain_outermost(
@@ -885,7 +1062,7 @@ fn attr_targets(
             .filter(|item| item.name().is_some_and(|candidate| candidate.text() == name))
             .map(|item| item.syntax().clone())
             .collect(),
-        AttrTarget::Method { owner, name } => methods(root, owner)
+        AttrTarget::Method { owner, name } | AttrTarget::Methods { owner, name } => methods(root, owner)
             .filter(|item| item.name().is_some_and(|candidate| candidate.text() == name))
             .map(|item| item.syntax().clone())
             .collect(),
@@ -907,7 +1084,7 @@ fn attr_targets(
             .map(|item| item.syntax().clone())
             .collect(),
     };
-    if nodes.len() <= 1 || matches!(target, AttrTarget::Modules(_)) {
+    if nodes.len() <= 1 || matches!(target, AttrTarget::Modules(_) | AttrTarget::Methods { .. }) {
         Ok(nodes)
     } else {
         Err("attribute target appears more than once".into())

@@ -421,7 +421,7 @@ fn patch_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
         edit::add_attr(
             source,
-            edit::AttrTarget::Method {
+            edit::AttrTarget::Methods {
                 owner: "MetricsBatch",
                 name: "inc_local_schedule_count",
             },
