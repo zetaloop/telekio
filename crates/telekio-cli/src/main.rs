@@ -78,6 +78,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     let config = write_config(&cache)?;
     drop(lock);
 
+    if let Some(manifest) = manifest.as_deref()
+        && operation(&interpreted) != Some("update")
+        && !patch_selected(&cargo, &interpreted, manifest, &config)?
+    {
+        return Err("generated Tokio patch was not selected; run `telekio cargo update -p tokio`, or `cargo update -p tokio` after `telekio init`, then adjust incompatible Tokio version requirements".into());
+    }
+
     let mut command = Command::new(cargo);
     if arguments
         .first()
@@ -199,6 +206,45 @@ fn project_info(
         })
     });
     Ok((uses_tokio, if guest { Role::Guest } else { Role::Host }))
+}
+
+fn patch_selected(
+    cargo: &OsStr,
+    arguments: &[OsString],
+    manifest: &Path,
+    config: &Path,
+) -> Result<bool, Box<dyn Error>> {
+    let output = Command::new(cargo)
+        .args(global_options(arguments))
+        .arg("--config")
+        .arg(config)
+        .args(["metadata", "--format-version", "1"])
+        .args(metadata_options(arguments))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "patched Cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let expected = fs::canonicalize(
+        config
+            .parent()
+            .ok_or("Telekio config has no parent")?
+            .join("tokio/Cargo.toml"),
+    )?;
+    Ok(metadata["packages"]
+        .as_array()
+        .ok_or("Cargo metadata has no packages")?
+        .iter()
+        .filter(|package| package["name"].as_str() == Some("tokio"))
+        .filter_map(|package| package["manifest_path"].as_str())
+        .filter_map(|manifest| fs::canonicalize(manifest).ok())
+        .any(|manifest| manifest == expected))
 }
 
 fn selected_packages<'a>(
