@@ -138,8 +138,10 @@ fn project_info(
     manifest: &Path,
 ) -> Result<(bool, Role), Box<dyn Error>> {
     let output = Command::new(cargo)
+        .args(global_options(arguments))
+        .args(["metadata", "--format-version", "1"])
         .args(metadata_options(arguments))
-        .args(["metadata", "--format-version", "1", "--manifest-path"])
+        .arg("--manifest-path")
         .arg(manifest)
         .output()?;
     if !output.status.success() {
@@ -301,10 +303,7 @@ fn project_manifest(
 }
 
 fn metadata_options(arguments: &[OsString]) -> Vec<OsString> {
-    let mut options = global_options(arguments)
-        .into_iter()
-        .map(OsStr::to_owned)
-        .collect::<Vec<_>>();
+    let mut options = Vec::new();
     let mut index = 0;
     while index < arguments.len() && arguments[index] != "--" {
         let Some(argument) = arguments[index].to_str() else {
