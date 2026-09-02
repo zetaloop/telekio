@@ -22,6 +22,10 @@ pub(crate) trait HostSchedule: Schedule + Clone + Send + Sync + 'static {
 pub(crate) struct Host {
     runtime: Option<::telekio::Runtime>,
     handle: ::telekio::Handle,
+    #[cfg(tokio_unstable)]
+    panicked: AtomicBool,
+    #[cfg(tokio_unstable)]
+    roots: Mutex<Vec<std::sync::Weak<RootState>>>,
 }
 
 pub(crate) struct Registry<S: HostSchedule> {
@@ -48,6 +52,18 @@ struct BlockingRunner<S: HostSchedule> {
 
 struct Budgeted<F>(F);
 
+#[cfg(tokio_unstable)]
+struct RootState {
+    waker: Mutex<Option<Waker>>,
+}
+
+#[cfg(tokio_unstable)]
+struct Root<'a, F> {
+    future: F,
+    host: &'a Host,
+    state: Arc<RootState>,
+}
+
 pub(crate) fn budget<F: Future>(future: F) -> impl Future<Output = F::Output> {
     Budgeted(future)
 }
@@ -61,11 +77,29 @@ impl<F: Future> Future for Budgeted<F> {
     }
 }
 
+#[cfg(tokio_unstable)]
+impl<F: Future> Future for Root<'_, F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = unsafe { self.get_unchecked_mut() };
+        *this.state.waker.lock().unwrap() = Some(context.waker().clone());
+        this.host.check_panic();
+        let result = unsafe { Pin::new_unchecked(&mut this.future) }.poll(context);
+        this.host.check_panic();
+        result
+    }
+}
+
 impl Host {
     pub(crate) fn new(runtime: ::telekio::Runtime) -> Arc<Self> {
         Arc::new(Self {
             handle: runtime.handle(),
             runtime: Some(runtime),
+            #[cfg(tokio_unstable)]
+            panicked: AtomicBool::new(false),
+            #[cfg(tokio_unstable)]
+            roots: Mutex::new(Vec::new()),
         })
     }
 
@@ -74,6 +108,10 @@ impl Host {
         Arc::new(Self {
             runtime: None,
             handle,
+            #[cfg(tokio_unstable)]
+            panicked: AtomicBool::new(false),
+            #[cfg(tokio_unstable)]
+            roots: Mutex::new(Vec::new()),
         })
     }
 
@@ -94,6 +132,8 @@ impl Host {
     }
 
     pub(crate) fn runtime_block_on<F: std::future::Future>(&self, future: F) -> F::Output {
+        #[cfg(tokio_unstable)]
+        let future = self.root(future);
         match &self.runtime {
             Some(runtime) => runtime.block_on(future),
             None => self.handle.block_on(future),
@@ -101,7 +141,47 @@ impl Host {
     }
 
     pub(crate) fn handle_block_on<F: std::future::Future>(&self, future: F) -> F::Output {
+        #[cfg(tokio_unstable)]
+        let future = self.root(future);
         self.handle.block_on(future)
+    }
+
+    #[cfg(tokio_unstable)]
+    pub(crate) fn unhandled_panic(&self) {
+        self.panicked.store(true, Ordering::Release);
+        let mut roots = self.roots.lock().unwrap();
+        roots.retain(|root| root.strong_count() != 0);
+        let wakers = roots
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .filter_map(|root| root.waker.lock().unwrap().clone())
+            .collect::<Vec<_>>();
+        drop(roots);
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    #[cfg(tokio_unstable)]
+    fn check_panic(&self) {
+        if self.panicked.load(Ordering::Acquire) {
+            panic!(
+                "a spawned task panicked and the runtime is configured to shut down on unhandled panic"
+            );
+        }
+    }
+
+    #[cfg(tokio_unstable)]
+    fn root<F: Future>(&self, future: F) -> Root<'_, F> {
+        let state = Arc::new(RootState {
+            waker: Mutex::new(None),
+        });
+        self.roots.lock().unwrap().push(Arc::downgrade(&state));
+        Root {
+            future,
+            host: self,
+            state,
+        }
     }
 
     #[cfg(feature = "rt-multi-thread")]
@@ -223,7 +303,7 @@ impl<S: HostSchedule> Registry<S> {
     }
 
     pub(crate) fn release(&self, task: &Task<S>) {
-        if let Some(runner) = self.runners.lock().unwrap().remove(&task.id()) {
+        if let Some(runner) = self.runners.lock().unwrap().remove(&task.telekio_id()) {
             runner.finish();
         }
     }
@@ -290,7 +370,7 @@ impl<S: HostSchedule> Notified<S> {
 }
 
 impl<S: HostSchedule> Task<S> {
-    fn id(&self) -> task::Id {
+    fn telekio_id(&self) -> task::Id {
         unsafe { Header::get_id(self.header_ptr()) }
     }
 

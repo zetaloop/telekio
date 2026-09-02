@@ -165,6 +165,17 @@ fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             "schedule",
             "schedule_local",
         )?;
+        edit::delegate_closure(
+            source,
+            edit::Scope::Method {
+                owner: "Arc<Handle>",
+                name: "unhandled_panic",
+            },
+            edit::Call::Function("context::with_scheduler"),
+            0,
+            "telekio::unhandled_panic",
+            &["self"],
+        )?;
         edit::rename_method(source, "Handle", "owned_id", "owned_id_inner")?;
         mount(source, "telekio", "current_thread.rs")
     })
@@ -275,7 +286,7 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
                     owner: "Handle",
                     name,
                 },
-                "#[expect(dead_code)]",
+                "#[cfg_attr(not(tokio_unstable), expect(dead_code))]",
             )?;
         }
         Ok(())
@@ -287,7 +298,7 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
                 owner: "Shared",
                 name: "injection_queue_depth",
             },
-            "#[expect(dead_code)]",
+            "#[cfg_attr(not(tokio_unstable), expect(dead_code))]",
         )
     })?;
     patch(&path.join("stats.rs"), |source| {
@@ -316,14 +327,22 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
 
 fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        for name in ["injection_queue_depth", "num_workers", "worker_metrics"] {
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "Handle",
+                name: "num_workers",
+            },
+            "#[expect(dead_code)]",
+        )?;
+        for name in ["injection_queue_depth", "worker_metrics"] {
             edit::add_attr(
                 source,
                 edit::AttrTarget::Method {
                     owner: "Handle",
                     name,
                 },
-                "#[expect(dead_code)]",
+                "#[cfg_attr(not(tokio_unstable), expect(dead_code))]",
             )?;
         }
         mount(source, "telekio", "scheduler.rs")?;
@@ -400,15 +419,19 @@ fn patch_blocking(path: &Path) -> Result<(), Box<dyn Error>> {
             }],
         )?;
         edit::rename_method(source, "BlockingPool", "shutdown", "shutdown_workers")?;
-        for target in [
+        edit::add_attr(
+            source,
             edit::AttrTarget::Enum("Mandatory"),
+            "#[cfg_attr(not(tokio_unstable), expect(dead_code))]",
+        )?;
+        edit::add_attr(
+            source,
             edit::AttrTarget::Impl {
                 owner: "Spawner",
                 method: "spawn_blocking",
             },
-        ] {
-            edit::add_attr(source, target, "#[expect(dead_code)]")?;
-        }
+            "#[expect(dead_code)]",
+        )?;
         mount(source, "telekio", "blocking.rs")
     })?;
     patch(

@@ -32,6 +32,16 @@ impl Handle {
         self.telekio.install(host);
     }
 
+    fn run_host_task(self: &Arc<Self>, task: task::Notified<Arc<Self>>) {
+        #[cfg(tokio_unstable)]
+        let task_meta = task.task_meta();
+        #[cfg(tokio_unstable)]
+        self.task_hooks.poll_start_callback(&task_meta);
+        self.shared.owned.assert_owner(task).run();
+        #[cfg(tokio_unstable)]
+        self.task_hooks.poll_stop_callback(&task_meta);
+    }
+
     pub(super) fn schedule_host_task(self: &Arc<Self>, task: task::Notified<Arc<Self>>, _: bool) {
         task.schedule_host(false);
     }
@@ -55,15 +65,11 @@ impl HostSchedule for Arc<Handle> {
         })
         .unwrap_or(false);
         if current {
-            context::telekio::enter(|| {
-                crate::task::coop::budget(|| self.shared.owned.assert_owner(task).run())
-            });
+            context::telekio::enter(|| crate::task::coop::budget(|| self.run_host_task(task)));
         } else {
             let handle = scheduler::Handle::MultiThread(Arc::clone(self));
             context::enter_runtime(&handle, true, |_| {
-                context::telekio::enter(|| {
-                    crate::task::coop::budget(|| self.shared.owned.assert_owner(task).run())
-                })
+                context::telekio::enter(|| crate::task::coop::budget(|| self.run_host_task(task)))
             });
         }
     }
