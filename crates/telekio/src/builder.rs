@@ -76,6 +76,8 @@ pub struct RuntimeConfig {
     pub max_io_events_per_tick: usize,
     pub name: Bytes,
     pub disable_lifo_slot: u8,
+    pub eager_driver_handoff: u8,
+    pub alternative_timer: u8,
 }
 
 #[repr(C)]

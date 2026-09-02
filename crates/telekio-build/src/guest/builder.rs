@@ -125,6 +125,17 @@ impl Builder {
             max_io_events_per_tick: self.nevents,
             name: unsafe { ::telekio::Bytes::borrow(self.name.as_deref()) },
             disable_lifo_slot: self.disable_lifo_slot.into(),
+            eager_driver_handoff: self.enable_eager_driver_handoff.into(),
+            alternative_timer: {
+                #[cfg(all(tokio_unstable, feature = "rt-multi-thread"))]
+                {
+                    matches!(self.timer_flavor, TimerFlavor::Alternative).into()
+                }
+                #[cfg(not(all(tokio_unstable, feature = "rt-multi-thread")))]
+                {
+                    0
+                }
+            },
         });
         // Tokio's LocalRuntime keeps this value on its originating thread.
         unsafe { result.into_runtime() }.map(|(runtime, _)| runtime)

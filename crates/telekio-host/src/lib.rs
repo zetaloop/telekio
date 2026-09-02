@@ -133,7 +133,6 @@ struct CallbackCleanup {
 }
 
 struct TimeTimer {
-    handle: tokio::runtime::Handle,
     sleep: Pin<Box<tokio::time::Sleep>>,
 }
 
@@ -1043,7 +1042,6 @@ unsafe extern "C" fn timer(context: *const c_void, deadline: InstantOffset) -> T
         HostResource::new(
             &context.owner,
             TimeTimer {
-                handle: context.handle.clone(),
                 sleep: Box::pin(tokio::time::sleep_until(time_instant(deadline))),
             },
         )
@@ -1097,7 +1095,6 @@ unsafe extern "C" fn reset_time_timer(data: *mut c_void, deadline: InstantOffset
     let timer = unsafe { &*data.cast::<HostResource<TimeTimer>>() };
     match catch_unwind(AssertUnwindSafe(|| {
         timer.with_mut(|timer| {
-            let _guard = timer.handle.enter();
             timer.sleep.as_mut().reset(time_instant(deadline));
         })
     })) {
@@ -1256,6 +1253,12 @@ fn build_runtime(
     builder.max_io_events_per_tick(config.max_io_events_per_tick);
     if config.disable_lifo_slot != 0 {
         builder.telekio_disable_lifo_slot();
+    }
+    if config.eager_driver_handoff != 0 {
+        builder.telekio_enable_eager_driver_handoff();
+    }
+    if config.alternative_timer != 0 {
+        builder.telekio_enable_alt_timer();
     }
     if !config.name.is_empty() {
         builder.name(unsafe { config.name.as_str() });
