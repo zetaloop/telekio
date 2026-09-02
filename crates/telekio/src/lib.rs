@@ -4,7 +4,10 @@ mod runtime;
 mod signal;
 mod time;
 
-pub use builder::{BuildResult, Bytes, Callback, Flavor, RuntimeConfig, Shutdown, StringCallback};
+pub use builder::{
+    BuildResult, Bytes, Callback, Flavor, HistogramConfig, RuntimeConfig, Shutdown, StringCallback,
+    WorkerCallback,
+};
 pub use io::{
     IO_DRIVER_DISABLED_ERROR, IoCallResult, IoError, IoEvent, IoInterest, IoKind, IoOperation,
     IoOperationKind, IoOperationResult, IoPoll, IoReady, IoRegistration, IoRequest, IoResource,

@@ -25,6 +25,8 @@ fn prepare_guest_with(generated: PathBuf, telekio: Value) -> Result<PathBuf, Box
     patch_local_runtime(&generated.join("src/runtime/local_runtime/runtime.rs"))?;
     patch_blocking(&generated.join("src/runtime/blocking/pool.rs"))?;
     patch_metrics(&generated.join("src/runtime/metrics/batch.rs"))?;
+    patch_histogram(&generated.join("src/runtime/metrics/histogram.rs"))?;
+    patch_worker_metrics(&generated.join("src/runtime/metrics/worker.rs"))?;
     patch_runtime_metrics(&generated.join("src/runtime/metrics/runtime.rs"))?;
     patch_context(&generated.join("src/runtime/context/blocking.rs"))?;
     patch_defer(&generated)?;
@@ -177,6 +179,21 @@ fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             &["self"],
         )?;
         edit::rename_method(source, "Handle", "owned_id", "owned_id_inner")?;
+        for name in [
+            "worker_local_queue_depth",
+            "num_blocking_threads",
+            "num_idle_blocking_threads",
+            "blocking_queue_depth",
+        ] {
+            edit::add_attr(
+                source,
+                edit::AttrTarget::Method {
+                    owner: "Handle",
+                    name,
+                },
+                "#[expect(dead_code)]",
+            )?;
+        }
         mount(source, "telekio", "current_thread.rs")
     })
 }
@@ -286,20 +303,38 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
                     owner: "Handle",
                     name,
                 },
-                "#[cfg_attr(not(tokio_unstable), expect(dead_code))]",
+                "#[expect(dead_code)]",
+            )?;
+        }
+        for name in [
+            "num_blocking_threads",
+            "num_idle_blocking_threads",
+            "worker_local_queue_depth",
+            "blocking_queue_depth",
+        ] {
+            edit::add_attr(
+                source,
+                edit::AttrTarget::Method {
+                    owner: "Handle",
+                    name,
+                },
+                "#[expect(dead_code)]",
             )?;
         }
         Ok(())
     })?;
     patch(&path.join("worker/metrics.rs"), |source| {
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "Shared",
-                name: "injection_queue_depth",
-            },
-            "#[cfg_attr(not(tokio_unstable), expect(dead_code))]",
-        )
+        for name in ["injection_queue_depth", "worker_local_queue_depth"] {
+            edit::add_attr(
+                source,
+                edit::AttrTarget::Method {
+                    owner: "Shared",
+                    name,
+                },
+                "#[expect(dead_code)]",
+            )?;
+        }
+        Ok(())
     })?;
     patch(&path.join("stats.rs"), |source| {
         edit::add_attr(
@@ -335,14 +370,21 @@ fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
             },
             "#[expect(dead_code)]",
         )?;
-        for name in ["injection_queue_depth", "worker_metrics"] {
+        for name in [
+            "injection_queue_depth",
+            "worker_metrics",
+            "num_blocking_threads",
+            "num_idle_blocking_threads",
+            "worker_local_queue_depth",
+            "blocking_queue_depth",
+        ] {
             edit::add_attr(
                 source,
                 edit::AttrTarget::Method {
                     owner: "Handle",
                     name,
                 },
-                "#[cfg_attr(not(tokio_unstable), expect(dead_code))]",
+                "#[expect(dead_code)]",
             )?;
         }
         mount(source, "telekio", "scheduler.rs")?;
@@ -432,6 +474,22 @@ fn patch_blocking(path: &Path) -> Result<(), Box<dyn Error>> {
             },
             "#[expect(dead_code)]",
         )?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "SpawnerMetrics",
+                name: "queue_depth",
+            },
+            "#[expect(dead_code)]",
+        )?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Impl {
+                owner: "Spawner",
+                method: "num_threads",
+            },
+            "#[expect(dead_code)]",
+        )?;
         mount(source, "telekio", "blocking.rs")
     })?;
     patch(
@@ -464,6 +522,45 @@ fn patch_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
             },
             "#[expect(dead_code)]",
         )
+    })
+}
+
+fn patch_histogram(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        for target in [
+            edit::AttrTarget::Method {
+                owner: "HistogramType",
+                name: "bucket_range",
+            },
+            edit::AttrTarget::Impl {
+                owner: "Histogram",
+                method: "num_buckets",
+            },
+        ] {
+            edit::add_attr(source, target, "#[expect(dead_code)]")?;
+        }
+        mount(source, "telekio", "histogram.rs")?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Module("telekio"),
+            "#[cfg(tokio_unstable)]",
+        )
+    })
+}
+
+fn patch_worker_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        for name in ["queue_depth", "thread_id"] {
+            edit::add_attr(
+                source,
+                edit::AttrTarget::Method {
+                    owner: "WorkerMetrics",
+                    name,
+                },
+                "#[expect(dead_code)]",
+            )?;
+        }
+        Ok(())
     })
 }
 
@@ -825,6 +922,14 @@ fn patch_signal(generated: &Path) -> Result<(), Box<dyn Error>> {
 fn patch_defer(generated: &Path) -> Result<(), Box<dyn Error>> {
     patch(&generated.join("src/runtime/context.rs"), |source| {
         mount_with(source, Some("pub(crate)"), "telekio", "defer.rs")?;
+        edit::delegate_closure(
+            source,
+            edit::Scope::Function("worker_index"),
+            edit::Call::Function("with_scheduler"),
+            0,
+            "telekio::worker_index",
+            &[],
+        )?;
         edit::add_attr(
             source,
             edit::AttrTarget::Module("telekio"),
@@ -855,28 +960,69 @@ fn patch_defer(generated: &Path) -> Result<(), Box<dyn Error>> {
 
 fn patch_runtime_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "RuntimeMetrics",
-                name: "num_workers",
-            },
-            "num_workers",
-            "host_num_workers",
-        )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "RuntimeMetrics",
-                name: "global_queue_depth",
-            },
-            "injection_queue_depth",
-            "host_global_queue_depth",
-        )?;
+        for (name, call, replacement) in [
+            ("num_workers", "num_workers", "host_num_workers"),
+            (
+                "global_queue_depth",
+                "injection_queue_depth",
+                "host_global_queue_depth",
+            ),
+            (
+                "num_blocking_threads",
+                "num_blocking_threads",
+                "host_num_blocking_threads",
+            ),
+            (
+                "num_idle_blocking_threads",
+                "num_idle_blocking_threads",
+                "host_num_idle_blocking_threads",
+            ),
+            (
+                "injection_queue_depth",
+                "injection_queue_depth",
+                "host_global_queue_depth",
+            ),
+            (
+                "worker_local_queue_depth",
+                "worker_local_queue_depth",
+                "host_worker_local_queue_depth",
+            ),
+            (
+                "blocking_queue_depth",
+                "blocking_queue_depth",
+                "host_blocking_queue_depth",
+            ),
+        ] {
+            edit::redirect_call(
+                source,
+                edit::Scope::Method {
+                    owner: "RuntimeMetrics",
+                    name,
+                },
+                call,
+                replacement,
+            )?;
+        }
         for name in [
             "worker_total_busy_duration",
             "worker_park_count",
             "worker_park_unpark_count",
+            "worker_thread_id",
+            "poll_time_histogram_enabled",
+            "poll_time_histogram_num_buckets",
+            "poll_time_histogram_bucket_range",
+            "worker_noop_count",
+            "worker_steal_count",
+            "worker_steal_operations",
+            "worker_poll_count",
+            "worker_local_schedule_count",
+            "worker_overflow_count",
+            "poll_time_histogram_bucket_count",
+            "worker_mean_poll_time",
+            "schedule_latency_histogram_enabled",
+            "schedule_latency_histogram_num_buckets",
+            "schedule_latency_histogram_bucket_range",
+            "schedule_latency_histogram_bucket_count",
         ] {
             edit::redirect_call(
                 source,
@@ -888,7 +1034,42 @@ fn patch_runtime_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
                 "host_worker_metrics",
             )?;
         }
-        Ok(())
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "RuntimeMetrics",
+                name: "remote_schedule_count",
+            },
+            "scheduler_metrics",
+            "host_scheduler_metrics",
+        )?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "RuntimeMetrics",
+                name: "with_io_driver_metrics",
+            },
+            "#[expect(dead_code)]",
+        )?;
+        for (name, replacement) in [
+            ("io_driver_fd_registered_count", "host_io_driver_registered"),
+            (
+                "io_driver_fd_deregistered_count",
+                "host_io_driver_deregistered",
+            ),
+            ("io_driver_ready_count", "host_io_driver_ready"),
+        ] {
+            edit::redirect_call(
+                source,
+                edit::Scope::Method {
+                    owner: "RuntimeMetrics",
+                    name,
+                },
+                "with_io_driver_metrics",
+                replacement,
+            )?;
+        }
+        mount(source, "telekio", "runtime_metrics.rs")
     })
 }
 

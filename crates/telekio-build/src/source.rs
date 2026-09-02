@@ -49,7 +49,14 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
     let helpers = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/host");
     for (target, helper, visibility, attribute) in [
         ("src/runtime/builder.rs", "builder.rs", None, None),
+        ("src/runtime/handle.rs", "handle.rs", None, None),
         ("src/runtime/id.rs", "id.rs", None, None),
+        (
+            "src/runtime/metrics/histogram.rs",
+            "histogram.rs",
+            None,
+            Some("#[cfg(tokio_unstable)]"),
+        ),
         (
             "src/runtime/io/registration.rs",
             "registration.rs",
@@ -92,6 +99,61 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
         }
         fs::write(target, contents)?;
     }
+
+    let target = source.join("src/runtime/scheduler/multi_thread/handle.rs");
+    let mut contents = fs::read_to_string(&target)?;
+    edit::append_fields(
+        &mut contents,
+        "Handle",
+        &[edit::Field {
+            visibility: Some("pub(crate)"),
+            name: "telekio",
+            ty: "super::worker::telekio::WorkerObservers",
+        }],
+    )?;
+    fs::write(target, contents)?;
+
+    let helper = helpers.join("worker.rs");
+    println!("cargo::rerun-if-changed={}", helper.display());
+    let target = source.join("src/runtime/scheduler/multi_thread/worker.rs");
+    let mut contents = fs::read_to_string(&target)?;
+    edit::mount_module(&mut contents, Some("pub(crate)"), "telekio", &helper)?;
+    edit::append_record_fields(
+        &mut contents,
+        edit::Scope::Function("create"),
+        "Handle",
+        &[edit::FieldInit {
+            name: "telekio",
+            value: "telekio::WorkerObservers::new(size)",
+        }],
+    )?;
+    edit::redirect_call(
+        &mut contents,
+        edit::Scope::Method {
+            owner: "Context",
+            name: "run",
+        },
+        "assert_lifo_enabled_is_correct",
+        "telekio_tick",
+    )?;
+    edit::redirect_call(
+        &mut contents,
+        edit::Scope::Method {
+            owner: "Context",
+            name: "run",
+        },
+        "park",
+        "telekio_park",
+    )?;
+    edit::delegate_closure(
+        &mut contents,
+        edit::Scope::Function("run"),
+        edit::Call::Function("crate::runtime::context::enter_runtime"),
+        2,
+        "telekio::enter_worker",
+        &["worker.clone()"],
+    )?;
+    fs::write(target, contents)?;
     Ok(())
 }
 

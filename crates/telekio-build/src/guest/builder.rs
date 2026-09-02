@@ -136,6 +136,26 @@ impl Builder {
                     0
                 }
             },
+            poll_histogram: {
+                #[cfg(tokio_unstable)]
+                {
+                    histogram(self.metrics_poll_count_histogram_builder())
+                }
+                #[cfg(not(tokio_unstable))]
+                {
+                    ::telekio::HistogramConfig::disabled()
+                }
+            },
+            schedule_histogram: {
+                #[cfg(tokio_unstable)]
+                {
+                    histogram(self.metrics_schedule_latency_histogram_builder())
+                }
+                #[cfg(not(tokio_unstable))]
+                {
+                    ::telekio::HistogramConfig::disabled()
+                }
+            },
         });
         // Tokio's LocalRuntime keeps this value on its originating thread.
         unsafe { result.into_runtime() }.map(|(runtime, _)| runtime)
@@ -194,6 +214,15 @@ unsafe extern "C" fn enter_guest_context(
         Ok(result) => result,
         Err(payload) => ::telekio::CallResult::panicked(&*payload),
     }
+}
+
+#[cfg(tokio_unstable)]
+fn histogram(builder: Option<HistogramBuilder>) -> ::telekio::HistogramConfig {
+    let Some(builder) = builder else {
+        return ::telekio::HistogramConfig::disabled();
+    };
+    let (kind, a, b, c) = builder.telekio_parts();
+    ::telekio::HistogramConfig { kind, a, b, c }
 }
 
 #[cfg(not(test))]

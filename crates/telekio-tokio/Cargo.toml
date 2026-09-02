@@ -61,6 +61,7 @@ process = [
 ]
 rt = []
 rt-multi-thread = ["rt"]
+schedule-latency = []
 signal = [
     "libc",
     "mio/os-poll",

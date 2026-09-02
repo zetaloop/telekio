@@ -1,6 +1,6 @@
 use crate::{
     BuildResult, ClockSample, DurationParts, InstantOffset, IoInterest, IoResource, IoResult,
-    RuntimeConfig, Shutdown, SignalRequest, SignalResult, TimerResult,
+    RuntimeConfig, Shutdown, SignalRequest, SignalResult, TimerResult, WorkerCallback,
 };
 
 use std::{
@@ -89,10 +89,11 @@ pub struct RuntimeApi {
     pub reap_process: unsafe extern "C" fn(*const c_void, u32) -> CallResult,
     pub shutdown: unsafe extern "C" fn(*mut c_void, Shutdown, u64, u32) -> CallResult,
     pub defer: unsafe extern "C" fn(*const c_void, *const Waker) -> CallResult,
-    pub metric: unsafe extern "C" fn(*const c_void, Metric, usize) -> MetricResult,
+    pub metric: unsafe extern "C" fn(*const c_void, Metric, usize, usize) -> MetricResult,
     pub flavor: unsafe extern "C" fn(*const c_void) -> crate::Flavor,
     pub id: unsafe extern "C" fn(*const c_void) -> u64,
     pub name: unsafe extern "C" fn(*const c_void) -> NameResult,
+    pub observe_workers: unsafe extern "C" fn(*const c_void, WorkerCallback) -> CallResult,
 }
 
 #[repr(C)]
@@ -118,6 +119,32 @@ pub enum Metric {
     WorkerParkCount,
     WorkerParkUnparkCount,
     NumWorkers,
+    NumBlockingThreads,
+    NumIdleBlockingThreads,
+    WorkerLocalQueueDepth,
+    BlockingQueueDepth,
+    RemoteScheduleCount,
+    WorkerNoopCount,
+    WorkerStealCount,
+    WorkerStealOperations,
+    WorkerPollCount,
+    WorkerLocalScheduleCount,
+    WorkerOverflowCount,
+    PollTimeHistogramEnabled,
+    PollTimeHistogramNumBuckets,
+    PollTimeHistogramRangeStart,
+    PollTimeHistogramRangeEnd,
+    PollTimeHistogramBucketCount,
+    WorkerMeanPollTime,
+    ScheduleLatencyHistogramEnabled,
+    ScheduleLatencyHistogramNumBuckets,
+    ScheduleLatencyHistogramRangeStart,
+    ScheduleLatencyHistogramRangeEnd,
+    ScheduleLatencyHistogramBucketCount,
+    IoDriverFdRegisteredCount,
+    IoDriverFdDeregisteredCount,
+    IoDriverReadyCount,
+    CurrentWorkerIndex,
 }
 
 #[repr(C)]
@@ -569,7 +596,13 @@ impl Handle {
     #[doc(hidden)]
     #[track_caller]
     pub fn metric(&self, metric: Metric, worker: usize) -> u64 {
-        let result = unsafe { ((*self.raw.api).metric)(self.raw.context, metric, worker) };
+        self.metric_bucket(metric, worker, 0)
+    }
+
+    #[doc(hidden)]
+    #[track_caller]
+    pub fn metric_bucket(&self, metric: Metric, worker: usize, bucket: usize) -> u64 {
+        let result = unsafe { ((*self.raw.api).metric)(self.raw.context, metric, worker, bucket) };
         result.call.into_io_result().unwrap();
         result.value
     }
@@ -594,6 +627,11 @@ impl Handle {
             unsafe { result.value.release() };
             None
         }
+    }
+
+    #[doc(hidden)]
+    pub fn observe_workers(&self, callback: WorkerCallback) -> CallResult {
+        unsafe { ((*self.raw.api).observe_workers)(self.raw.context, callback) }
     }
 
     pub fn block_in_place(&self, blocking: Blocking) -> CallResult {

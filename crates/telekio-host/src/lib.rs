@@ -22,7 +22,7 @@ use telekio::{
     AttachResult, Blocking, BuildResult, CallResult, Callback, ClockSample, DurationParts, Flavor,
     GuestCall, InstantOffset, Metric, MetricResult, NameResult, OperationPoll, OwnedBytes, Poll,
     RawAttachment, RawHandle, RawRuntime, RuntimeApi, RuntimeConfig, Shutdown, Status,
-    StringCallback, Timer, TimerResult, Waker,
+    StringCallback, Timer, TimerResult, Waker, WorkerCallback,
 };
 
 pub struct Runtime {
@@ -68,6 +68,7 @@ struct HandleContext {
     flavor: Flavor,
     local: Option<Arc<LocalSlot>>,
     io_enabled: bool,
+    worker_observer: Mutex<Option<WorkerObserver>>,
 }
 
 struct LocalSlot {
@@ -117,6 +118,16 @@ struct Activity {
     id: u64,
     _context: OwnerContext,
 }
+
+struct WorkerObserver {
+    handle: tokio::runtime::Handle,
+    id: Option<u64>,
+}
+
+struct WorkerCallbackOwner(WorkerCallback);
+
+unsafe impl Send for WorkerCallbackOwner {}
+unsafe impl Sync for WorkerCallbackOwner {}
 
 struct OwnerContext {
     previous: *const OwnerState,
@@ -181,6 +192,7 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     flavor,
     id,
     name,
+    observe_workers,
 };
 
 impl Runtime {
@@ -738,6 +750,18 @@ impl CallbackOwner {
     }
 }
 
+impl WorkerCallbackOwner {
+    fn call(&self, worker: usize) -> CallResult {
+        self.0.call(worker)
+    }
+}
+
+impl Drop for WorkerObserver {
+    fn drop(&mut self) {
+        self.handle.telekio_remove_worker_observer(self.id);
+    }
+}
+
 impl StringCallbackOwner {
     fn call(&self) -> String {
         let result = self.0.call();
@@ -813,16 +837,52 @@ unsafe extern "C" fn defer(context: *const c_void, waker: *const Waker) -> CallR
     }
 }
 
-unsafe extern "C" fn metric(context: *const c_void, metric: Metric, worker: usize) -> MetricResult {
+unsafe extern "C" fn metric(
+    context: *const c_void,
+    metric: Metric,
+    worker: usize,
+    bucket: usize,
+) -> MetricResult {
     match catch_unwind(AssertUnwindSafe(|| {
         let context = unsafe { &*context.cast::<HandleContext>() };
         context.owner.accepting()?;
         let metrics = context.handle.metrics();
         #[cfg(not(target_has_atomic = "64"))]
-        let _ = worker;
+        let _ = (worker, bucket);
         Ok::<_, String>(match metric {
             Metric::GlobalQueueDepth => metrics.global_queue_depth() as u64,
             Metric::NumWorkers => metrics.num_workers() as u64,
+            Metric::NumBlockingThreads => metrics.num_blocking_threads() as u64,
+            Metric::NumIdleBlockingThreads => metrics.num_idle_blocking_threads() as u64,
+            Metric::WorkerLocalQueueDepth => metrics.worker_local_queue_depth(worker) as u64,
+            Metric::BlockingQueueDepth => metrics.blocking_queue_depth() as u64,
+            Metric::PollTimeHistogramEnabled => metrics.poll_time_histogram_enabled().into(),
+            Metric::PollTimeHistogramNumBuckets => metrics.poll_time_histogram_num_buckets() as u64,
+            Metric::PollTimeHistogramRangeStart => metrics
+                .poll_time_histogram_bucket_range(bucket)
+                .start
+                .as_nanos() as u64,
+            Metric::PollTimeHistogramRangeEnd => metrics
+                .poll_time_histogram_bucket_range(bucket)
+                .end
+                .as_nanos() as u64,
+            Metric::ScheduleLatencyHistogramEnabled => {
+                metrics.schedule_latency_histogram_enabled().into()
+            }
+            Metric::ScheduleLatencyHistogramNumBuckets => {
+                metrics.schedule_latency_histogram_num_buckets() as u64
+            }
+            Metric::ScheduleLatencyHistogramRangeStart => metrics
+                .schedule_latency_histogram_bucket_range(bucket)
+                .start
+                .as_nanos() as u64,
+            Metric::ScheduleLatencyHistogramRangeEnd => metrics
+                .schedule_latency_histogram_bucket_range(bucket)
+                .end
+                .as_nanos() as u64,
+            Metric::CurrentWorkerIndex => tokio::runtime::worker_index()
+                .map(|worker| worker as u64 + 1)
+                .unwrap_or_default(),
             Metric::WorkerTotalBusyDuration => {
                 #[cfg(target_has_atomic = "64")]
                 {
@@ -847,6 +907,136 @@ unsafe extern "C" fn metric(context: *const c_void, metric: Metric, worker: usiz
                 #[cfg(target_has_atomic = "64")]
                 {
                     metrics.worker_park_unpark_count(worker)
+                }
+                #[cfg(not(target_has_atomic = "64"))]
+                {
+                    0
+                }
+            }
+            Metric::RemoteScheduleCount => {
+                #[cfg(target_has_atomic = "64")]
+                {
+                    metrics.remote_schedule_count()
+                }
+                #[cfg(not(target_has_atomic = "64"))]
+                {
+                    0
+                }
+            }
+            Metric::WorkerNoopCount => {
+                #[cfg(target_has_atomic = "64")]
+                {
+                    metrics.worker_noop_count(worker)
+                }
+                #[cfg(not(target_has_atomic = "64"))]
+                {
+                    0
+                }
+            }
+            Metric::WorkerStealCount => {
+                #[cfg(target_has_atomic = "64")]
+                {
+                    metrics.worker_steal_count(worker)
+                }
+                #[cfg(not(target_has_atomic = "64"))]
+                {
+                    0
+                }
+            }
+            Metric::WorkerStealOperations => {
+                #[cfg(target_has_atomic = "64")]
+                {
+                    metrics.worker_steal_operations(worker)
+                }
+                #[cfg(not(target_has_atomic = "64"))]
+                {
+                    0
+                }
+            }
+            Metric::WorkerPollCount => {
+                #[cfg(target_has_atomic = "64")]
+                {
+                    metrics.worker_poll_count(worker)
+                }
+                #[cfg(not(target_has_atomic = "64"))]
+                {
+                    0
+                }
+            }
+            Metric::WorkerLocalScheduleCount => {
+                #[cfg(target_has_atomic = "64")]
+                {
+                    metrics.worker_local_schedule_count(worker)
+                }
+                #[cfg(not(target_has_atomic = "64"))]
+                {
+                    0
+                }
+            }
+            Metric::WorkerOverflowCount => {
+                #[cfg(target_has_atomic = "64")]
+                {
+                    metrics.worker_overflow_count(worker)
+                }
+                #[cfg(not(target_has_atomic = "64"))]
+                {
+                    0
+                }
+            }
+            Metric::PollTimeHistogramBucketCount => {
+                #[cfg(target_has_atomic = "64")]
+                {
+                    metrics.poll_time_histogram_bucket_count(worker, bucket)
+                }
+                #[cfg(not(target_has_atomic = "64"))]
+                {
+                    0
+                }
+            }
+            Metric::WorkerMeanPollTime => {
+                #[cfg(target_has_atomic = "64")]
+                {
+                    metrics.worker_mean_poll_time(worker).as_nanos() as u64
+                }
+                #[cfg(not(target_has_atomic = "64"))]
+                {
+                    0
+                }
+            }
+            Metric::ScheduleLatencyHistogramBucketCount => {
+                #[cfg(target_has_atomic = "64")]
+                {
+                    metrics.schedule_latency_histogram_bucket_count(worker, bucket)
+                }
+                #[cfg(not(target_has_atomic = "64"))]
+                {
+                    0
+                }
+            }
+            Metric::IoDriverFdRegisteredCount => {
+                #[cfg(target_has_atomic = "64")]
+                {
+                    metrics.io_driver_fd_registered_count()
+                }
+                #[cfg(not(target_has_atomic = "64"))]
+                {
+                    0
+                }
+            }
+            Metric::IoDriverFdDeregisteredCount => {
+                #[cfg(target_has_atomic = "64")]
+                {
+                    metrics.io_driver_fd_deregistered_count()
+                }
+                #[cfg(not(target_has_atomic = "64"))]
+                {
+                    0
+                }
+            }
+            Metric::IoDriverReadyCount => {
+                #[cfg(target_has_atomic = "64")]
+                {
+                    metrics.io_driver_ready_count()
                 }
                 #[cfg(not(target_has_atomic = "64"))]
                 {
@@ -903,6 +1093,45 @@ unsafe extern "C" fn name(context: *const c_void) -> NameResult {
             value: OwnedBytes::empty(),
             is_some: false,
         },
+    }
+}
+
+unsafe extern "C" fn observe_workers(
+    context: *const c_void,
+    callback: WorkerCallback,
+) -> CallResult {
+    match catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let context = unsafe { &*context.cast::<HandleContext>() };
+        let _activity = context.owner.activity()?;
+        let mut observer = context.worker_observer.lock().unwrap();
+        if observer.is_some() {
+            return Err("Tokio worker observer is already installed".to_owned());
+        }
+        if !matches!(context.flavor, Flavor::MultiThread) {
+            drop(callback);
+            return Ok(());
+        }
+        let callback = Arc::new(WorkerCallbackOwner(callback));
+        let owner = Arc::clone(&context.owner);
+        let id = context
+            .handle
+            .telekio_add_worker_observer(Arc::new(move |worker| {
+                let Some(_activity) = owner.callback(std::task::Waker::noop().clone()) else {
+                    return;
+                };
+                callback
+                    .call(worker)
+                    .resume("failed to record Tokio worker thread");
+            }));
+        *observer = Some(WorkerObserver {
+            handle: context.handle.clone(),
+            id,
+        });
+        Ok(())
+    })) {
+        Ok(Ok(())) => CallResult::ok(),
+        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
+        Err(payload) => host_panic(&*payload),
     }
 }
 
@@ -1260,6 +1489,18 @@ fn build_runtime(
     if config.alternative_timer != 0 {
         builder.telekio_enable_alt_timer();
     }
+    builder.telekio_poll_histogram(
+        config.poll_histogram.kind,
+        config.poll_histogram.a,
+        config.poll_histogram.b,
+        config.poll_histogram.c,
+    );
+    builder.telekio_schedule_histogram(
+        config.schedule_histogram.kind,
+        config.schedule_histogram.a,
+        config.schedule_histogram.b,
+        config.schedule_histogram.c,
+    );
     if !config.name.is_empty() {
         builder.name(unsafe { config.name.as_str() });
     }
@@ -1321,6 +1562,7 @@ fn handle_context(
         local,
         io_enabled,
         flavor,
+        worker_observer: Mutex::new(None),
     })
 }
 

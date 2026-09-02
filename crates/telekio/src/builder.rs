@@ -44,6 +44,16 @@ unsafe impl Send for Callback {}
 unsafe impl Sync for Callback {}
 
 #[repr(C)]
+pub struct WorkerCallback {
+    data: *const c_void,
+    call: unsafe extern "C" fn(*const c_void, usize) -> CallResult,
+    release: unsafe extern "C" fn(*const c_void) -> CallResult,
+}
+
+unsafe impl Send for WorkerCallback {}
+unsafe impl Sync for WorkerCallback {}
+
+#[repr(C)]
 pub struct StringCallback {
     data: *const c_void,
     call: unsafe extern "C" fn(*const c_void) -> CallResult,
@@ -52,6 +62,15 @@ pub struct StringCallback {
 
 unsafe impl Send for StringCallback {}
 unsafe impl Sync for StringCallback {}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct HistogramConfig {
+    pub kind: u8,
+    pub a: u64,
+    pub b: u64,
+    pub c: u64,
+}
 
 #[repr(C)]
 pub struct RuntimeConfig {
@@ -78,6 +97,8 @@ pub struct RuntimeConfig {
     pub disable_lifo_slot: u8,
     pub eager_driver_handoff: u8,
     pub alternative_timer: u8,
+    pub poll_histogram: HistogramConfig,
+    pub schedule_histogram: HistogramConfig,
 }
 
 #[repr(C)]
@@ -85,6 +106,18 @@ pub struct BuildResult {
     call: CallResult,
     runtime: RawRuntime,
     workers: usize,
+}
+
+impl HistogramConfig {
+    #[doc(hidden)]
+    pub const fn disabled() -> Self {
+        Self {
+            kind: 0,
+            a: 0,
+            b: 0,
+            c: 0,
+        }
+    }
 }
 
 impl BuildResult {
@@ -187,6 +220,27 @@ impl Drop for Callback {
     }
 }
 
+impl WorkerCallback {
+    pub fn from_arc(callback: Arc<dyn Fn(usize) + Send + Sync>) -> Self {
+        Self {
+            data: Box::into_raw(Box::new(callback)).cast(),
+            call: call_worker_callback,
+            release: release_worker_callback,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn call(&self, worker: usize) -> CallResult {
+        unsafe { (self.call)(self.data, worker) }
+    }
+}
+
+impl Drop for WorkerCallback {
+    fn drop(&mut self) {
+        unsafe { (self.release)(self.data) }.resume("failed to release Tokio worker callback");
+    }
+}
+
 impl StringCallback {
     pub fn from_arc(callback: Arc<dyn Fn() -> String + Send + Sync>) -> Self {
         Self {
@@ -227,6 +281,23 @@ unsafe extern "C" fn call_callback(data: *const c_void) -> CallResult {
 unsafe extern "C" fn release_callback(data: *const c_void) -> CallResult {
     match catch_unwind(AssertUnwindSafe(|| {
         drop(unsafe { Box::from_raw(data.cast_mut().cast::<Arc<dyn Fn() + Send + Sync>>()) });
+    })) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => CallResult::panicked(&*payload),
+    }
+}
+
+unsafe extern "C" fn call_worker_callback(data: *const c_void, worker: usize) -> CallResult {
+    let callback = unsafe { &*data.cast::<Arc<dyn Fn(usize) + Send + Sync>>() };
+    match catch_unwind(AssertUnwindSafe(|| callback(worker))) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => CallResult::panicked(&*payload),
+    }
+}
+
+unsafe extern "C" fn release_worker_callback(data: *const c_void) -> CallResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        drop(unsafe { Box::from_raw(data.cast_mut().cast::<Arc<dyn Fn(usize) + Send + Sync>>()) });
     })) {
         Ok(()) => CallResult::ok(),
         Err(payload) => CallResult::panicked(&*payload),

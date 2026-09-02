@@ -53,6 +53,20 @@ impl<F: Future> Future for Active<F> {
     }
 }
 
+#[cfg(tokio_unstable)]
+pub(super) fn worker_index<F>(
+    _: F,
+) -> impl FnOnce(Option<&crate::runtime::scheduler::Context>) -> Option<usize>
+where
+    F: FnOnce(Option<&crate::runtime::scheduler::Context>) -> Option<usize>,
+{
+    move |_| {
+        super::with_current(|handle| handle.host().worker_index())
+            .ok()
+            .flatten()
+    }
+}
+
 #[cfg(feature = "rt")]
 pub(crate) fn defer(waker: &std::task::Waker) {
     if ACTIVE.get() == 0 {

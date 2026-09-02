@@ -34,6 +34,8 @@ impl Handle {
 
     fn run_host_task(self: &Arc<Self>, task: task::Notified<Arc<Self>>) {
         #[cfg(tokio_unstable)]
+        self.telekio.host().record_worker();
+        #[cfg(tokio_unstable)]
         let task_meta = task.task_meta();
         #[cfg(tokio_unstable)]
         self.task_hooks.poll_start_callback(&task_meta);

@@ -26,6 +26,15 @@ pub(crate) struct Host {
     panicked: AtomicBool,
     #[cfg(tokio_unstable)]
     roots: Mutex<Vec<std::sync::Weak<RootState>>>,
+    #[cfg(tokio_unstable)]
+    workers: Arc<Workers>,
+    #[cfg(tokio_unstable)]
+    observing: OnceLock<()>,
+}
+
+#[cfg(tokio_unstable)]
+struct Workers {
+    threads: Mutex<Vec<Option<std::thread::ThreadId>>>,
 }
 
 pub(crate) struct Registry<S: HostSchedule> {
@@ -83,11 +92,33 @@ impl<F: Future> Future for Root<'_, F> {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
+        this.host.record_worker();
         *this.state.waker.lock().unwrap() = Some(context.waker().clone());
         this.host.check_panic();
         let result = unsafe { Pin::new_unchecked(&mut this.future) }.poll(context);
         this.host.check_panic();
         result
+    }
+}
+
+#[cfg(tokio_unstable)]
+impl Workers {
+    fn new() -> Self {
+        Self {
+            threads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn store(&self, worker: usize) {
+        let mut threads = self.threads.lock().unwrap();
+        if threads.len() <= worker {
+            threads.resize(worker + 1, None);
+        }
+        threads[worker] = Some(std::thread::current().id());
+    }
+
+    fn get(&self, worker: usize) -> Option<std::thread::ThreadId> {
+        self.threads.lock().unwrap().get(worker).copied().flatten()
     }
 }
 
@@ -100,19 +131,28 @@ impl Host {
             panicked: AtomicBool::new(false),
             #[cfg(tokio_unstable)]
             roots: Mutex::new(Vec::new()),
+            #[cfg(tokio_unstable)]
+            workers: Arc::new(Workers::new()),
+            #[cfg(tokio_unstable)]
+            observing: OnceLock::new(),
         })
     }
 
     #[cfg(not(test))]
     pub(crate) fn attached(handle: ::telekio::Handle) -> Arc<Self> {
-        Arc::new(Self {
+        let host = Arc::new(Self {
             runtime: None,
             handle,
             #[cfg(tokio_unstable)]
             panicked: AtomicBool::new(false),
             #[cfg(tokio_unstable)]
             roots: Mutex::new(Vec::new()),
-        })
+            #[cfg(tokio_unstable)]
+            workers: Arc::new(Workers::new()),
+            #[cfg(tokio_unstable)]
+            observing: OnceLock::new(),
+        });
+        host
     }
 
     pub(crate) fn defer(&self, waker: &::telekio::Waker) -> ::telekio::CallResult {
@@ -121,6 +161,60 @@ impl Host {
 
     pub(crate) fn metric(&self, metric: ::telekio::Metric, worker: usize) -> u64 {
         self.handle.metric(metric, worker)
+    }
+
+    #[cfg(tokio_unstable)]
+    pub(crate) fn metric_bucket(
+        &self,
+        metric: ::telekio::Metric,
+        worker: usize,
+        bucket: usize,
+    ) -> u64 {
+        self.handle.metric_bucket(metric, worker, bucket)
+    }
+
+    #[cfg(tokio_unstable)]
+    pub(crate) fn worker_index(&self) -> Option<usize> {
+        usize::try_from(
+            self.metric(::telekio::Metric::CurrentWorkerIndex, 0)
+                .checked_sub(1)?,
+        )
+        .ok()
+    }
+
+    #[cfg(tokio_unstable)]
+    fn observe_workers(self: &Arc<Self>) {
+        self.observing.get_or_init(|| {
+            let workers = Arc::clone(&self.workers);
+            let callback = ::telekio::WorkerCallback::from_arc(Arc::new(move |worker| {
+                workers.store(worker);
+            }));
+            self.handle
+                .observe_workers(callback)
+                .resume("failed to observe Tokio worker threads");
+        });
+    }
+
+    #[cfg(tokio_unstable)]
+    pub(crate) fn record_worker(&self) {
+        if let Some(worker) = self.worker_index() {
+            self.store_worker(worker);
+        }
+    }
+
+    #[cfg(tokio_unstable)]
+    fn store_worker(&self, worker: usize) {
+        self.workers.store(worker);
+    }
+
+    #[cfg(tokio_unstable)]
+    pub(crate) fn worker_thread_id(
+        self: &Arc<Self>,
+        worker: usize,
+    ) -> Option<std::thread::ThreadId> {
+        assert!(worker < self.metric(::telekio::Metric::NumWorkers, 0) as usize);
+        self.observe_workers();
+        self.workers.get(worker)
     }
 
     pub(crate) fn flavor(&self) -> ::telekio::Flavor {
