@@ -20,9 +20,9 @@ use std::{
 
 use telekio::{
     AttachResult, Blocking, BuildResult, CallResult, Callback, ClockSample, DurationParts, Flavor,
-    GuestCall, InstantOffset, Metric, MetricResult, OperationPoll, OwnedBytes, Poll, RawAttachment,
-    RawHandle, RawRuntime, RuntimeApi, RuntimeConfig, Shutdown, Status, StringCallback, Timer,
-    TimerResult, Waker,
+    GuestCall, InstantOffset, Metric, MetricResult, NameResult, OperationPoll, OwnedBytes, Poll,
+    RawAttachment, RawHandle, RawRuntime, RuntimeApi, RuntimeConfig, Shutdown, Status,
+    StringCallback, Timer, TimerResult, Waker,
 };
 
 pub struct Runtime {
@@ -180,6 +180,8 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     defer,
     metric,
     flavor,
+    id,
+    name,
 };
 
 impl Runtime {
@@ -871,6 +873,38 @@ unsafe extern "C" fn metric(context: *const c_void, metric: Metric, worker: usiz
 
 unsafe extern "C" fn flavor(context: *const c_void) -> Flavor {
     unsafe { &*context.cast::<HandleContext>() }.flavor
+}
+
+unsafe extern "C" fn id(context: *const c_void) -> u64 {
+    unsafe { &*context.cast::<HandleContext>() }
+        .handle
+        .id()
+        .telekio_value()
+}
+
+unsafe extern "C" fn name(context: *const c_void) -> NameResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        unsafe { &*context.cast::<HandleContext>() }
+            .handle
+            .name()
+            .map(str::to_owned)
+    })) {
+        Ok(Some(value)) => NameResult {
+            call: CallResult::ok(),
+            value: OwnedBytes::from_string(value),
+            is_some: true,
+        },
+        Ok(None) => NameResult {
+            call: CallResult::ok(),
+            value: OwnedBytes::empty(),
+            is_some: false,
+        },
+        Err(payload) => NameResult {
+            call: host_panic(&*payload),
+            value: OwnedBytes::empty(),
+            is_some: false,
+        },
+    }
 }
 
 unsafe extern "C" fn block_in_place(context: *const c_void, blocking: Blocking) -> CallResult {

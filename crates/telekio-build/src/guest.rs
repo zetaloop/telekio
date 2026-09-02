@@ -165,6 +165,7 @@ fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             "schedule",
             "schedule_local",
         )?;
+        edit::rename_method(source, "Handle", "owned_id", "owned_id_inner")?;
         mount(source, "telekio", "current_thread.rs")
     })
 }
@@ -185,6 +186,7 @@ fn patch_inject(path: &Path) -> Result<(), Box<dyn Error>> {
 
 fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(&path.join("handle.rs"), |source| {
+        edit::rename_method(source, "Handle", "owned_id", "owned_id_inner")?;
         edit::append_fields(
             source,
             "Handle",

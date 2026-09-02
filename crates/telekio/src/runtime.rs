@@ -91,6 +91,8 @@ pub struct RuntimeApi {
     pub defer: unsafe extern "C" fn(*const c_void, *const Waker) -> CallResult,
     pub metric: unsafe extern "C" fn(*const c_void, Metric, usize) -> MetricResult,
     pub flavor: unsafe extern "C" fn(*const c_void) -> crate::Flavor,
+    pub id: unsafe extern "C" fn(*const c_void) -> u64,
+    pub name: unsafe extern "C" fn(*const c_void) -> NameResult,
 }
 
 #[repr(C)]
@@ -122,6 +124,13 @@ pub enum Metric {
 pub struct MetricResult {
     pub call: CallResult,
     pub value: u64,
+}
+
+#[repr(C)]
+pub struct NameResult {
+    pub call: CallResult,
+    pub value: OwnedBytes,
+    pub is_some: bool,
 }
 
 #[repr(C)]
@@ -568,6 +577,23 @@ impl Handle {
     #[doc(hidden)]
     pub fn flavor(&self) -> crate::Flavor {
         unsafe { ((*self.raw.api).flavor)(self.raw.context) }
+    }
+
+    #[doc(hidden)]
+    pub fn id(&self) -> u64 {
+        unsafe { ((*self.raw.api).id)(self.raw.context) }
+    }
+
+    #[doc(hidden)]
+    pub fn name(&self) -> Option<String> {
+        let result = unsafe { ((*self.raw.api).name)(self.raw.context) };
+        result.call.resume("failed to read Tokio runtime name");
+        if result.is_some {
+            Some(unsafe { result.value.into_string() })
+        } else {
+            unsafe { result.value.release() };
+            None
+        }
     }
 
     pub fn block_in_place(&self, blocking: Blocking) -> CallResult {

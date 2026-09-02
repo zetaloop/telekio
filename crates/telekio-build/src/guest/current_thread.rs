@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::task::telekio::{Host, HostSchedule, Registry};
+use std::num::NonZeroU64;
 
 impl CurrentThread {
     #[track_caller]
@@ -15,6 +16,11 @@ impl CurrentThread {
 }
 
 impl Handle {
+    pub(crate) fn owned_id(&self) -> NonZeroU64 {
+        let _ = self.owned_id_inner();
+        NonZeroU64::new(self.telekio.host().id()).expect("invalid runtime ID")
+    }
+
     pub(crate) fn install(&self, host: Arc<Host>) {
         self.telekio.install(host);
     }

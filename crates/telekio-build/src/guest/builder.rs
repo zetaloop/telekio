@@ -2,7 +2,7 @@ use super::*;
 #[cfg(not(test))]
 use std::{
     ffi::c_void,
-    panic::{AssertUnwindSafe, catch_unwind},
+    panic::{catch_unwind, AssertUnwindSafe},
 };
 
 #[cfg(not(test))]
@@ -69,11 +69,11 @@ impl Builder {
     }
 
     #[cfg(not(test))]
-    fn build_attached_context(
-        &mut self,
-        handle: ::telekio::Handle,
-    ) -> io::Result<AttachedContext> {
+    fn build_attached_context(&mut self, handle: ::telekio::Handle) -> io::Result<AttachedContext> {
         let flavor = handle.flavor();
+        if let Some(name) = handle.name() {
+            self.name(name);
+        }
         self.enable_all();
         let runtime = self.build_current_thread_runtime()?;
         runtime.install_attached_host(handle);
@@ -132,7 +132,9 @@ impl Builder {
 
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub(super) unsafe extern "C" fn telekio_guest_context(raw: ::telekio::RawHandle) -> ::telekio::AttachResult {
+pub(super) unsafe extern "C" fn telekio_guest_context(
+    raw: ::telekio::RawHandle,
+) -> ::telekio::AttachResult {
     match catch_unwind(AssertUnwindSafe(|| {
         let handle = unsafe { ::telekio::Handle::from_abi(raw) };
         let mut builder = Builder::new_current_thread();

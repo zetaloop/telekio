@@ -89,6 +89,10 @@ impl Host {
         self.handle.flavor()
     }
 
+    pub(crate) fn id(&self) -> u64 {
+        self.handle.id()
+    }
+
     pub(crate) fn runtime_block_on<F: std::future::Future>(&self, future: F) -> F::Output {
         match &self.runtime {
             Some(runtime) => runtime.block_on(future),
