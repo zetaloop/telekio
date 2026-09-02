@@ -1,4 +1,15 @@
 use super::*;
+#[cfg(not(test))]
+use std::{
+    ffi::c_void,
+    panic::{AssertUnwindSafe, catch_unwind},
+};
+
+#[cfg(not(test))]
+struct AttachedContext {
+    runtime: Runtime,
+    flavor: ::telekio::Flavor,
+}
 
 #[cfg(not(any(telekio_host, feature = "telekio-test")))]
 fn attached() -> ::telekio::Handle {
@@ -28,7 +39,7 @@ pub(super) extern "C-unwind" fn telekio_default_handle() -> ::telekio::RawHandle
 #[cfg(any(telekio_host, feature = "telekio-test"))]
 fn attached() -> ::telekio::Handle {
     let handle = host_owner().runtime();
-    if let Err(handle) = ::telekio::attach(handle) {
+    if let Err(handle) = ::telekio::install_handle(handle) {
         drop(handle);
     }
     ::telekio::attached()
@@ -55,6 +66,18 @@ impl Builder {
         let runtime = self.build_threaded_runtime()?;
         runtime.install_host(host);
         Ok(runtime)
+    }
+
+    #[cfg(not(test))]
+    fn build_attached_context(
+        &mut self,
+        handle: ::telekio::Handle,
+    ) -> io::Result<AttachedContext> {
+        let flavor = handle.flavor();
+        self.enable_all();
+        let runtime = self.build_current_thread_runtime()?;
+        runtime.install_attached_host(handle);
+        Ok(AttachedContext { runtime, flavor })
     }
 
     fn build_host(&self, local: bool) -> io::Result<::telekio::Runtime> {
@@ -104,5 +127,68 @@ impl Builder {
         });
         // Tokio's LocalRuntime keeps this value on its originating thread.
         unsafe { result.into_runtime() }.map(|(runtime, _)| runtime)
+    }
+}
+
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn telekio_guest_context(raw: ::telekio::RawHandle) -> ::telekio::AttachResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let handle = unsafe { ::telekio::Handle::from_abi(raw) };
+        let mut builder = Builder::new_current_thread();
+        let runtime = builder
+            .build_attached_context(handle.clone())
+            .map_err(|error| error.to_string())?;
+        if let Err(handle) = ::telekio::install_handle(handle) {
+            drop(handle);
+            return Err("Telekio runtime is already attached".to_owned());
+        }
+        Ok(unsafe {
+            ::telekio::RawAttachment::from_raw(
+                Box::into_raw(Box::new(runtime)).cast(),
+                enter_guest_context,
+                detach_guest_context,
+            )
+        })
+    })) {
+        Ok(Ok(attachment)) => ::telekio::AttachResult {
+            call: ::telekio::CallResult::ok(),
+            attachment,
+        },
+        Ok(Err(error)) => ::telekio::AttachResult {
+            call: ::telekio::CallResult::error(&error),
+            attachment: ::telekio::RawAttachment::empty(),
+        },
+        Err(payload) => ::telekio::AttachResult {
+            call: ::telekio::CallResult::panicked(&*payload),
+            attachment: ::telekio::RawAttachment::empty(),
+        },
+    }
+}
+
+#[cfg(not(test))]
+unsafe extern "C" fn enter_guest_context(
+    data: *mut c_void,
+    call: ::telekio::GuestCall,
+) -> ::telekio::CallResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let context = unsafe { &*data.cast::<AttachedContext>() };
+        context
+            .runtime
+            .enter_attached(context.flavor, || unsafe { call.invoke() })
+    })) {
+        Ok(result) => result,
+        Err(payload) => ::telekio::CallResult::panicked(&*payload),
+    }
+}
+
+#[cfg(not(test))]
+unsafe extern "C" fn detach_guest_context(data: *mut c_void) -> ::telekio::CallResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        drop(unsafe { Box::from_raw(data.cast::<AttachedContext>()) });
+        unsafe { ::telekio::detach_attached() }
+    })) {
+        Ok(result) => result,
+        Err(payload) => ::telekio::CallResult::panicked(&*payload),
     }
 }

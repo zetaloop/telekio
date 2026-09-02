@@ -33,7 +33,16 @@ pub struct RawRuntime {
 
 #[repr(C)]
 pub struct RawAttachment {
-    detach: unsafe extern "C" fn() -> CallResult,
+    data: *mut c_void,
+    enter: unsafe extern "C" fn(*mut c_void, GuestCall) -> CallResult,
+    detach: unsafe extern "C" fn(*mut c_void) -> CallResult,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct GuestCall {
+    data: *mut c_void,
+    call: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 #[repr(C)]
@@ -52,6 +61,8 @@ pub struct Runtime {
 
 unsafe impl Send for Handle {}
 unsafe impl Sync for Handle {}
+unsafe impl Send for RawAttachment {}
+unsafe impl Sync for RawAttachment {}
 unsafe impl Send for Runtime {}
 unsafe impl Sync for Runtime {}
 
@@ -79,6 +90,7 @@ pub struct RuntimeApi {
     pub shutdown: unsafe extern "C" fn(*mut c_void, Shutdown, u64, u32) -> CallResult,
     pub defer: unsafe extern "C" fn(*const c_void, *const Waker) -> CallResult,
     pub metric: unsafe extern "C" fn(*const c_void, Metric, usize) -> MetricResult,
+    pub flavor: unsafe extern "C" fn(*const c_void) -> crate::Flavor,
 }
 
 #[repr(C)]
@@ -103,6 +115,7 @@ pub enum Metric {
     WorkerTotalBusyDuration,
     WorkerParkCount,
     WorkerParkUnparkCount,
+    NumWorkers,
 }
 
 #[repr(C)]
@@ -189,25 +202,65 @@ struct FutureState<F: RustFuture> {
 impl RawAttachment {
     pub const fn empty() -> Self {
         Self {
+            data: std::ptr::null_mut(),
+            enter: enter_empty,
             detach: detach_empty,
         }
     }
 
     /// # Safety
     ///
-    /// `detach` must remain callable until the attachment is detached.
+    /// `data` and the callbacks must describe one owned guest execution
+    /// context that remains valid until `detach` is called.
     #[doc(hidden)]
-    pub const unsafe fn from_raw(detach: unsafe extern "C" fn() -> CallResult) -> Self {
-        Self { detach }
+    pub const unsafe fn from_raw(
+        data: *mut c_void,
+        enter: unsafe extern "C" fn(*mut c_void, GuestCall) -> CallResult,
+        detach: unsafe extern "C" fn(*mut c_void) -> CallResult,
+    ) -> Self {
+        Self {
+            data,
+            enter,
+            detach,
+        }
     }
 
     /// # Safety
     ///
-    /// The plugin defining this callback must remain loaded, and its owner must
-    /// have completed shutdown.
+    /// The plugin defining these callbacks must remain loaded.
+    #[doc(hidden)]
+    pub unsafe fn enter(&self, call: GuestCall) -> CallResult {
+        unsafe { (self.enter)(self.data, call) }
+    }
+
+    /// # Safety
+    ///
+    /// The plugin defining these callbacks must remain loaded, and its owner
+    /// must have completed shutdown.
     #[doc(hidden)]
     pub unsafe fn detach(&self) -> CallResult {
-        unsafe { (self.detach)() }
+        unsafe { (self.detach)(self.data) }
+    }
+}
+
+impl GuestCall {
+    /// # Safety
+    ///
+    /// `data` must remain valid for one synchronous invocation of `call`.
+    #[doc(hidden)]
+    pub const unsafe fn from_raw(
+        data: *mut c_void,
+        call: unsafe extern "C" fn(*mut c_void) -> CallResult,
+    ) -> Self {
+        Self { data, call }
+    }
+
+    /// # Safety
+    ///
+    /// The backing call state must still be valid and may be invoked once.
+    #[doc(hidden)]
+    pub unsafe fn invoke(self) -> CallResult {
+        unsafe { (self.call)(self.data) }
     }
 }
 
@@ -377,7 +430,8 @@ impl RawRuntime {
     }
 }
 
-pub fn attach(handle: Handle) -> Result<(), Handle> {
+#[doc(hidden)]
+pub fn install_handle(handle: Handle) -> Result<(), Handle> {
     let mut attached = ATTACHED.lock().unwrap();
     if attached.is_some() {
         Err(handle)
@@ -387,45 +441,37 @@ pub fn attach(handle: Handle) -> Result<(), Handle> {
     }
 }
 
+#[cfg(feature = "guest")]
+unsafe extern "C" {
+    fn telekio_guest_context(raw: RawHandle) -> AttachResult;
+}
+
 /// # Safety
 ///
 /// `raw` must be one owned host handle reference returned by its host API.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn telekio_guest_attach(raw: RawHandle) -> AttachResult {
-    match catch_unwind(AssertUnwindSafe(|| {
-        let handle = unsafe { Handle::from_abi(raw) };
-        #[cfg(feature = "guest")]
-        {
-            attach(handle).map_err(|handle| {
-                drop(handle);
-                "Telekio runtime is already attached"
-            })?;
-            Ok(unsafe { RawAttachment::from_raw(telekio_guest_detach) })
-        }
-        #[cfg(not(feature = "guest"))]
-        {
-            drop(handle);
-            crate::require_package("This package");
-            Err("Telekio guest is not enabled")
-        }
-    })) {
-        Ok(Ok(attachment)) => AttachResult {
-            call: CallResult::ok(),
-            attachment,
-        },
-        Ok(Err(error)) => AttachResult {
-            call: CallResult::error(error),
+    #[cfg(feature = "guest")]
+    {
+        unsafe { telekio_guest_context(raw) }
+    }
+    #[cfg(not(feature = "guest"))]
+    {
+        drop(unsafe { Handle::from_abi(raw) });
+        crate::require_package("This package");
+        AttachResult {
+            call: CallResult::error("Telekio guest is not enabled"),
             attachment: RawAttachment::empty(),
-        },
-        Err(payload) => AttachResult {
-            call: CallResult::panicked(&*payload),
-            attachment: RawAttachment::empty(),
-        },
+        }
     }
 }
 
-#[cfg(feature = "guest")]
-unsafe extern "C" fn telekio_guest_detach() -> CallResult {
+/// # Safety
+///
+/// The guest execution context must have been released, and the attached host
+/// owner must have completed shutdown.
+#[doc(hidden)]
+pub unsafe fn detach_attached() -> CallResult {
     match catch_unwind(AssertUnwindSafe(|| {
         let handle = ATTACHED
             .lock()
@@ -459,7 +505,7 @@ pub fn attached() -> Handle {
         let raw = unsafe { telekio_default_handle() };
         if !raw.is_empty() {
             let handle = unsafe { Handle::from_abi(raw) };
-            if attach(handle).is_ok() {
+            if install_handle(handle).is_ok() {
                 return ATTACHED.lock().unwrap().as_ref().unwrap().clone();
             }
         }
@@ -517,6 +563,11 @@ impl Handle {
         let result = unsafe { ((*self.raw.api).metric)(self.raw.context, metric, worker) };
         result.call.into_io_result().unwrap();
         result.value
+    }
+
+    #[doc(hidden)]
+    pub fn flavor(&self) -> crate::Flavor {
+        unsafe { ((*self.raw.api).flavor)(self.raw.context) }
     }
 
     pub fn block_in_place(&self, blocking: Blocking) -> CallResult {
@@ -854,7 +905,11 @@ unsafe fn raw_drop(data: *const ()) {
     unsafe { (waker.release)(waker.data) }.resume("failed to release Tokio waker");
 }
 
-unsafe extern "C" fn detach_empty() -> CallResult {
+unsafe extern "C" fn enter_empty(_: *mut c_void, call: GuestCall) -> CallResult {
+    unsafe { call.invoke() }
+}
+
+unsafe extern "C" fn detach_empty(_: *mut c_void) -> CallResult {
     CallResult::ok()
 }
 

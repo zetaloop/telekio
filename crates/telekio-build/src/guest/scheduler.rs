@@ -39,6 +39,10 @@ impl Handle {
         self.host().metric(::telekio::Metric::GlobalQueueDepth, 0) as usize
     }
 
+    pub(crate) fn host_num_workers(&self) -> usize {
+        self.host().metric(::telekio::Metric::NumWorkers, 0) as usize
+    }
+
     #[cfg(target_has_atomic = "64")]
     pub(crate) fn host_worker_metrics(&self, worker: usize) -> HostWorkerMetrics {
         let metric = |metric| HostMetric {

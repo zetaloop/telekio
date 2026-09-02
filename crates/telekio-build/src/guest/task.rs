@@ -20,7 +20,7 @@ pub(crate) trait HostSchedule: Schedule + Clone + Send + Sync + 'static {
 }
 
 pub(crate) struct Host {
-    runtime: ::telekio::Runtime,
+    runtime: Option<::telekio::Runtime>,
     handle: ::telekio::Handle,
 }
 
@@ -65,7 +65,15 @@ impl Host {
     pub(crate) fn new(runtime: ::telekio::Runtime) -> Arc<Self> {
         Arc::new(Self {
             handle: runtime.handle(),
-            runtime,
+            runtime: Some(runtime),
+        })
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn attached(handle: ::telekio::Handle) -> Arc<Self> {
+        Arc::new(Self {
+            runtime: None,
+            handle,
         })
     }
 
@@ -77,8 +85,15 @@ impl Host {
         self.handle.metric(metric, worker)
     }
 
+    pub(crate) fn flavor(&self) -> ::telekio::Flavor {
+        self.handle.flavor()
+    }
+
     pub(crate) fn runtime_block_on<F: std::future::Future>(&self, future: F) -> F::Output {
-        self.runtime.block_on(future)
+        match &self.runtime {
+            Some(runtime) => runtime.block_on(future),
+            None => self.handle.block_on(future),
+        }
     }
 
     pub(crate) fn handle_block_on<F: std::future::Future>(&self, future: F) -> F::Output {
@@ -90,6 +105,7 @@ impl Host {
         self.handle.block_in_place(blocking)
     }
 
+    #[cfg(feature = "test-util")]
     pub(crate) fn now(&self) -> std::time::Instant {
         self.handle.now()
     }
@@ -134,10 +150,12 @@ impl Host {
 
     pub(crate) fn shutdown(&self, mode: ::telekio::Shutdown, duration: Option<Duration>) {
         let duration = duration.unwrap_or_default();
-        self.runtime
-            .shutdown(mode, duration.as_secs(), duration.subsec_nanos())
-            .into_io_result()
-            .expect("failed to shut down the Tokio runtime");
+        if let Some(runtime) = &self.runtime {
+            runtime
+                .shutdown(mode, duration.as_secs(), duration.subsec_nanos())
+                .into_io_result()
+                .expect("failed to shut down the Tokio runtime");
+        }
     }
 }
 

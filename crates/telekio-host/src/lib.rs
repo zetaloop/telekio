@@ -20,13 +20,14 @@ use std::{
 
 use telekio::{
     AttachResult, Blocking, BuildResult, CallResult, Callback, ClockSample, DurationParts, Flavor,
-    InstantOffset, Metric, MetricResult, OperationPoll, OwnedBytes, Poll, RawAttachment, RawHandle,
-    RawRuntime, RuntimeApi, RuntimeConfig, Shutdown, Status, StringCallback, Timer, TimerResult,
-    Waker,
+    GuestCall, InstantOffset, Metric, MetricResult, OperationPoll, OwnedBytes, Poll, RawAttachment,
+    RawHandle, RawRuntime, RuntimeApi, RuntimeConfig, Shutdown, Status, StringCallback, Timer,
+    TimerResult, Waker,
 };
 
 pub struct Runtime {
     runtime: Arc<tokio::runtime::Runtime>,
+    flavor: Flavor,
 }
 
 pub struct Owner {
@@ -41,6 +42,12 @@ pub type Attach = unsafe extern "C" fn(RawHandle) -> AttachResult;
 #[must_use = "the attachment must be shut down before unloading its plugin"]
 pub struct Attachment {
     raw: Option<RawAttachment>,
+    owner: Arc<OwnerState>,
+}
+
+struct GuestCallState<F, R> {
+    call: Option<F>,
+    output: Option<R>,
 }
 
 struct RuntimeOwner {
@@ -58,6 +65,7 @@ enum RuntimeKind {
 struct HandleContext {
     handle: tokio::runtime::Handle,
     owner: Arc<OwnerState>,
+    flavor: Flavor,
     local: Option<Arc<LocalSlot>>,
     io_enabled: bool,
 }
@@ -171,6 +179,7 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     shutdown,
     defer,
     metric,
+    flavor,
 };
 
 impl Runtime {
@@ -179,15 +188,27 @@ impl Runtime {
     }
 
     pub fn from_tokio(runtime: tokio::runtime::Runtime) -> Self {
+        let flavor = match runtime.handle().runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::CurrentThread => Flavor::CurrentThread,
+            tokio::runtime::RuntimeFlavor::MultiThread => Flavor::MultiThread,
+            _ => unreachable!("unsupported Tokio runtime flavor"),
+        };
         Self {
             runtime: Arc::new(runtime),
+            flavor,
         }
     }
 
     pub fn owner(&self) -> Owner {
         Owner {
             runtime: Arc::clone(&self.runtime),
-            handle: handle_context(self.runtime.handle().clone(), owner_state(), None, true),
+            handle: handle_context(
+                self.runtime.handle().clone(),
+                owner_state(),
+                None,
+                true,
+                self.flavor,
+            ),
         }
     }
 
@@ -220,17 +241,40 @@ impl Owner {
         result.call.into_io_result()?;
         Ok(Attachment {
             raw: Some(result.attachment),
+            owner: Arc::clone(&self.handle.owner),
         })
     }
 
     /// Stops this owner and detaches its plugin before the library is unloaded.
     pub async fn detach(&self, attachment: &mut Attachment) -> io::Result<()> {
+        if !Arc::ptr_eq(&self.handle.owner, &attachment.owner) {
+            return Err(io::Error::other(
+                "Telekio attachment belongs to another owner",
+            ));
+        }
         self.shutdown().await?;
         attachment.detach()
     }
 }
 
 impl Attachment {
+    /// Runs a plugin entry inside its attached Tokio runtime context.
+    pub fn enter<F: FnOnce() -> R, R>(&self, call: F) -> R {
+        let raw = self.raw.as_ref().expect("Telekio attachment is detached");
+        let activity = self
+            .owner
+            .activity()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut state = GuestCallState {
+            call: Some(call),
+            output: None,
+        };
+        let call = unsafe { GuestCall::from_raw((&raw mut state).cast(), run_guest_call::<F, R>) };
+        unsafe { raw.enter(call) }.resume("failed to enter Telekio guest runtime");
+        drop(activity);
+        state.output.take().expect("Telekio guest call did not run")
+    }
+
     fn detach(&mut self) -> io::Result<()> {
         let raw = self
             .raw
@@ -239,6 +283,17 @@ impl Attachment {
         unsafe { raw.detach() }.into_io_result()?;
         self.raw = None;
         Ok(())
+    }
+}
+
+unsafe extern "C" fn run_guest_call<F: FnOnce() -> R, R>(data: *mut c_void) -> CallResult {
+    let state = unsafe { &mut *data.cast::<GuestCallState<F, R>>() };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let call = state.call.take().expect("Telekio guest call ran twice");
+        state.output = Some(call());
+    })) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => CallResult::panicked(&*payload),
     }
 }
 
@@ -766,6 +821,7 @@ unsafe extern "C" fn metric(context: *const c_void, metric: Metric, worker: usiz
         let _ = worker;
         Ok::<_, String>(match metric {
             Metric::GlobalQueueDepth => metrics.global_queue_depth() as u64,
+            Metric::NumWorkers => metrics.num_workers() as u64,
             Metric::WorkerTotalBusyDuration => {
                 #[cfg(target_has_atomic = "64")]
                 {
@@ -811,6 +867,10 @@ unsafe extern "C" fn metric(context: *const c_void, metric: Metric, worker: usiz
             value: 0,
         },
     }
+}
+
+unsafe extern "C" fn flavor(context: *const c_void) -> Flavor {
+    unsafe { &*context.cast::<HandleContext>() }.flavor
 }
 
 unsafe extern "C" fn block_in_place(context: *const c_void, blocking: Blocking) -> CallResult {
@@ -1187,6 +1247,7 @@ fn build_runtime(
                 Arc::clone(&owner),
                 None,
                 config.enable_io != 0,
+                config.flavor,
             );
             Ok((RuntimeKind::Runtime(Some(runtime)), handle, workers))
         }
@@ -1200,6 +1261,7 @@ fn build_runtime(
                 owner,
                 Some(Arc::clone(&local)),
                 config.enable_io != 0,
+                config.flavor,
             );
             Ok((RuntimeKind::Local(local), handle, workers))
         }
@@ -1211,12 +1273,14 @@ fn handle_context(
     owner: Arc<OwnerState>,
     local: Option<Arc<LocalSlot>>,
     io_enabled: bool,
+    flavor: Flavor,
 ) -> Arc<HandleContext> {
     Arc::new(HandleContext {
         handle,
         owner,
         local,
         io_enabled,
+        flavor,
     })
 }
 

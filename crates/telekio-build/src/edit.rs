@@ -2,7 +2,7 @@ use std::{error::Error, path::Path};
 
 use ra_ap_syntax::{
     AstNode, Edition, SourceFile, SyntaxElement, SyntaxKind, SyntaxNode,
-    ast::{self, HasArgList, HasGenericParams, HasName, edit::IndentLevel, make},
+    ast::{self, HasArgList, HasGenericParams, HasName, HasVisibility, edit::IndentLevel, make},
     syntax_editor::{Position, SyntaxEditor},
 };
 
@@ -233,6 +233,29 @@ pub fn rename_method(
     let method = method(&root, owner, name)?;
     let name = method.name().ok_or("method has no name")?;
     editor.replace(name.syntax(), make::name(replacement).syntax().clone());
+    commit(source, editor)
+}
+
+pub fn set_method_visibility(
+    source: &mut String,
+    owner: &str,
+    name: &str,
+    replacement: &str,
+) -> Result<(), Box<dyn Error>> {
+    let (editor, root) = open(source)?;
+    let method = method(&root, owner, name)?;
+    let visibility = visibility(replacement)?;
+    if let Some(current) = method.visibility() {
+        editor.replace(current.syntax(), visibility.syntax().clone());
+    } else {
+        editor.insert_all(
+            Position::before(method.fn_token().ok_or("method has no fn token")?),
+            vec![
+                visibility.syntax().clone().into(),
+                make::tokens::whitespace(" ").into(),
+            ],
+        );
+    }
     commit(source, editor)
 }
 
@@ -595,6 +618,13 @@ pub fn mount_module(
         "module in wrapper",
     )?;
     let (editor, root) = open(source)?;
+    if root.children().filter_map(ast::Module::cast).any(|module| {
+        module
+            .name()
+            .is_some_and(|candidate| candidate.text() == name)
+    }) {
+        return Err(format!("module `{name}` already exists").into());
+    }
     let anchor = root
         .children()
         .find(|node| ast::Item::can_cast(node.kind()))

@@ -9,4 +9,15 @@ impl Handle {
     pub(crate) fn host(&self) -> &Arc<Host> {
         self.inner.host()
     }
+
+    /// Returns the flavor of the current runtime.
+    pub fn runtime_flavor(&self) -> RuntimeFlavor {
+        let _ = self.runtime_flavor_inner();
+        match self.inner.host().flavor() {
+            ::telekio::Flavor::CurrentThread | ::telekio::Flavor::Local => {
+                RuntimeFlavor::CurrentThread
+            }
+            ::telekio::Flavor::MultiThread => RuntimeFlavor::MultiThread,
+        }
+    }
 }

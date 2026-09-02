@@ -14,6 +14,7 @@ use crate::edit;
 
 fn prepare_guest_with(generated: PathBuf, telekio: Value) -> Result<PathBuf, Box<dyn Error>> {
     patch_manifest(&generated.join("Cargo.toml"), telekio)?;
+    patch_guest_root(&generated.join("src/lib.rs"))?;
     patch_task(&generated.join("src/runtime/task/mod.rs"))?;
     patch_current_thread(&generated.join("src/runtime/scheduler/current_thread/mod.rs"))?;
     patch_inject(&generated.join("src/runtime/scheduler/inject.rs"))?;
@@ -31,6 +32,17 @@ fn prepare_guest_with(generated: PathBuf, telekio: Value) -> Result<PathBuf, Box
     patch_io(&generated)?;
     patch_signal(&generated)?;
     Ok(generated)
+}
+
+fn patch_guest_root(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        mount(source, "telekio_context", "plugin.rs")?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Module("telekio_context"),
+            "#[cfg(all(not(feature = \"rt\"), not(test)))]",
+        )
+    })
 }
 
 fn patch_manifest(path: &Path, telekio: Value) -> Result<(), Box<dyn Error>> {
@@ -254,7 +266,7 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
         mount(source, "telekio", "worker.rs")
     })?;
     patch(&path.join("handle/metrics.rs"), |source| {
-        for name in ["injection_queue_depth", "worker_metrics"] {
+        for name in ["injection_queue_depth", "num_workers", "worker_metrics"] {
             edit::add_attr(
                 source,
                 edit::AttrTarget::Method {
@@ -302,7 +314,7 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
 
 fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        for name in ["injection_queue_depth", "worker_metrics"] {
+        for name in ["injection_queue_depth", "num_workers", "worker_metrics"] {
             edit::add_attr(
                 source,
                 edit::AttrTarget::Method {
@@ -774,6 +786,15 @@ fn patch_runtime_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
             source,
             edit::Scope::Method {
                 owner: "RuntimeMetrics",
+                name: "num_workers",
+            },
+            "num_workers",
+            "host_num_workers",
+        )?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "RuntimeMetrics",
                 name: "global_queue_depth",
             },
             "injection_queue_depth",
@@ -807,6 +828,8 @@ fn patch_context(path: &Path) -> Result<(), Box<dyn Error>> {
             .ok_or("context path has no runtime parent")?
             .join("handle.rs"),
         |source| {
+            edit::rename_method(source, "Handle", "runtime_flavor", "runtime_flavor_inner")?;
+            edit::set_method_visibility(source, "Handle", "runtime_flavor_inner", "pub(crate)")?;
             edit::redirect_call(
                 source,
                 edit::Scope::MethodArgument {
