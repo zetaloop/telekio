@@ -22,6 +22,8 @@ pub enum AttrTarget<'a> {
     Function(&'a str),
     Struct(&'a str),
     Enum(&'a str),
+    Trait(&'a str),
+    TypeAlias(&'a str),
     Module(&'a str),
     Modules(&'a str),
     Method { owner: &'a str, name: &'a str },
@@ -1077,6 +1079,18 @@ fn attr_targets(
         AttrTarget::Enum(name) => root
             .descendants()
             .filter_map(ast::Enum::cast)
+            .filter(|item| item.name().is_some_and(|candidate| candidate.text() == name))
+            .map(|item| item.syntax().clone())
+            .collect(),
+        AttrTarget::Trait(name) => root
+            .descendants()
+            .filter_map(ast::Trait::cast)
+            .filter(|item| item.name().is_some_and(|candidate| candidate.text() == name))
+            .map(|item| item.syntax().clone())
+            .collect(),
+        AttrTarget::TypeAlias(name) => root
+            .descendants()
+            .filter_map(ast::TypeAlias::cast)
             .filter(|item| item.name().is_some_and(|candidate| candidate.text() == name))
             .map(|item| item.syntax().clone())
             .collect(),

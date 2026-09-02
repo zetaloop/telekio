@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(feature = "rt")]
 use crate::io::ready::Ready;
 use crate::runtime::io::telekio::Source as TelekioSource;
 
@@ -9,24 +10,45 @@ impl Registration {
         interest: Interest,
         handle: scheduler::Handle,
     ) -> io::Result<Self> {
-        let telekio = handle
-            .host()
-            .register_io(io.telekio_resource(), telekio_interest(interest))?;
-        let shared = Arc::new(ScheduledIo::default());
-        shared.install(telekio);
-        Ok(Self { handle, shared })
+        #[cfg(not(feature = "rt"))]
+        return Self::register_local(io, interest, handle);
+
+        #[cfg(feature = "rt")]
+        {
+            let telekio = handle
+                .host()
+                .register_io(io.telekio_resource(), telekio_interest(interest))?;
+            let shared = Arc::new(ScheduledIo::default());
+            shared.install(telekio);
+            Ok(Self { handle, shared })
+        }
     }
 
-    pub(crate) fn deregister(&mut self, _: &mut impl mio::event::Source) -> io::Result<()> {
-        self.shared.close_telekio();
-        Ok(())
+    pub(crate) fn deregister(&mut self, io: &mut impl mio::event::Source) -> io::Result<()> {
+        #[cfg(not(feature = "rt"))]
+        return self.deregister_local(io);
+
+        #[cfg(feature = "rt")]
+        {
+            let _ = io;
+            self.shared.close_telekio();
+            Ok(())
+        }
     }
 
     pub(crate) fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<ReadyEvent>> {
+        #[cfg(not(feature = "rt"))]
+        return self.poll_local_read_ready(cx);
+
+        #[cfg(feature = "rt")]
         self.poll_host_ready(cx, Interest::READABLE)
     }
 
     pub(crate) fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<ReadyEvent>> {
+        #[cfg(not(feature = "rt"))]
+        return self.poll_local_write_ready(cx);
+
+        #[cfg(feature = "rt")]
         self.poll_host_ready(cx, Interest::WRITABLE)
     }
 
@@ -35,6 +57,10 @@ impl Registration {
         cx: &mut Context<'_>,
         direction: Direction,
     ) -> Poll<io::Result<ReadyEvent>> {
+        #[cfg(not(feature = "rt"))]
+        return self.poll_local_ready(cx, direction);
+
+        #[cfg(feature = "rt")]
         self.poll_host_ready(
             cx,
             match direction {
@@ -44,6 +70,7 @@ impl Registration {
         )
     }
 
+    #[cfg(feature = "rt")]
     fn poll_host_ready(
         &self,
         cx: &mut Context<'_>,
@@ -75,17 +102,23 @@ impl Registration {
     }
 
     pub(crate) async fn readiness(&self, interest: Interest) -> io::Result<ReadyEvent> {
-        if let Some(error) = self.shared.take_telekio_error() {
-            return Err(error);
-        }
-        let event = self
-            .shared
-            .ready_telekio(telekio_interest(interest))
-            .await?;
-        if event.ready.contains(::telekio::IoReady::SHUTDOWN) {
-            Err(gone())
-        } else {
-            Ok(ready_event(event.ready, event.tick))
+        #[cfg(not(feature = "rt"))]
+        return self.local_readiness(interest).await;
+
+        #[cfg(feature = "rt")]
+        {
+            if let Some(error) = self.shared.take_telekio_error() {
+                return Err(error);
+            }
+            let event = self
+                .shared
+                .ready_telekio(telekio_interest(interest))
+                .await?;
+            if event.ready.contains(::telekio::IoReady::SHUTDOWN) {
+                Err(gone())
+            } else {
+                Ok(ready_event(event.ready, event.tick))
+            }
         }
     }
 
@@ -98,34 +131,44 @@ impl Registration {
         interest: Interest,
         f: impl FnOnce() -> io::Result<R>,
     ) -> io::Result<R> {
-        if let Some(error) = self.shared.take_telekio_error() {
-            return Err(error);
-        }
-        let result = self.shared.try_ready_telekio(telekio_interest(interest));
-        match result.state {
-            ::telekio::Poll::Pending => {
-                unsafe { result.call.payload.release() };
-                Err(io::ErrorKind::WouldBlock.into())
+        #[cfg(not(feature = "rt"))]
+        return self.local_try_io(interest, f);
+
+        #[cfg(feature = "rt")]
+        {
+            if let Some(error) = self.shared.take_telekio_error() {
+                return Err(error);
             }
-            ::telekio::Poll::Ready => {
-                result.call.into_io_result()?;
-                match f() {
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        self.shared
-                            .clear_telekio_result(result.tick, result.ready)?;
-                        Err(error)
-                    }
-                    result => result,
+            let result = self.shared.try_ready_telekio(telekio_interest(interest));
+            match result.state {
+                ::telekio::Poll::Pending => {
+                    unsafe { result.call.payload.release() };
+                    Err(io::ErrorKind::WouldBlock.into())
                 }
-            }
-            ::telekio::Poll::Panicked => {
-                result.call.into_io_result()?;
-                unreachable!()
+                ::telekio::Poll::Ready => {
+                    result.call.into_io_result()?;
+                    match f() {
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            self.shared
+                                .clear_telekio_result(result.tick, result.ready)?;
+                            Err(error)
+                        }
+                        result => result,
+                    }
+                }
+                ::telekio::Poll::Panicked => {
+                    result.call.into_io_result()?;
+                    unreachable!()
+                }
             }
         }
     }
 
     pub(crate) fn clear_readiness(&self, event: ReadyEvent) {
+        #[cfg(not(feature = "rt"))]
+        return self.clear_local_readiness(event);
+
+        #[cfg(feature = "rt")]
         self.shared.clear_telekio(
             event.tick,
             ::telekio::IoReady::from_bits(event.ready.as_usize() as u8),
@@ -133,6 +176,7 @@ impl Registration {
     }
 }
 
+#[cfg(feature = "rt")]
 fn ready_event(ready: ::telekio::IoReady, tick: u8) -> ReadyEvent {
     ReadyEvent {
         tick,
@@ -141,6 +185,7 @@ fn ready_event(ready: ::telekio::IoReady, tick: u8) -> ReadyEvent {
     }
 }
 
+#[cfg(feature = "rt")]
 fn telekio_interest(interest: Interest) -> ::telekio::IoInterest {
     let mut result = ::telekio::IoInterest::empty();
     if interest.is_readable() {

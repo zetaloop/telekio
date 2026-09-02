@@ -3,11 +3,11 @@ use crate::runtime::task;
 use std::{
     collections::HashMap,
     future::Future,
-    panic::{AssertUnwindSafe, catch_unwind},
+    panic::{catch_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{
-        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
     },
     task::{Context, Poll, Waker},
     time::Duration,
@@ -125,6 +125,7 @@ impl Host {
         self.handle.advance(duration).into_io_result().unwrap();
     }
 
+    #[cfg(feature = "time")]
     pub(crate) fn timer(&self, deadline: std::time::Instant) -> ::telekio::Timer {
         ::telekio::Timer::from_result(self.handle.timer(deadline))
     }
@@ -138,7 +139,10 @@ impl Host {
         self.handle.signal(request)
     }
 
-    #[cfg(any(feature = "net", feature = "process", feature = "signal"))]
+    #[cfg(any(
+        feature = "net",
+        all(unix, any(feature = "process", feature = "signal"))
+    ))]
     #[track_caller]
     pub(crate) fn register_io(
         &self,

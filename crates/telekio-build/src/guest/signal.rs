@@ -1,11 +1,11 @@
-#[cfg(test)]
+#[cfg(any(test, not(feature = "rt"), not(feature = "signal")))]
 pub(super) type RxFuture = crate::signal::RxFuture;
 
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "rt", feature = "signal"))]
 #[derive(Debug)]
 pub(crate) struct RxFuture(::telekio::Signal);
 
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "rt", feature = "signal"))]
 impl RxFuture {
     #[cfg(unix)]
     pub(crate) fn new(receiver: Self) -> Self {
@@ -24,7 +24,7 @@ impl RxFuture {
     }
 }
 
-#[cfg(all(unix, test))]
+#[cfg(all(unix, any(test, not(feature = "rt"), not(feature = "signal"))))]
 pub(crate) fn signal(
     kind: super::SignalKind,
     handle: &crate::runtime::signal::Handle,
@@ -32,7 +32,7 @@ pub(crate) fn signal(
     super::signal_with_handle(kind, handle)
 }
 
-#[cfg(all(unix, not(test)))]
+#[cfg(all(unix, not(test), feature = "rt", feature = "signal"))]
 pub(crate) fn signal(
     kind: super::SignalKind,
     _: &crate::runtime::signal::Handle,
@@ -47,12 +47,12 @@ pub(crate) fn signal(
 macro_rules! console_signals {
     ($($name:ident => $kind:ident),+ $(,)?) => {
         $(
-            #[cfg(test)]
+            #[cfg(any(test, not(feature = "rt"), not(feature = "signal")))]
             pub(crate) fn $name() -> std::io::Result<RxFuture> {
                 super::imp::$name()
             }
 
-            #[cfg(not(test))]
+            #[cfg(all(not(test), feature = "rt", feature = "signal"))]
             pub(crate) fn $name() -> std::io::Result<RxFuture> {
                 crate::runtime::scheduler::Handle::current()
                     .host()

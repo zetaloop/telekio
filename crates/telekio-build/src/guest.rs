@@ -531,7 +531,7 @@ fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
                         owner: "Registration",
                         name: replacement,
                     },
-                    "#[expect(dead_code)]",
+                    "#[cfg_attr(feature = \"rt\", expect(dead_code))]",
                 )?;
             }
             mount(source, "telekio", "registration.rs")
@@ -688,6 +688,36 @@ fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn patch_signal(generated: &Path) -> Result<(), Box<dyn Error>> {
+    let unused_without_process = "#[cfg_attr(all(unix, not(test), feature = \"rt\", feature = \"signal\", not(feature = \"process\")), expect(dead_code))]";
+    patch(&generated.join("src/runtime/signal/mod.rs"), |source| {
+        for target in [
+            edit::AttrTarget::Struct("Handle"),
+            edit::AttrTarget::Method {
+                owner: "Handle",
+                name: "check_inner",
+            },
+        ] {
+            edit::add_attr(source, target, unused_without_process)?;
+        }
+        Ok(())
+    })?;
+    patch(&generated.join("src/signal/registry.rs"), |source| {
+        for target in [
+            edit::AttrTarget::TypeAlias("EventId"),
+            edit::AttrTarget::Trait("Storage"),
+            edit::AttrTarget::Impl {
+                owner: "Registry<S>",
+                method: "register_listener",
+            },
+            edit::AttrTarget::Impl {
+                owner: "Globals",
+                method: "register_listener",
+            },
+        ] {
+            edit::add_attr(source, target, unused_without_process)?;
+        }
+        Ok(())
+    })?;
     patch(&generated.join("src/signal/mod.rs"), |source| {
         for target in [
             edit::AttrTarget::Struct("RxFuture"),
@@ -698,11 +728,29 @@ fn patch_signal(generated: &Path) -> Result<(), Box<dyn Error>> {
             },
             edit::AttrTarget::Module("reusable_box"),
         ] {
-            edit::add_attr(source, target, "#[cfg_attr(not(test), expect(dead_code))]")?;
+            edit::add_attr(
+                source,
+                target,
+                "#[cfg_attr(all(not(test), feature = \"rt\", feature = \"signal\"), expect(dead_code))]",
+            )?;
         }
         Ok(())
     })?;
     patch(&generated.join("src/signal/unix.rs"), |source| {
+        let unused = "#[cfg_attr(all(not(test), feature = \"rt\", feature = \"signal\", not(feature = \"process\")), expect(dead_code))]";
+        for target in [
+            edit::AttrTarget::Struct("OsExtraData"),
+            edit::AttrTarget::Struct("SignalInfo"),
+            edit::AttrTarget::Impl {
+                owner: "OsStorage",
+                method: "get",
+            },
+            edit::AttrTarget::Function("action"),
+            edit::AttrTarget::Function("signal_enable"),
+            edit::AttrTarget::Function("signal_with_handle"),
+        ] {
+            edit::add_attr(source, target, unused)?;
+        }
         edit::retarget_use(source, "RxFuture", "self::telekio::RxFuture")?;
         edit::redirect_call(
             source,
