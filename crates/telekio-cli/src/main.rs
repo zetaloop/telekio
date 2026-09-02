@@ -487,15 +487,7 @@ fn option<'a>(arguments: &'a [OsString], name: &str) -> Option<&'a OsStr> {
 }
 
 fn cache_directory() -> Result<PathBuf, Box<dyn Error>> {
-    let directory = if cfg!(windows) {
-        env::var_os("LOCALAPPDATA").map(PathBuf::from)
-    } else {
-        env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-    }
-    .ok_or("user cache directory is unavailable")?
-    .join("telekio");
+    let directory = env::temp_dir().join("telekio");
     fs::create_dir_all(&directory)?;
     Ok(directory)
 }
