@@ -75,6 +75,7 @@ pub struct RuntimeConfig {
     pub event_interval: u32,
     pub max_io_events_per_tick: usize,
     pub name: Bytes,
+    pub disable_lifo_slot: u8,
 }
 
 #[repr(C)]

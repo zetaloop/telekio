@@ -124,6 +124,7 @@ impl Builder {
             event_interval: self.event_interval,
             max_io_events_per_tick: self.nevents,
             name: unsafe { ::telekio::Bytes::borrow(self.name.as_deref()) },
+            disable_lifo_slot: self.disable_lifo_slot.into(),
         });
         // Tokio's LocalRuntime keeps this value on its originating thread.
         unsafe { result.into_runtime() }.map(|(runtime, _)| runtime)

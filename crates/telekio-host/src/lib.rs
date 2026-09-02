@@ -1254,6 +1254,9 @@ fn build_runtime(
     }
     builder.event_interval(config.event_interval);
     builder.max_io_events_per_tick(config.max_io_events_per_tick);
+    if config.disable_lifo_slot != 0 {
+        builder.telekio_disable_lifo_slot();
+    }
     if !config.name.is_empty() {
         builder.name(unsafe { config.name.as_str() });
     }

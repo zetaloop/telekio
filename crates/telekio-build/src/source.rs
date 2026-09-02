@@ -48,6 +48,7 @@ pub fn prepare_tokio_host() -> Result<PathBuf, Box<dyn Error>> {
 fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
     let helpers = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/host");
     for (target, helper, visibility, attribute) in [
+        ("src/runtime/builder.rs", "builder.rs", None, None),
         ("src/runtime/id.rs", "id.rs", None, None),
         (
             "src/runtime/io/registration.rs",
