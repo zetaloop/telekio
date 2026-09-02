@@ -40,6 +40,8 @@ struct Workers {
 pub(crate) struct Registry<S: HostSchedule> {
     host: OnceLock<Arc<Host>>,
     runners: Mutex<HashMap<task::Id, Arc<Runner<S>>>>,
+    #[cfg(feature = "taskdump")]
+    tracing: TraceLock,
 }
 
 struct Runner<S: HostSchedule> {
@@ -47,6 +49,10 @@ struct Runner<S: HostSchedule> {
     waker: Mutex<Option<Waker>>,
     abort: AbortHandle,
     complete: AtomicBool,
+    #[cfg(feature = "taskdump")]
+    task: Task<S>,
+    #[cfg(feature = "taskdump")]
+    trace: Mutex<Option<Arc<TraceRequest>>>,
 }
 
 struct RunnerTask<S: HostSchedule> {
@@ -72,6 +78,32 @@ struct Root<'a, F> {
     host: &'a Host,
     state: Arc<RootState>,
 }
+
+#[cfg(feature = "taskdump")]
+struct TraceRequest {
+    remaining: std::sync::atomic::AtomicUsize,
+    traces: Mutex<Vec<(task::Id, super::trace::Trace)>>,
+    waker: Mutex<Option<Waker>>,
+}
+
+#[cfg(feature = "taskdump")]
+#[derive(Default)]
+struct TraceLock {
+    state: Mutex<TraceLockState>,
+}
+
+#[cfg(feature = "taskdump")]
+#[derive(Default)]
+struct TraceLockState {
+    active: bool,
+    waiters: Vec<Waker>,
+}
+
+#[cfg(feature = "taskdump")]
+struct TraceGuard<'a>(&'a TraceLock);
+
+#[cfg(feature = "taskdump")]
+struct TraceCompletion(Option<Arc<TraceRequest>>);
 
 pub(crate) fn budget<F: Future>(future: F) -> impl Future<Output = F::Output> {
     Budgeted(future)
@@ -341,11 +373,92 @@ impl Host {
     }
 }
 
+#[cfg(feature = "taskdump")]
+impl TraceLock {
+    async fn lock(&self) -> TraceGuard<'_> {
+        std::future::poll_fn(|context| {
+            let mut state = self.state.lock().unwrap();
+            if !state.active {
+                state.active = true;
+                Poll::Ready(TraceGuard(self))
+            } else {
+                if !state
+                    .waiters
+                    .iter()
+                    .any(|waker| waker.will_wake(context.waker()))
+                {
+                    state.waiters.push(context.waker().clone());
+                }
+                Poll::Pending
+            }
+        })
+        .await
+    }
+}
+
+#[cfg(feature = "taskdump")]
+impl Drop for TraceGuard<'_> {
+    fn drop(&mut self) {
+        let waiters = {
+            let mut state = self.0.state.lock().unwrap();
+            state.active = false;
+            std::mem::take(&mut state.waiters)
+        };
+        for waker in waiters {
+            waker.wake();
+        }
+    }
+}
+
+#[cfg(feature = "taskdump")]
+impl TraceCompletion {
+    fn complete(mut self, trace: (task::Id, super::trace::Trace)) {
+        self.0.take().unwrap().complete(Some(trace));
+    }
+}
+
+#[cfg(feature = "taskdump")]
+impl Drop for TraceCompletion {
+    fn drop(&mut self) {
+        if let Some(request) = self.0.take() {
+            request.complete(None);
+        }
+    }
+}
+
+#[cfg(feature = "taskdump")]
+impl TraceRequest {
+    fn complete(&self, trace: Option<(task::Id, super::trace::Trace)>) {
+        if let Some(trace) = trace {
+            self.traces.lock().unwrap().push(trace);
+        }
+        if self.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+            if let Some(waker) = self.waker.lock().unwrap().take() {
+                waker.wake();
+            }
+        }
+    }
+}
+
+#[cfg(feature = "taskdump")]
+fn trace_notified<S: HostSchedule>(
+    schedule: &S,
+    notified: Notified<S>,
+) -> (task::Id, super::trace::Trace) {
+    let id = notified.id();
+    let waker = super::waker::waker_ref::<S>(notified.0.raw.header_ptr_ref());
+    crate::runtime::context::telekio::defer(&waker);
+    let ((), trace) = super::trace::Trace::capture(|| schedule.run(notified));
+    (id, trace)
+}
+
 impl<S: HostSchedule> Registry<S> {
     pub(crate) fn new() -> Self {
         Self {
             host: OnceLock::new(),
             runners: Mutex::new(HashMap::new()),
+            #[cfg(feature = "taskdump")]
+            tracing: TraceLock::default(),
         }
     }
 
@@ -360,6 +473,76 @@ impl<S: HostSchedule> Registry<S> {
         self.host.get().expect("Tokio runtime is not initialized")
     }
 
+    #[cfg(feature = "taskdump")]
+    pub(crate) fn dump_current(&self) -> Vec<(task::Id, super::trace::Trace)> {
+        let current = crate::runtime::context::current_task_id();
+        let runners = self
+            .runners
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|runner| Some(runner.task.telekio_id()) != current)
+            .cloned()
+            .collect::<Vec<_>>();
+        runners
+            .into_iter()
+            .filter_map(|runner| {
+                let notified = runner
+                    .notified
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .or_else(|| runner.task.notify_for_tracing())?;
+                let schedule = notified.schedule();
+                Some(trace_notified(&schedule, notified))
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "taskdump")]
+    pub(crate) async fn dump(&self) -> Vec<(task::Id, super::trace::Trace)> {
+        let _guard = self.tracing.lock().await;
+        let runners = self
+            .runners
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|runner| !runner.complete.load(Ordering::Acquire))
+            .cloned()
+            .collect::<Vec<_>>();
+        let request = Arc::new(TraceRequest {
+            remaining: std::sync::atomic::AtomicUsize::new(runners.len()),
+            traces: Mutex::new(Vec::new()),
+            waker: Mutex::new(None),
+        });
+        for runner in &runners {
+            *runner.trace.lock().unwrap() = Some(Arc::clone(&request));
+            if runner.complete.load(Ordering::Acquire) {
+                if let Some(request) = runner.trace.lock().unwrap().take() {
+                    request.complete(None);
+                }
+            } else if let Some(notified) = runner.task.notify_for_tracing() {
+                runner.schedule(notified);
+            } else {
+                runner.wake();
+            }
+        }
+        std::future::poll_fn(|context| {
+            if request.remaining.load(Ordering::Acquire) == 0 {
+                return Poll::Ready(());
+            }
+            *request.waker.lock().unwrap() = Some(context.waker().clone());
+            if request.remaining.load(Ordering::Acquire) == 0 {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        let traces = std::mem::take(&mut *request.traces.lock().unwrap());
+        traces
+    }
+
     pub(crate) fn schedule(&self, schedule: S, notified: Notified<S>, local: bool) {
         let id = notified.id();
         let mut runners = self.runners.lock().unwrap();
@@ -368,11 +551,17 @@ impl<S: HostSchedule> Registry<S> {
             return;
         }
 
+        #[cfg(feature = "taskdump")]
+        let trace_task = notified.trace_task();
         let runner = Arc::new(Runner {
             abort: notified.abort_handle(),
             notified: Mutex::new(Some(notified)),
             waker: Mutex::new(None),
             complete: AtomicBool::new(false),
+            #[cfg(feature = "taskdump")]
+            task: trace_task,
+            #[cfg(feature = "taskdump")]
+            trace: Mutex::new(None),
         });
         runners.insert(id, Arc::clone(&runner));
         drop(runners);
@@ -448,6 +637,16 @@ impl<S: HostSchedule> Notified<S> {
         schedule.registry().schedule(schedule.clone(), self, local);
     }
 
+    #[cfg(feature = "taskdump")]
+    fn trace_task(&self) -> Task<S> {
+        let raw = self.0.raw.clone();
+        raw.ref_inc();
+        Task {
+            raw,
+            _p: std::marker::PhantomData,
+        }
+    }
+
     fn abort_handle(&self) -> AbortHandle {
         let raw = self.0.raw.clone();
         raw.ref_inc();
@@ -493,8 +692,24 @@ impl<S: HostSchedule> Runner<S> {
         }
     }
 
+    #[cfg(feature = "taskdump")]
+    fn schedule_trace(&self) {
+        if self.complete.load(Ordering::Acquire) || self.trace.lock().unwrap().is_none() {
+            return;
+        }
+        if let Some(notified) = self.task.notify_for_tracing() {
+            self.schedule(notified);
+        } else {
+            self.wake();
+        }
+    }
+
     fn finish(&self) {
         self.complete.store(true, Ordering::Release);
+        #[cfg(feature = "taskdump")]
+        if let Some(request) = self.trace.lock().unwrap().take() {
+            request.complete(None);
+        }
         self.wake();
     }
 }
@@ -526,11 +741,25 @@ unsafe fn poll_runner_inner<S: HostSchedule>(
     }
     let notified = task.runner.notified.lock().unwrap().take();
     if let Some(notified) = notified {
+        #[cfg(feature = "taskdump")]
+        {
+            let request = task.runner.trace.lock().unwrap().take();
+            if let Some(request) = request {
+                let completion = TraceCompletion(Some(request));
+                let trace = trace_notified(&task.schedule, notified);
+                completion.complete(trace);
+            } else {
+                task.schedule.run(notified);
+            }
+        }
+        #[cfg(not(feature = "taskdump"))]
         task.schedule.run(notified);
     }
     if task.runner.complete.load(Ordering::Acquire) {
         ::telekio::Poll::Ready
     } else {
+        #[cfg(feature = "taskdump")]
+        task.runner.schedule_trace();
         if task.runner.notified.lock().unwrap().is_some() {
             task.runner.wake();
         }

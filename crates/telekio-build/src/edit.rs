@@ -483,6 +483,112 @@ pub enum Call<'a> {
     Method(&'a str),
 }
 
+pub fn delegate_async_body(
+    source: &mut String,
+    scope: Scope<'_>,
+    delegate: &str,
+    args: &[&str],
+) -> Result<(), Box<dyn Error>> {
+    let count = count_targets(
+        source,
+        scope,
+        &|root, scope| Ok(usize::from(scope.resolve(root)?.is_some())),
+        &|scope, tree, inner| scope.inside(tree).map(|scope| (scope, inner)),
+    )?;
+    match count {
+        0 => Err("function body scope was not found".into()),
+        1 => {
+            if delegate_async_body_in(source, scope, delegate, args)? {
+                Ok(())
+            } else {
+                Err("function body scope was not found".into())
+            }
+        }
+        _ => Err("function body scope appears more than once".into()),
+    }
+}
+
+fn delegate_async_body_in(
+    source: &mut String,
+    scope: Scope<'_>,
+    delegate: &str,
+    args: &[&str],
+) -> Result<bool, Box<dyn Error>> {
+    let (editor, root) = open(source)?;
+    if let Some(function) = scope.resolve(&root)?.and_then(ast::Fn::cast) {
+        let body = function
+            .body()
+            .and_then(|body| body.stmt_list())
+            .ok_or("function has no statement list")?;
+        let text = body.syntax().text().to_string();
+        let inner = text
+            .strip_prefix('{')
+            .and_then(|text| text.strip_suffix('}'))
+            .ok_or("function body has no braces")?;
+        let prefix = if args.is_empty() {
+            String::new()
+        } else {
+            format!("{}, ", args.join(", "))
+        };
+        let level = IndentLevel::from_node(function.syntax());
+        let statement = level + 1;
+        let inner = inner
+            .trim_matches('\n')
+            .trim_end()
+            .lines()
+            .map(|line| format!("    {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let replacement = parse(&format!(
+            "async fn replacement() {{\n{statement}{delegate}({prefix}async {{\n{inner}\n{statement}}}).await\n{level}}}"
+        ))?
+        .syntax()
+        .descendants()
+        .find_map(ast::Fn::cast)
+        .and_then(|function| function.body())
+        .and_then(|body| body.stmt_list())
+        .ok_or("replacement function has no statement list")?;
+        editor.replace(body.syntax(), replacement.syntax().clone());
+        commit(source, editor)?;
+        return Ok(true);
+    }
+
+    let mut replacements = Vec::new();
+    for source_tree in root.descendants().filter_map(ast::TokenTree::cast) {
+        let Some(inner_scope) = scope.inside(&source_tree) else {
+            continue;
+        };
+        let text = source_tree.syntax().text().to_string();
+        let Some(mut inner) = text
+            .strip_prefix('{')
+            .and_then(|text| text.strip_suffix('}'))
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if parse(&inner).is_err()
+            || !delegate_async_body_in(&mut inner, inner_scope, delegate, args)?
+        {
+            continue;
+        }
+        let replacement = parse(&format!("replacement! {{ {inner} }}"))?
+            .syntax()
+            .descendants()
+            .find_map(ast::MacroCall::cast)
+            .and_then(|call| call.token_tree())
+            .ok_or("replacement macro has no token tree")?;
+        retain_outermost(&mut replacements, source_tree, replacement);
+    }
+    if replacements.is_empty() {
+        return Ok(false);
+    }
+    for (old, new) in replacements {
+        editor.replace(old.syntax(), new.syntax().clone());
+    }
+    commit(source, editor)?;
+    Ok(true)
+}
+
 pub fn delegate_closure(
     source: &mut String,
     scope: Scope<'_>,
@@ -834,16 +940,19 @@ impl Scope<'_> {
     fn inside(self, tree: &ast::TokenTree) -> Option<Self> {
         match self {
             Self::Function(_) => Some(self),
-            Self::Method { owner, name } => tree
-                .syntax()
-                .ancestors()
-                .find_map(ast::Impl::cast)
-                .filter(|implementation| {
-                    implementation
-                        .self_ty()
-                        .is_some_and(|ty| ty.syntax().text() == owner)
-                })
-                .map(|_| Self::Function(name)),
+            Self::Method { owner, name } => {
+                match tree.syntax().ancestors().find_map(ast::Impl::cast) {
+                    Some(implementation)
+                        if implementation
+                            .self_ty()
+                            .is_some_and(|ty| ty.syntax().text() == owner) =>
+                    {
+                        Some(Self::Function(name))
+                    }
+                    Some(_) => None,
+                    None => Some(self),
+                }
+            }
             Self::FunctionArgument { .. } | Self::MethodArgument { .. } => None,
         }
     }

@@ -179,6 +179,15 @@ fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             &["self"],
         )?;
         edit::rename_method(source, "Handle", "owned_id", "owned_id_inner")?;
+        edit::rename_method(source, "Handle", "dump", "dump_local")?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "Handle",
+                name: "dump_local",
+            },
+            "#[expect(dead_code)]",
+        )?;
         for name in [
             "worker_local_queue_depth",
             "num_blocking_threads",
@@ -294,6 +303,18 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             "#[expect(dead_code)]",
         )?;
         mount(source, "telekio", "worker.rs")
+    })?;
+    patch(&path.join("handle/taskdump.rs"), |source| {
+        edit::rename_method(source, "Handle", "dump", "dump_local")?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "Handle",
+                name: "dump_local",
+            },
+            "#[expect(dead_code)]",
+        )?;
+        mount(source, "telekio", "taskdump.rs")
     })?;
     patch(&path.join("handle/metrics.rs"), |source| {
         for name in ["injection_queue_depth", "num_workers", "worker_metrics"] {
@@ -527,18 +548,22 @@ fn patch_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
 
 fn patch_histogram(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        for target in [
+        edit::add_attr(
+            source,
             edit::AttrTarget::Method {
                 owner: "HistogramType",
                 name: "bucket_range",
             },
+            "#[cfg_attr(not(test), expect(dead_code))]",
+        )?;
+        edit::add_attr(
+            source,
             edit::AttrTarget::Impl {
                 owner: "Histogram",
                 method: "num_buckets",
             },
-        ] {
-            edit::add_attr(source, target, "#[expect(dead_code)]")?;
-        }
+            "#[expect(dead_code)]",
+        )?;
         mount(source, "telekio", "histogram.rs")?;
         edit::add_attr(
             source,
@@ -1084,6 +1109,15 @@ fn patch_context(path: &Path) -> Result<(), Box<dyn Error>> {
         |source| {
             edit::rename_method(source, "Handle", "runtime_flavor", "runtime_flavor_inner")?;
             edit::set_method_visibility(source, "Handle", "runtime_flavor_inner", "pub(crate)")?;
+            edit::delegate_async_body(
+                source,
+                edit::Scope::Method {
+                    owner: "Handle",
+                    name: "dump",
+                },
+                "telekio::dump",
+                &["self"],
+            )?;
             edit::redirect_call(
                 source,
                 edit::Scope::MethodArgument {
