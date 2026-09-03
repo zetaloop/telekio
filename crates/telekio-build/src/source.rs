@@ -49,8 +49,14 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
     let helpers = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/host");
     for (target, helper, visibility, attribute) in [
         ("src/runtime/builder.rs", "builder.rs", None, None),
-        ("src/runtime/handle.rs", "handle.rs", None, None),
+        (
+            "src/runtime/handle.rs",
+            "handle.rs",
+            Some("pub(crate)"),
+            None,
+        ),
         ("src/runtime/id.rs", "id.rs", None, None),
+        ("src/runtime/mod.rs", "runtime.rs", Some("pub"), None),
         (
             "src/runtime/scheduler/multi_thread/mod.rs",
             "multi_thread.rs",
@@ -68,6 +74,18 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
             "registration.rs",
             None,
             None,
+        ),
+        (
+            "src/runtime/io/mod.rs",
+            "io.rs",
+            Some("pub(crate)"),
+            Some("#[cfg(target_os = \"linux\")]"),
+        ),
+        (
+            "src/runtime/io/driver.rs",
+            "io_driver.rs",
+            Some("pub(crate)"),
+            Some("#[cfg(target_os = \"linux\")]"),
         ),
         (
             "src/io/poll_evented.rs",

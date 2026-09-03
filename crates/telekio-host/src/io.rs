@@ -9,8 +9,9 @@ use std::sync::Mutex;
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use telekio::{
-    CallResult, IoCallResult, IoError, IoInterest, IoOperationResult, IoPoll, IoReady,
-    IoRegistration, IoRequest, IoResource, IoResult, OwnedBytes, Poll, Status, Waker,
+    CallResult, Callback, IoCallResult, IoDriverRegistration, IoDriverResult, IoError, IoInterest,
+    IoOperationResult, IoPoll, IoReady, IoRegistration, IoRequest, IoResource, IoResult,
+    OwnedBytes, Poll, Status, Waker,
 };
 
 #[cfg(any(unix, windows))]
@@ -18,6 +19,8 @@ use telekio::IoKind;
 #[cfg(windows)]
 use telekio::IoOperationKind;
 
+#[cfg(target_os = "linux")]
+use super::{CallbackOwner, host_callback};
 use super::{HandleContext, HostResource};
 
 #[cfg(any(unix, windows))]
@@ -96,6 +99,12 @@ struct Operation {
     future: OperationFuture,
 }
 
+#[cfg(target_os = "linux")]
+struct DriverResource {
+    _registration: tokio::runtime::telekio::TelekioIo,
+    _callback: Arc<CallbackOwner>,
+}
+
 pub(super) unsafe extern "C" fn register(
     context: *const std::ffi::c_void,
     resource: IoResource,
@@ -140,6 +149,104 @@ pub(super) unsafe extern "C" fn register(
             registration: IoRegistration::empty(),
         },
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) unsafe extern "C" fn register_driver(
+    context: *const std::ffi::c_void,
+    resource: IoResource,
+    callback: Callback,
+) -> IoDriverResult {
+    let context = unsafe { &*context.cast::<HandleContext>() };
+    match catch_unwind(AssertUnwindSafe(|| -> io::Result<_> {
+        if !context.io_enabled {
+            return Err(io::Error::other(telekio::IO_DRIVER_DISABLED_ERROR));
+        }
+        if resource.kind() != IoKind::Fd {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected a Linux file descriptor",
+            ));
+        }
+        let callback = Arc::new(CallbackOwner(callback));
+        let weak = Arc::downgrade(&callback);
+        let owner = Arc::downgrade(&context.owner);
+        let registration = context.handle.telekio_register_io(
+            resource.raw() as u32 as i32,
+            Arc::new(move || {
+                let Some(owner) = owner.upgrade() else {
+                    return;
+                };
+                let Some(_activity) = owner.callback(std::task::Waker::noop().clone()) else {
+                    return;
+                };
+                if let Some(callback) = weak.upgrade() {
+                    callback.call();
+                }
+            }),
+        )?;
+        let resource = HostResource::new(
+            &context.owner,
+            DriverResource {
+                _registration: registration,
+                _callback: callback,
+            },
+        )
+        .map_err(io::Error::other)?;
+        Ok(unsafe {
+            IoDriverRegistration::from_raw(Arc::as_ptr(&resource).cast_mut().cast(), release_driver)
+        })
+    })) {
+        Ok(Ok(registration)) => IoDriverResult {
+            call: call_ok(),
+            error: IoError::none(),
+            registration,
+        },
+        Ok(Err(error)) => IoDriverResult {
+            error: IoError::from_error(&error),
+            call: call_error(error),
+            registration: IoDriverRegistration::empty(),
+        },
+        Err(payload) => IoDriverResult {
+            call: super::host_panic(&*payload),
+            error: IoError::none(),
+            registration: IoDriverRegistration::empty(),
+        },
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) unsafe extern "C" fn register_driver(
+    _: *const std::ffi::c_void,
+    _: IoResource,
+    callback: Callback,
+) -> IoDriverResult {
+    match catch_unwind(AssertUnwindSafe(|| drop(callback))) {
+        Ok(()) => {
+            let error = io::Error::new(
+                io::ErrorKind::Unsupported,
+                "unsupported I/O driver registration",
+            );
+            IoDriverResult {
+                error: IoError::from_error(&error),
+                call: call_error(error),
+                registration: IoDriverRegistration::empty(),
+            }
+        }
+        Err(payload) => IoDriverResult {
+            call: super::host_panic(&*payload),
+            error: IoError::none(),
+            registration: IoDriverRegistration::empty(),
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn release_driver(data: *mut std::ffi::c_void) -> CallResult {
+    host_callback(|| {
+        let registration = unsafe { &*data.cast::<HostResource<DriverResource>>() };
+        registration.release();
+    })
 }
 
 #[cfg(unix)]

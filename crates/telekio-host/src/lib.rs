@@ -184,6 +184,7 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     advance,
     timer,
     register_io: host_io::register,
+    register_io_driver: host_io::register_driver,
     signal: host_signal::signal,
     reap_process,
     shutdown,

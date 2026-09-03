@@ -9,9 +9,9 @@ pub use builder::{
     WorkerCallback,
 };
 pub use io::{
-    IO_DRIVER_DISABLED_ERROR, IoCallResult, IoError, IoEvent, IoInterest, IoKind, IoOperation,
-    IoOperationKind, IoOperationResult, IoPoll, IoReady, IoRegistration, IoRequest, IoResource,
-    IoResult,
+    IO_DRIVER_DISABLED_ERROR, IoCallResult, IoDriverRegistration, IoDriverResult, IoError, IoEvent,
+    IoInterest, IoKind, IoOperation, IoOperationKind, IoOperationResult, IoPoll, IoReady,
+    IoRegistration, IoRequest, IoResource, IoResult,
 };
 pub use runtime::telekio_guest_attach;
 pub use runtime::{

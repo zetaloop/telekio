@@ -1,6 +1,7 @@
 use crate::{
-    BuildResult, ClockSample, DurationParts, InstantOffset, IoInterest, IoResource, IoResult,
-    RuntimeConfig, Shutdown, SignalRequest, SignalResult, TimerResult, WorkerCallback,
+    BuildResult, Callback, ClockSample, DurationParts, InstantOffset, IoDriverResult, IoInterest,
+    IoResource, IoResult, RuntimeConfig, Shutdown, SignalRequest, SignalResult, TimerResult,
+    WorkerCallback,
 };
 
 use std::{
@@ -85,6 +86,8 @@ pub struct RuntimeApi {
     pub advance: unsafe extern "C" fn(*const c_void, DurationParts) -> CallResult,
     pub timer: unsafe extern "C" fn(*const c_void, InstantOffset) -> TimerResult,
     pub register_io: unsafe extern "C" fn(*const c_void, IoResource, IoInterest) -> IoResult,
+    pub register_io_driver:
+        unsafe extern "C" fn(*const c_void, IoResource, Callback) -> IoDriverResult,
     pub signal: unsafe extern "C" fn(*const c_void, SignalRequest) -> SignalResult,
     pub reap_process: unsafe extern "C" fn(*const c_void, u32) -> CallResult,
     pub shutdown: unsafe extern "C" fn(*mut c_void, Shutdown, u64, u32) -> CallResult,
@@ -609,6 +612,11 @@ impl Handle {
         block_on(future, |future| unsafe {
             ((*self.raw.api).handle_block_on)(self.raw.context, future)
         })
+    }
+
+    #[doc(hidden)]
+    pub fn register_io_driver(&self, resource: IoResource, callback: Callback) -> IoDriverResult {
+        unsafe { ((*self.raw.api).register_io_driver)(self.raw.context, resource, callback) }
     }
 
     #[doc(hidden)]

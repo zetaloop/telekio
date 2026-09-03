@@ -122,6 +122,12 @@ pub struct IoRegistration {
     release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
+#[repr(C)]
+pub struct IoDriverRegistration {
+    data: *mut c_void,
+    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum IoOperationKind {
@@ -160,6 +166,13 @@ pub struct IoResult {
 }
 
 #[repr(C)]
+pub struct IoDriverResult {
+    pub call: CallResult,
+    pub error: IoError,
+    pub registration: IoDriverRegistration,
+}
+
+#[repr(C)]
 pub struct IoOperationResult {
     pub call: CallResult,
     pub operation: IoOperation,
@@ -183,6 +196,8 @@ pub struct IoPoll {
 
 unsafe impl Send for IoRegistration {}
 unsafe impl Sync for IoRegistration {}
+unsafe impl Send for IoDriverRegistration {}
+unsafe impl Sync for IoDriverRegistration {}
 unsafe impl Send for IoOperation {}
 unsafe impl Sync for IoOperation {}
 
@@ -440,6 +455,44 @@ impl std::fmt::Debug for IoRegistration {
             .debug_struct("IoRegistration")
             .field("data", &self.data)
             .finish_non_exhaustive()
+    }
+}
+
+impl IoDriverRegistration {
+    pub fn empty() -> Self {
+        Self {
+            data: std::ptr::null_mut(),
+            release: release_empty,
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `data` and `release` must describe one owned host driver registration.
+    pub const unsafe fn from_raw(
+        data: *mut c_void,
+        release: unsafe extern "C" fn(*mut c_void) -> CallResult,
+    ) -> Self {
+        Self { data, release }
+    }
+
+    pub fn from_result(result: IoDriverResult) -> std::io::Result<Self> {
+        result.error.into_io_result(result.call)?;
+        Ok(result.registration)
+    }
+
+    pub fn close(&mut self) {
+        if !self.data.is_null() {
+            unsafe { (self.release)(self.data) }
+                .resume("failed to release Tokio I/O driver registration");
+            self.data = std::ptr::null_mut();
+        }
+    }
+}
+
+impl Drop for IoDriverRegistration {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
