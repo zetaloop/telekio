@@ -317,7 +317,7 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
         mount(source, "telekio", "taskdump.rs")
     })?;
     patch(&path.join("handle/metrics.rs"), |source| {
-        for name in ["injection_queue_depth", "num_workers", "worker_metrics"] {
+        for name in ["injection_queue_depth", "num_workers"] {
             edit::add_attr(
                 source,
                 edit::AttrTarget::Method {
@@ -327,6 +327,14 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
                 "#[expect(dead_code)]",
             )?;
         }
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "Handle",
+                name: "worker_metrics",
+            },
+            "#[cfg_attr(target_has_atomic = \"64\", expect(dead_code))]",
+        )?;
         for name in [
             "num_blocking_threads",
             "num_idle_blocking_threads",
@@ -393,7 +401,6 @@ fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
         )?;
         for name in [
             "injection_queue_depth",
-            "worker_metrics",
             "num_blocking_threads",
             "num_idle_blocking_threads",
             "worker_local_queue_depth",
@@ -408,6 +415,14 @@ fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
                 "#[expect(dead_code)]",
             )?;
         }
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "Handle",
+                name: "worker_metrics",
+            },
+            "#[cfg_attr(target_has_atomic = \"64\", expect(dead_code))]",
+        )?;
         mount(source, "telekio", "scheduler.rs")?;
         edit::add_attr(
             source,
@@ -554,7 +569,7 @@ fn patch_histogram(path: &Path) -> Result<(), Box<dyn Error>> {
                 owner: "HistogramType",
                 name: "bucket_range",
             },
-            "#[cfg_attr(not(test), expect(dead_code))]",
+            "#[cfg_attr(all(not(test), target_has_atomic = \"64\"), expect(dead_code))]",
         )?;
         edit::add_attr(
             source,
@@ -562,7 +577,7 @@ fn patch_histogram(path: &Path) -> Result<(), Box<dyn Error>> {
                 owner: "Histogram",
                 method: "num_buckets",
             },
-            "#[expect(dead_code)]",
+            "#[cfg_attr(target_has_atomic = \"64\", expect(dead_code))]",
         )?;
         mount(source, "telekio", "histogram.rs")?;
         edit::add_attr(
@@ -575,17 +590,22 @@ fn patch_histogram(path: &Path) -> Result<(), Box<dyn Error>> {
 
 fn patch_worker_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        for name in ["queue_depth", "thread_id"] {
-            edit::add_attr(
-                source,
-                edit::AttrTarget::Method {
-                    owner: "WorkerMetrics",
-                    name,
-                },
-                "#[expect(dead_code)]",
-            )?;
-        }
-        Ok(())
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "WorkerMetrics",
+                name: "queue_depth",
+            },
+            "#[expect(dead_code)]",
+        )?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "WorkerMetrics",
+                name: "thread_id",
+            },
+            "#[cfg_attr(target_has_atomic = \"64\", expect(dead_code))]",
+        )
     })
 }
 

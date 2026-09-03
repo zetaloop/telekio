@@ -861,19 +861,51 @@ unsafe extern "C" fn metric(
                 .end
                 .as_nanos() as u64,
             Metric::ScheduleLatencyHistogramEnabled => {
-                metrics.schedule_latency_histogram_enabled().into()
+                #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+                {
+                    metrics.schedule_latency_histogram_enabled().into()
+                }
+                #[cfg(not(all(any(unix, windows), target_pointer_width = "64")))]
+                {
+                    0
+                }
             }
             Metric::ScheduleLatencyHistogramNumBuckets => {
-                metrics.schedule_latency_histogram_num_buckets() as u64
+                #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+                {
+                    metrics.schedule_latency_histogram_num_buckets() as u64
+                }
+                #[cfg(not(all(any(unix, windows), target_pointer_width = "64")))]
+                {
+                    0
+                }
             }
-            Metric::ScheduleLatencyHistogramRangeStart => metrics
-                .schedule_latency_histogram_bucket_range(bucket)
-                .start
-                .as_nanos() as u64,
-            Metric::ScheduleLatencyHistogramRangeEnd => metrics
-                .schedule_latency_histogram_bucket_range(bucket)
-                .end
-                .as_nanos() as u64,
+            Metric::ScheduleLatencyHistogramRangeStart => {
+                #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+                {
+                    metrics
+                        .schedule_latency_histogram_bucket_range(bucket)
+                        .start
+                        .as_nanos() as u64
+                }
+                #[cfg(not(all(any(unix, windows), target_pointer_width = "64")))]
+                {
+                    0
+                }
+            }
+            Metric::ScheduleLatencyHistogramRangeEnd => {
+                #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+                {
+                    metrics
+                        .schedule_latency_histogram_bucket_range(bucket)
+                        .end
+                        .as_nanos() as u64
+                }
+                #[cfg(not(all(any(unix, windows), target_pointer_width = "64")))]
+                {
+                    0
+                }
+            }
             Metric::CurrentWorkerIndex => tokio::runtime::worker_index()
                 .map(|worker| worker as u64 + 1)
                 .unwrap_or_default(),
@@ -998,41 +1030,41 @@ unsafe extern "C" fn metric(
                 }
             }
             Metric::ScheduleLatencyHistogramBucketCount => {
-                #[cfg(target_has_atomic = "64")]
+                #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
                 {
                     metrics.schedule_latency_histogram_bucket_count(worker, bucket)
                 }
-                #[cfg(not(target_has_atomic = "64"))]
+                #[cfg(not(all(any(unix, windows), target_pointer_width = "64")))]
                 {
                     0
                 }
             }
             Metric::IoDriverFdRegisteredCount => {
-                #[cfg(target_has_atomic = "64")]
+                #[cfg(all(any(unix, windows), target_has_atomic = "64"))]
                 {
                     metrics.io_driver_fd_registered_count()
                 }
-                #[cfg(not(target_has_atomic = "64"))]
+                #[cfg(not(all(any(unix, windows), target_has_atomic = "64")))]
                 {
                     0
                 }
             }
             Metric::IoDriverFdDeregisteredCount => {
-                #[cfg(target_has_atomic = "64")]
+                #[cfg(all(any(unix, windows), target_has_atomic = "64"))]
                 {
                     metrics.io_driver_fd_deregistered_count()
                 }
-                #[cfg(not(target_has_atomic = "64"))]
+                #[cfg(not(all(any(unix, windows), target_has_atomic = "64")))]
                 {
                     0
                 }
             }
             Metric::IoDriverReadyCount => {
-                #[cfg(target_has_atomic = "64")]
+                #[cfg(all(any(unix, windows), target_has_atomic = "64"))]
                 {
                     metrics.io_driver_ready_count()
                 }
-                #[cfg(not(target_has_atomic = "64"))]
+                #[cfg(not(all(any(unix, windows), target_has_atomic = "64")))]
                 {
                     0
                 }
@@ -1443,6 +1475,7 @@ fn build_runtime(
         Flavor::MultiThread => tokio::runtime::Builder::new_multi_thread(),
     };
 
+    #[cfg(any(unix, windows))]
     if config.enable_io != 0 {
         builder.enable_io();
     }
@@ -1469,6 +1502,7 @@ fn build_runtime(
         builder.global_queue_interval(config.global_queue_interval);
     }
     builder.event_interval(config.event_interval);
+    #[cfg(any(unix, windows))]
     builder.max_io_events_per_tick(config.max_io_events_per_tick);
     if config.disable_lifo_slot != 0 {
         builder.telekio_disable_lifo_slot();

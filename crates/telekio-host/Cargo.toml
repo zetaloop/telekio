@@ -9,7 +9,10 @@ description = "Host runtime backend for Telekio"
 
 [dependencies]
 telekio = { version = "=0.1.0", path = "../telekio" }
-tokio = { version = "=0.1.0", path = "../telekio-tokio", package = "telekio-tokio", features = ["net", "rt", "rt-multi-thread", "schedule-latency", "signal", "sync", "test-util", "time"] }
+tokio = { version = "=0.1.0", path = "../telekio-tokio", package = "telekio-tokio", features = ["net", "rt", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
+
+[target.'cfg(all(any(unix, windows), target_pointer_width = "64"))'.dependencies]
+tokio = { version = "=0.1.0", path = "../telekio-tokio", package = "telekio-tokio", features = ["schedule-latency"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.168"

@@ -29,10 +29,15 @@ impl Builder {
 
     #[doc(hidden)]
     pub fn telekio_schedule_histogram(&mut self, kind: u8, a: u64, b: u64, c: u64) {
-        let histogram = HistogramBuilder::telekio_from_parts(kind, a, b, c);
-        self.metrics_schedule_latency_histogram_enabled = histogram.is_some();
-        if let Some(histogram) = histogram {
-            self.metrics_schedule_latency_histogram = histogram;
+        #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+        {
+            let histogram = HistogramBuilder::telekio_from_parts(kind, a, b, c);
+            self.metrics_schedule_latency_histogram_enabled = histogram.is_some();
+            if let Some(histogram) = histogram {
+                self.metrics_schedule_latency_histogram = histogram;
+            }
         }
+        #[cfg(not(all(any(unix, windows), target_pointer_width = "64")))]
+        let _ = (kind, a, b, c);
     }
 }

@@ -135,6 +135,11 @@ impl Handle {
         }
     }
 
+    #[cfg(not(target_has_atomic = "64"))]
+    pub(crate) fn host_worker_metrics(&self, worker: usize) -> &WorkerMetrics {
+        self.worker_metrics(worker)
+    }
+
     #[cfg(target_has_atomic = "64")]
     pub(crate) fn host_worker_metrics(&self, worker: usize) -> HostWorkerMetrics {
         let metric = |metric| HostMetric {

@@ -26,13 +26,13 @@ pub(crate) struct Host {
     panicked: AtomicBool,
     #[cfg(tokio_unstable)]
     roots: Mutex<Vec<std::sync::Weak<RootState>>>,
-    #[cfg(tokio_unstable)]
+    #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
     workers: Arc<Workers>,
-    #[cfg(tokio_unstable)]
+    #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
     observing: OnceLock<()>,
 }
 
-#[cfg(tokio_unstable)]
+#[cfg(all(tokio_unstable, target_has_atomic = "64"))]
 struct Workers {
     threads: Mutex<Vec<Option<std::thread::ThreadId>>>,
 }
@@ -169,6 +169,7 @@ impl<F: Future> Future for Root<'_, F> {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
+        #[cfg(target_has_atomic = "64")]
         this.host.record_worker();
         *this.state.waker.lock().unwrap() = Some(context.waker().clone());
         this.host.check_panic();
@@ -178,7 +179,7 @@ impl<F: Future> Future for Root<'_, F> {
     }
 }
 
-#[cfg(tokio_unstable)]
+#[cfg(all(tokio_unstable, target_has_atomic = "64"))]
 impl Workers {
     fn new() -> Self {
         Self {
@@ -208,9 +209,9 @@ impl Host {
             panicked: AtomicBool::new(false),
             #[cfg(tokio_unstable)]
             roots: Mutex::new(Vec::new()),
-            #[cfg(tokio_unstable)]
+            #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
             workers: Arc::new(Workers::new()),
-            #[cfg(tokio_unstable)]
+            #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
             observing: OnceLock::new(),
         })
     }
@@ -224,9 +225,9 @@ impl Host {
             panicked: AtomicBool::new(false),
             #[cfg(tokio_unstable)]
             roots: Mutex::new(Vec::new()),
-            #[cfg(tokio_unstable)]
+            #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
             workers: Arc::new(Workers::new()),
-            #[cfg(tokio_unstable)]
+            #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
             observing: OnceLock::new(),
         });
         host
@@ -240,7 +241,7 @@ impl Host {
         host_call(|| self.handle.metric(metric, worker))
     }
 
-    #[cfg(tokio_unstable)]
+    #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
     pub(crate) fn metric_bucket(
         &self,
         metric: ::telekio::Metric,
@@ -259,7 +260,7 @@ impl Host {
         .ok()
     }
 
-    #[cfg(tokio_unstable)]
+    #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
     fn observe_workers(self: &Arc<Self>) {
         self.observing.get_or_init(|| {
             let workers = Arc::clone(&self.workers);
@@ -272,19 +273,19 @@ impl Host {
         });
     }
 
-    #[cfg(tokio_unstable)]
+    #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
     pub(crate) fn record_worker(&self) {
         if let Some(worker) = self.worker_index() {
             self.store_worker(worker);
         }
     }
 
-    #[cfg(tokio_unstable)]
+    #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
     fn store_worker(&self, worker: usize) {
         self.workers.store(worker);
     }
 
-    #[cfg(tokio_unstable)]
+    #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
     pub(crate) fn worker_thread_id(
         self: &Arc<Self>,
         worker: usize,

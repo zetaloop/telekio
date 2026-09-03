@@ -37,7 +37,7 @@ impl Handle {
     }
 
     fn run_host_task(&self, task: task::Notified<Arc<Self>>) -> u64 {
-        #[cfg(tokio_unstable)]
+        #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
         self.telekio.host().record_worker();
         task::telekio::measure_poll(|| {
             #[cfg(tokio_unstable)]

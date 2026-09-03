@@ -6,9 +6,11 @@ use std::{
     task::{Context, Poll as RustPoll},
 };
 
+#[cfg(any(unix, windows))]
+use telekio::SignalKind;
 use telekio::{
-    CallResult, IoError, OperationPoll, OwnedBytes, Poll, SignalKind, SignalRequest, SignalResult,
-    Status, Waker,
+    CallResult, IoError, OperationPoll, OwnedBytes, Poll, SignalRequest, SignalResult, Status,
+    Waker,
 };
 
 use super::{HandleContext, HostResource};
