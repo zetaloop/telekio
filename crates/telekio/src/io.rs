@@ -16,6 +16,7 @@ pub enum IoKind {
     Fd,
     Socket,
     Handle,
+    Aio,
 }
 
 #[derive(Clone, Copy)]
@@ -23,6 +24,7 @@ pub enum IoKind {
 pub struct IoResource {
     kind: IoKind,
     raw: u64,
+    configure: unsafe extern "C" fn(*mut c_void, i32, usize) -> CallResult,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -211,6 +213,7 @@ impl IoResource {
         Self {
             kind: IoKind::Fd,
             raw: raw as u32 as u64,
+            configure: configure_empty,
         }
     }
 
@@ -222,6 +225,7 @@ impl IoResource {
         Self {
             kind: IoKind::Socket,
             raw,
+            configure: configure_empty,
         }
     }
 
@@ -233,7 +237,29 @@ impl IoResource {
         Self {
             kind: IoKind::Handle,
             raw,
+            configure: configure_empty,
         }
+    }
+
+    /// # Safety
+    ///
+    /// `data` must remain valid for `configure` until this registration call
+    /// returns.
+    #[doc(hidden)]
+    pub unsafe fn aio(
+        data: *mut c_void,
+        configure: unsafe extern "C" fn(*mut c_void, i32, usize) -> CallResult,
+    ) -> Self {
+        Self {
+            kind: IoKind::Aio,
+            raw: data as usize as u64,
+            configure,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn configure_aio(self, kqueue: i32, token: usize) -> CallResult {
+        unsafe { (self.configure)(self.raw as usize as *mut c_void, kqueue, token) }
     }
 
     #[doc(hidden)]
@@ -278,6 +304,8 @@ impl IoInterest {
     pub const WRITABLE: Self = Self(1 << 1);
     pub const PRIORITY: Self = Self(1 << 2);
     pub const ERROR: Self = Self(1 << 3);
+    pub const AIO: Self = Self(1 << 4);
+    pub const LIO: Self = Self(1 << 5);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -616,6 +644,10 @@ unsafe extern "C" fn clear_empty(_: *mut c_void, _: u8, _: IoReady) -> IoCallRes
         error: IoError::none(),
     }
 }
+unsafe extern "C" fn configure_empty(_: *mut c_void, _: i32, _: usize) -> CallResult {
+    CallResult::ok()
+}
+
 unsafe extern "C" fn release_empty(_: *mut c_void) -> CallResult {
     CallResult::ok()
 }

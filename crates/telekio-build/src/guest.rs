@@ -675,6 +675,15 @@ fn patch_time(generated: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
+    patch(&generated.join("src/io/interest.rs"), |source| {
+        for name in ["is_aio", "is_lio"] {
+            edit::set_method_visibility(source, "Interest", name, "pub(crate)")?;
+        }
+        Ok(())
+    })?;
+    patch(&generated.join("src/io/bsd/poll_aio.rs"), |source| {
+        mount(source, "telekio", "aio.rs")
+    })?;
     patch(&generated.join("src/runtime/io/mod.rs"), |source| {
         mount_with(source, Some("pub(crate)"), "telekio", "io.rs")
     })?;

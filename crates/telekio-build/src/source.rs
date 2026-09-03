@@ -79,7 +79,7 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
             "src/runtime/io/mod.rs",
             "io.rs",
             Some("pub(crate)"),
-            Some("#[cfg(target_os = \"linux\")]"),
+            Some("#[cfg(any(target_os = \"freebsd\", target_os = \"linux\"))]"),
         ),
         (
             "src/runtime/io/driver.rs",

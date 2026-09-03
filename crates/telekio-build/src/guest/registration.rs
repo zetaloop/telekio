@@ -198,6 +198,14 @@ fn telekio_interest(interest: Interest) -> ::telekio::IoInterest {
     if interest.is_error() {
         result |= ::telekio::IoInterest::ERROR;
     }
+    #[cfg(target_os = "freebsd")]
+    if interest.is_aio() {
+        result |= ::telekio::IoInterest::AIO;
+    }
+    #[cfg(target_os = "freebsd")]
+    if interest.is_lio() {
+        result |= ::telekio::IoInterest::LIO;
+    }
     #[cfg(any(target_os = "android", target_os = "linux"))]
     if interest.is_priority() {
         result |= ::telekio::IoInterest::PRIORITY;

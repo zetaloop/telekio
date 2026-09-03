@@ -2,7 +2,7 @@
 use super::Registration;
 
 pub(crate) trait Source {
-    fn telekio_resource(&self) -> ::telekio::IoResource;
+    fn telekio_resource(&mut self) -> ::telekio::IoResource;
 }
 
 pub(crate) struct Uring {
@@ -79,7 +79,7 @@ impl Drop for Uring {
 
 #[cfg(unix)]
 impl<T: std::os::fd::AsRawFd> Source for T {
-    fn telekio_resource(&self) -> ::telekio::IoResource {
+    fn telekio_resource(&mut self) -> ::telekio::IoResource {
         unsafe { ::telekio::IoResource::fd(self.as_raw_fd()) }
     }
 }
@@ -89,7 +89,7 @@ macro_rules! socket_source {
     ($($ty:ty),+ $(,)?) => {
         $(
             impl Source for $ty {
-                fn telekio_resource(&self) -> ::telekio::IoResource {
+                fn telekio_resource(&mut self) -> ::telekio::IoResource {
                     use std::os::windows::io::AsRawSocket;
                     unsafe { ::telekio::IoResource::socket(self.as_raw_socket() as u64) }
                 }
@@ -107,7 +107,7 @@ socket_source!(
 
 #[cfg(windows)]
 impl Source for mio::windows::NamedPipe {
-    fn telekio_resource(&self) -> ::telekio::IoResource {
+    fn telekio_resource(&mut self) -> ::telekio::IoResource {
         use std::os::windows::io::AsRawHandle;
         unsafe { ::telekio::IoResource::handle(self.as_raw_handle() as usize as u64) }
     }
