@@ -122,6 +122,7 @@ impl Registration {
         }
     }
 
+    #[cfg(windows)]
     pub(crate) fn try_operate(&self, request: ::telekio::IoRequest) -> ::telekio::IoPoll {
         self.shared.try_operate_telekio(request)
     }

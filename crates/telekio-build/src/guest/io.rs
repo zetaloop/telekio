@@ -5,6 +5,78 @@ pub(crate) trait Source {
     fn telekio_resource(&self) -> ::telekio::IoResource;
 }
 
+pub(crate) struct Uring {
+    #[cfg(all(
+        tokio_unstable,
+        feature = "io-uring",
+        feature = "rt",
+        feature = "fs",
+        target_os = "linux"
+    ))]
+    registration: std::sync::Mutex<Option<::telekio::IoDriverRegistration>>,
+}
+
+impl Uring {
+    pub(crate) const fn new() -> Self {
+        Self {
+            #[cfg(all(
+                tokio_unstable,
+                feature = "io-uring",
+                feature = "rt",
+                feature = "fs",
+                target_os = "linux"
+            ))]
+            registration: std::sync::Mutex::new(None),
+        }
+    }
+
+    #[cfg(all(
+        tokio_unstable,
+        feature = "io-uring",
+        feature = "rt",
+        feature = "fs",
+        target_os = "linux"
+    ))]
+    pub(crate) fn install(
+        &self,
+        registration: ::telekio::IoDriverRegistration,
+    ) -> std::io::Result<()> {
+        let mut current = self.registration.lock().unwrap();
+        if current.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "Tokio io_uring driver is already registered",
+            ));
+        }
+        *current = Some(registration);
+        Ok(())
+    }
+
+    #[cfg(all(
+        tokio_unstable,
+        feature = "io-uring",
+        feature = "rt",
+        feature = "fs",
+        target_os = "linux"
+    ))]
+    pub(crate) fn close(&mut self) {
+        _ = self.registration.get_mut().unwrap().take();
+    }
+}
+
+#[cfg(all(
+    tokio_unstable,
+    feature = "io-uring",
+    feature = "rt",
+    feature = "fs",
+    target_os = "linux"
+))]
+impl Drop for Uring {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 #[cfg(unix)]
 impl<T: std::os::fd::AsRawFd> Source for T {
     fn telekio_resource(&self) -> ::telekio::IoResource {

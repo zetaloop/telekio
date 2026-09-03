@@ -29,6 +29,7 @@ impl ScheduledIo {
         self.registration().ready(interest)
     }
 
+    #[cfg(windows)]
     pub(crate) fn try_operate_telekio(&self, request: ::telekio::IoRequest) -> ::telekio::IoPoll {
         self.registration().try_operate(request)
     }

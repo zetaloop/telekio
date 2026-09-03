@@ -394,9 +394,25 @@ impl Host {
         self.handle.signal(request)
     }
 
+    #[cfg(all(
+        tokio_unstable,
+        feature = "io-uring",
+        feature = "rt",
+        feature = "fs",
+        target_os = "linux"
+    ))]
+    pub(crate) fn register_io_driver(
+        &self,
+        resource: ::telekio::IoResource,
+        callback: ::telekio::Callback,
+    ) -> ::telekio::IoDriverResult {
+        self.handle.register_io_driver(resource, callback)
+    }
+
     #[cfg(any(
         feature = "net",
-        all(unix, any(feature = "process", feature = "signal"))
+        all(unix, any(feature = "process", feature = "signal")),
+        all(unix, feature = "rt", feature = "fs", feature = "io-uring")
     ))]
     #[track_caller]
     pub(crate) fn register_io(

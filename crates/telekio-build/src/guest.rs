@@ -658,6 +658,52 @@ fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
     patch(&generated.join("src/runtime/io/mod.rs"), |source| {
         mount_with(source, Some("pub(crate)"), "telekio", "io.rs")
     })?;
+    patch(&generated.join("src/runtime/io/driver.rs"), |source| {
+        edit::append_fields(
+            source,
+            "Handle",
+            &[edit::Field {
+                visibility: None,
+                name: "telekio_uring",
+                ty: "super::telekio::Uring",
+            }],
+        )?;
+        edit::append_record_fields(
+            source,
+            edit::Scope::Method {
+                owner: "Driver",
+                name: "new",
+            },
+            "Handle",
+            &[edit::FieldInit {
+                name: "telekio_uring",
+                value: "super::telekio::Uring::new()",
+            }],
+        )
+    })?;
+    patch(
+        &generated.join("src/runtime/io/driver/uring.rs"),
+        |source| {
+            edit::redirect_call(
+                source,
+                edit::Scope::Method {
+                    owner: "Handle",
+                    name: "try_init",
+                },
+                "add_uring_source",
+                "add_uring_source_host",
+            )?;
+            edit::add_attr(
+                source,
+                edit::AttrTarget::Method {
+                    owner: "Handle",
+                    name: "add_uring_source",
+                },
+                "#[expect(dead_code)]",
+            )?;
+            mount(source, "telekio", "uring.rs")
+        },
+    )?;
     patch(
         &generated.join("src/runtime/io/registration.rs"),
         |source| {
