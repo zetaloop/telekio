@@ -48,23 +48,23 @@ fn attached() -> ::telekio::Handle {
 impl Builder {
     pub(super) fn build_hosted_current_thread(&mut self) -> io::Result<Runtime> {
         let host = self.build_host(false)?;
-        let runtime = self.build_current_thread_runtime()?;
-        runtime.install_host(host);
+        let runtime = self.build_guest(Self::build_current_thread_runtime)?;
+        runtime.install_host(host, self.enable_io);
         Ok(runtime)
     }
 
     pub(super) fn build_hosted_local(&mut self) -> io::Result<LocalRuntime> {
         let host = self.build_host(true)?;
-        let runtime = self.build_current_thread_local_runtime()?;
-        runtime.install_host(host);
+        let runtime = self.build_guest(Self::build_current_thread_local_runtime)?;
+        runtime.install_host(host, self.enable_io);
         Ok(runtime)
     }
 
     #[cfg(feature = "rt-multi-thread")]
     pub(super) fn build_hosted_multi_thread(&mut self) -> io::Result<Runtime> {
         let host = self.build_host(false)?;
-        let runtime = self.build_threaded_runtime()?;
-        runtime.install_host(host);
+        let runtime = self.build_guest(Self::build_threaded_runtime)?;
+        runtime.install_host(host, self.enable_io);
         Ok(runtime)
     }
 
@@ -75,9 +75,26 @@ impl Builder {
             self.name(name);
         }
         self.enable_all();
-        let runtime = self.build_current_thread_runtime()?;
+        let runtime = self.build_guest(Self::build_current_thread_runtime)?;
         runtime.install_attached_host(handle);
         Ok(AttachedContext { runtime, flavor })
+    }
+
+    fn build_guest<T>(
+        &mut self,
+        build: impl FnOnce(&mut Self) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let enable_io = self.enable_io;
+        #[cfg(all(
+            not(test),
+            not(all(tokio_unstable, feature = "io-uring", target_os = "linux"))
+        ))]
+        {
+            self.enable_io = false;
+        }
+        let result = build(self);
+        self.enable_io = enable_io;
+        result
     }
 
     fn build_host(&self, local: bool) -> io::Result<::telekio::Runtime> {

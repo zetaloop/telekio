@@ -1,11 +1,26 @@
-#[cfg(any(test, not(feature = "rt"), not(feature = "signal")))]
+#[cfg(any(
+    test,
+    not(feature = "rt"),
+    all(
+        not(feature = "signal"),
+        any(not(unix), not(feature = "process"))
+    )
+))]
 pub(super) type RxFuture = crate::signal::RxFuture;
 
-#[cfg(all(not(test), feature = "rt", feature = "signal"))]
+#[cfg(all(
+    not(test),
+    feature = "rt",
+    any(feature = "signal", all(unix, feature = "process"))
+))]
 #[derive(Debug)]
 pub(crate) struct RxFuture(::telekio::Signal);
 
-#[cfg(all(not(test), feature = "rt", feature = "signal"))]
+#[cfg(all(
+    not(test),
+    feature = "rt",
+    any(feature = "signal", all(unix, feature = "process"))
+))]
 impl RxFuture {
     #[cfg(unix)]
     pub(crate) fn new(receiver: Self) -> Self {
@@ -24,7 +39,14 @@ impl RxFuture {
     }
 }
 
-#[cfg(all(unix, any(test, not(feature = "rt"), not(feature = "signal"))))]
+#[cfg(all(
+    unix,
+    any(
+        test,
+        not(feature = "rt"),
+        all(not(feature = "process"), not(feature = "signal"))
+    )
+))]
 pub(crate) fn signal(
     kind: super::SignalKind,
     handle: &crate::runtime::signal::Handle,
@@ -32,7 +54,13 @@ pub(crate) fn signal(
     super::signal_with_handle(kind, handle)
 }
 
-#[cfg(all(unix, not(test), feature = "rt", feature = "signal"))]
+#[cfg(all(
+    unix,
+    not(test),
+    feature = "rt",
+    any(feature = "process", feature = "signal")
+))]
+#[track_caller]
 pub(crate) fn signal(
     kind: super::SignalKind,
     _: &crate::runtime::signal::Handle,
@@ -53,6 +81,7 @@ macro_rules! console_signals {
             }
 
             #[cfg(all(not(test), feature = "rt", feature = "signal"))]
+            #[track_caller]
             pub(crate) fn $name() -> std::io::Result<RxFuture> {
                 crate::runtime::scheduler::Handle::current()
                     .host()

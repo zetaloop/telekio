@@ -3,8 +3,8 @@ use crate::runtime::{scheduler, task::telekio::Host};
 use std::sync::Arc;
 
 impl Runtime {
-    pub(crate) fn install_host(&self, runtime: ::telekio::Runtime) {
-        self.install(Host::new(runtime));
+    pub(crate) fn install_host(&self, runtime: ::telekio::Runtime, io_enabled: bool) {
+        self.install(Host::new(runtime, io_enabled));
     }
 
     #[cfg(not(test))]

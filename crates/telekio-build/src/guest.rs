@@ -910,6 +910,9 @@ fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn patch_signal(generated: &Path) -> Result<(), Box<dyn Error>> {
+    patch(&generated.join("src/runtime/driver.rs"), |source| {
+        mount(source, "telekio", "driver.rs")
+    })?;
     let unused_without_process = "#[cfg_attr(all(unix, not(test), feature = \"rt\", feature = \"signal\", not(feature = \"process\")), expect(dead_code))]";
     patch(&generated.join("src/runtime/signal/mod.rs"), |source| {
         for target in [
@@ -974,6 +977,12 @@ fn patch_signal(generated: &Path) -> Result<(), Box<dyn Error>> {
             edit::add_attr(source, target, unused)?;
         }
         edit::retarget_use(source, "RxFuture", "self::telekio::RxFuture")?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Function("signal"),
+            "signal",
+            "telekio_signal",
+        )?;
         edit::redirect_call(
             source,
             edit::Scope::Function("signal"),

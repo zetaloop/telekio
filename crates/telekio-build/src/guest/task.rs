@@ -22,6 +22,7 @@ pub(crate) trait HostSchedule: Schedule + Clone + Send + Sync + 'static {
 pub(crate) struct Host {
     runtime: Option<::telekio::Runtime>,
     handle: ::telekio::Handle,
+    io_enabled: bool,
     #[cfg(tokio_unstable)]
     panicked: AtomicBool,
     #[cfg(tokio_unstable)]
@@ -201,10 +202,11 @@ impl Workers {
 }
 
 impl Host {
-    pub(crate) fn new(runtime: ::telekio::Runtime) -> Arc<Self> {
+    pub(crate) fn new(runtime: ::telekio::Runtime, io_enabled: bool) -> Arc<Self> {
         Arc::new(Self {
             handle: runtime.handle(),
             runtime: Some(runtime),
+            io_enabled,
             #[cfg(tokio_unstable)]
             panicked: AtomicBool::new(false),
             #[cfg(tokio_unstable)]
@@ -221,6 +223,7 @@ impl Host {
         let host = Arc::new(Self {
             runtime: None,
             handle,
+            io_enabled: true,
             #[cfg(tokio_unstable)]
             panicked: AtomicBool::new(false),
             #[cfg(tokio_unstable)]
@@ -386,12 +389,17 @@ impl Host {
         ::telekio::Timer::from_result(self.handle.timer(deadline))
     }
 
-    #[cfg(feature = "signal")]
+    #[cfg(any(feature = "signal", all(unix, feature = "process")))]
     #[cfg_attr(test, expect(dead_code))]
+    #[track_caller]
     pub(crate) fn signal(
         &self,
         request: ::telekio::SignalRequest,
     ) -> std::io::Result<::telekio::Signal> {
+        assert!(
+            self.io_enabled,
+            "there is no signal driver running, must be called from the context of Tokio runtime"
+        );
         self.handle.signal(request)
     }
 
