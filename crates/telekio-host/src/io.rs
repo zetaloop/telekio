@@ -36,8 +36,18 @@ struct HostReady {
 struct Registration;
 
 #[cfg(unix)]
+struct RawIo(std::os::fd::RawFd);
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for RawIo {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.0
+    }
+}
+
+#[cfg(unix)]
 struct Registration {
-    io: Arc<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>>,
+    io: Arc<tokio::io::unix::AsyncFd<RawIo>>,
 }
 
 #[cfg(windows)]
@@ -255,7 +265,7 @@ fn register_inner(
     resource: IoResource,
     interest: IoInterest,
 ) -> io::Result<Registration> {
-    use std::os::fd::{BorrowedFd, RawFd};
+    use std::os::fd::RawFd;
 
     if resource.kind() != IoKind::Fd {
         return Err(io::Error::new(
@@ -270,11 +280,10 @@ fn register_inner(
             "invalid file descriptor",
         ));
     }
-    let fd = unsafe { BorrowedFd::borrow_raw(raw) }.try_clone_to_owned()?;
     let io = {
         let _guard = context.handle.enter();
         Arc::new(tokio::io::unix::AsyncFd::with_interest(
-            fd,
+            RawIo(raw),
             host_interest(interest)?,
         )?)
     };
@@ -516,7 +525,7 @@ fn operation_error(error: io::Error) -> OperationFuture {
 
 #[cfg(unix)]
 fn operation_ready(
-    io: Arc<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>>,
+    io: Arc<tokio::io::unix::AsyncFd<RawIo>>,
     interest: IoInterest,
 ) -> OperationFuture {
     match host_interest(interest) {

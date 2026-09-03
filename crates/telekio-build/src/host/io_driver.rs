@@ -1,13 +1,13 @@
 use super::*;
 use std::{
-    os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd},
+    os::fd::RawFd,
     sync::{Arc, Condvar, Mutex, Weak},
     task::{Context, Poll, Wake, Waker},
 };
 
 pub(crate) struct Registration {
     io: Arc<ScheduledIo>,
-    fd: OwnedFd,
+    fd: RawFd,
     wake: Arc<WakeState>,
 }
 
@@ -35,9 +35,7 @@ impl Handle {
         if fd < 0 {
             return Err(io::Error::from_raw_os_error(libc::EBADF));
         }
-        let fd = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?;
-        let raw = fd.as_raw_fd();
-        let mut source = mio::unix::SourceFd(&raw);
+        let mut source = mio::unix::SourceFd(&fd);
         let io = self.add_source(&mut source, Interest::READABLE)?;
         let wake = Arc::new(WakeState {
             io: Arc::downgrade(&io),
@@ -52,8 +50,7 @@ impl Handle {
     pub(crate) fn telekio_deregister(&self, registration: Registration) {
         registration.wake.begin_close();
         registration.io.clear_wakers();
-        let raw = registration.fd.as_raw_fd();
-        let mut source = mio::unix::SourceFd(&raw);
+        let mut source = mio::unix::SourceFd(&registration.fd);
         _ = self.deregister_source(&registration.io, &mut source);
         registration.wake.wait_closed();
     }

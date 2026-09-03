@@ -204,8 +204,8 @@ unsafe impl Sync for IoOperation {}
 impl IoResource {
     /// # Safety
     ///
-    /// `raw` must remain a valid file descriptor until the registration call
-    /// returns.
+    /// `raw` must remain a valid file descriptor until the resulting
+    /// registration is dropped.
     #[doc(hidden)]
     pub const unsafe fn fd(raw: i32) -> Self {
         Self {
