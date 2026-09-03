@@ -1,7 +1,12 @@
 use super::{Builder, TimerFlavor};
-use crate::runtime::HistogramBuilder;
+use crate::{runtime::HistogramBuilder, util::{RngSeedGenerator, rand::RngSeed}};
 
 impl Builder {
+    #[doc(hidden)]
+    pub fn telekio_rng_seed(&mut self, one: u32, two: u32) {
+        self.seed_generator = RngSeedGenerator::new(RngSeed::from_telekio(one, two));
+    }
+
     #[doc(hidden)]
     pub fn telekio_disable_lifo_slot(&mut self) {
         self.disable_lifo_slot = true;

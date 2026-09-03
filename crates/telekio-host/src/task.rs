@@ -9,7 +9,9 @@ use std::{
     time::Instant,
 };
 
-use telekio::{BlockingTask, CallResult, Future, OwnedBytes, Poll, Status, Task, Waker};
+use telekio::{
+    BlockingTask, CallResult, ExecutionState, Future, OwnedBytes, Poll, Status, Task, Waker,
+};
 
 use super::{
     Activity, HandleContext, OwnerContext, OwnerState, RuntimeKind, RuntimeOwner, TaskCleanup,
@@ -60,6 +62,10 @@ pub(super) unsafe extern "C" fn handle_block_on(
         Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
         Err(payload) => host_panic(&*payload),
     }
+}
+
+fn with_execution<R>(call: impl FnOnce(*mut ExecutionState) -> R) -> R {
+    tokio::runtime::telekio::with_execution(|state| call(state.cast()))
 }
 
 fn block_on_result(outcome: Result<Status, Box<dyn Any + Send>>) -> CallResult {
@@ -200,7 +206,7 @@ impl RustFuture for GuestFuture {
             return RustPoll::Ready(Status::Error);
         }
         let waker = unsafe { Waker::from_ref(context.waker()) };
-        match self.future.poll(&waker) {
+        match with_execution(|state| self.future.poll(unsafe { &mut *state }, &waker)) {
             Poll::Pending => RustPoll::Pending,
             Poll::Ready => RustPoll::Ready(Status::Ok),
             Poll::Panicked => RustPoll::Ready(Status::Panicked),
@@ -235,7 +241,7 @@ impl RustFuture for GuestTask {
     fn poll(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> RustPoll<()> {
         let waker = unsafe { Waker::from_ref(context.waker()) };
         let started = Instant::now();
-        let poll = self.task.poll(&waker);
+        let poll = with_execution(|state| self.task.poll(unsafe { &mut *state }, &waker));
         if let Some(guest) = poll.duration_nanos() {
             let actual = started.elapsed().as_nanos().min(u64::MAX.into()) as u64;
             tokio::runtime::Handle::telekio_record_poll(actual, guest);
@@ -266,7 +272,7 @@ impl RustFuture for TrackedTask {
 impl Drop for GuestTask {
     fn drop(&mut self) {
         if !self.complete {
-            unsafe { self.task.cancel() };
+            with_execution(|state| unsafe { self.task.cancel(state) });
         }
     }
 }
@@ -290,7 +296,7 @@ impl GuestBlockingTask {
     }
 
     fn run(&mut self) {
-        unsafe { self.task.run() };
+        with_execution(|state| unsafe { self.task.run(state) });
         self.complete = true;
     }
 }
@@ -307,7 +313,7 @@ impl TrackedBlockingTask {
 impl Drop for GuestBlockingTask {
     fn drop(&mut self) {
         if !self.complete {
-            unsafe { self.task.cancel() };
+            with_execution(|state| unsafe { self.task.cancel(state) });
         }
     }
 }

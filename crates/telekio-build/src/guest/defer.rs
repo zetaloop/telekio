@@ -1,3 +1,4 @@
+#[cfg(feature = "rt")]
 use std::{
     cell::Cell,
     future::Future,
@@ -5,25 +6,49 @@ use std::{
     task::{Context, Poll},
 };
 
+type State = ::telekio::ExecutionState;
+
+fn execution_state() -> *mut State {
+    ::telekio::execution_state()
+}
+
+#[path = "../execution.rs"]
+mod access;
+pub(super) use access::budget;
+#[cfg(any(feature = "macros", all(feature = "sync", feature = "rt")))]
+pub(super) use access::rng;
+#[cfg(feature = "rt")]
+pub(super) use access::task_id;
+
+#[cfg(feature = "rt")]
 thread_local! {
     static ACTIVE: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(feature = "rt-multi-thread")]
+thread_local! {
     static BLOCKING_BUDGET: Cell<Option<crate::task::coop::Budget>> = const { Cell::new(None) };
 }
 
+#[cfg(feature = "rt")]
 struct Guard;
 
+#[cfg(feature = "rt")]
 impl Drop for Guard {
     fn drop(&mut self) {
         ACTIVE.set(ACTIVE.get() - 1);
     }
 }
 
+#[cfg(feature = "rt")]
 pub(crate) struct Active<F>(F);
 
+#[cfg(feature = "rt")]
 pub(crate) fn active<F: Future>(future: F) -> Active<F> {
     Active(future)
 }
 
+#[cfg(feature = "rt")]
 pub(crate) fn enter<R>(call: impl FnOnce() -> R) -> R {
     ACTIVE.set(ACTIVE.get() + 1);
     let _guard = Guard;
@@ -44,6 +69,7 @@ pub(crate) fn restore() {
     }
 }
 
+#[cfg(feature = "rt")]
 impl<F: Future> Future for Active<F> {
     type Output = F::Output;
 
@@ -53,7 +79,7 @@ impl<F: Future> Future for Active<F> {
     }
 }
 
-#[cfg(tokio_unstable)]
+#[cfg(all(tokio_unstable, feature = "rt"))]
 pub(super) fn worker_index<F>(
     _: F,
 ) -> impl FnOnce(Option<&crate::runtime::scheduler::Context>) -> Option<usize>

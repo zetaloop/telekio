@@ -38,9 +38,10 @@ pub(super) unsafe extern "C" fn telekio_guest_context(
 
 unsafe extern "C" fn enter_guest_context(
     _: *mut std::ffi::c_void,
+    execution: *mut ::telekio::ExecutionState,
     call: ::telekio::GuestCall,
 ) -> ::telekio::CallResult {
-    unsafe { call.invoke() }
+    unsafe { ::telekio::with_execution_state(execution, || call.invoke()) }
 }
 
 unsafe extern "C" fn detach_guest_context(_: *mut std::ffi::c_void) -> ::telekio::CallResult {

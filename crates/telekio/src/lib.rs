@@ -15,12 +15,14 @@ pub use io::{
 };
 pub use runtime::telekio_guest_attach;
 pub use runtime::{
-    AttachResult, Blocking, BlockingTask, BoolResult, CallResult, ClockResult, Future, GuestCall,
-    Handle, Metric, MetricResult, NameResult, OwnedBytes, Poll, RawAttachment, RawHandle,
-    RawRuntime, Runtime, RuntimeApi, Status, Task, TaskIdResult, TaskPoll, Waker,
+    AttachResult, Blocking, BlockingTask, BoolResult, CallResult, ClockResult, ExecutionState,
+    Future, GuestCall, Handle, Metric, MetricResult, NameResult, OwnedBytes, Poll, RawAttachment,
+    RawHandle, RawRuntime, Runtime, RuntimeApi, Status, Task, TaskIdResult, TaskPoll, Waker,
 };
 #[doc(hidden)]
-pub use runtime::{attached, detach_attached, install_handle};
+pub use runtime::{
+    attached, detach_attached, execution_state, install_handle, with_execution_state,
+};
 pub use signal::{Signal, SignalKind, SignalRequest, SignalResult};
 pub use time::{ClockSample, DurationParts, InstantOffset, OperationPoll, Timer, TimerResult};
 

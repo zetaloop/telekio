@@ -80,6 +80,7 @@ impl Builder {
             }
         };
         let keep_alive = self.keep_alive.unwrap_or_default();
+        let (rng_one, rng_two) = self.seed_generator.telekio_parts();
         let config = ::telekio::RuntimeConfig {
             flavor,
             enable_io: self.enable_io.into(),
@@ -112,6 +113,8 @@ impl Builder {
             global_queue_interval: self.global_queue_interval.unwrap_or_default(),
             event_interval: self.event_interval,
             max_io_events_per_tick: self.nevents,
+            rng_one,
+            rng_two,
             name: unsafe { ::telekio::Bytes::borrow(self.name.as_deref()) },
             disable_lifo_slot: self.disable_lifo_slot.into(),
             eager_driver_handoff: self.enable_eager_driver_handoff.into(),
@@ -196,13 +199,16 @@ pub(super) unsafe extern "C" fn telekio_guest_context(
 #[cfg(not(test))]
 unsafe extern "C" fn enter_guest_context(
     data: *mut c_void,
+    execution: *mut ::telekio::ExecutionState,
     call: ::telekio::GuestCall,
 ) -> ::telekio::CallResult {
-    match catch_unwind(AssertUnwindSafe(|| {
-        let context = unsafe { &*data.cast::<AttachedContext>() };
-        context
-            .runtime
-            .enter_attached(context.flavor, || unsafe { call.invoke() })
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
+        ::telekio::with_execution_state(execution, || {
+            let context = &*data.cast::<AttachedContext>();
+            context
+                .runtime
+                .enter_attached(context.flavor, || call.invoke())
+        })
     })) {
         Ok(result) => result,
         Err(payload) => ::telekio::CallResult::panicked(&*payload),

@@ -4,16 +4,18 @@ use super::{
 };
 use crate::{future::Future as TaskFuture, runtime::{TaskMeta, task}};
 use std::{
-    future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
-    pin::Pin,
     sync::{
         Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    task::{Context, Poll, Waker},
+    task::Waker,
     time::Duration,
 };
+#[cfg(tokio_unstable)]
+use std::{future::Future, pin::Pin, task::Context};
+#[cfg(any(tokio_unstable, feature = "taskdump"))]
+use std::task::Poll;
 
 pub(crate) trait HostSchedule: Schedule + Clone + Send + Sync + 'static {
     fn registry(&self) -> &Registry<Self>;
@@ -84,8 +86,6 @@ struct BlockingRunner<S: HostSchedule> {
     task: Option<UnownedTask<S>>,
 }
 
-struct Budgeted<F>(F);
-
 struct HostCall {
     started: std::time::Instant,
     outer: bool,
@@ -133,10 +133,6 @@ struct TraceGuard<'a>(&'a TraceLock);
 #[cfg(feature = "taskdump")]
 struct TraceCompletion(Option<Arc<TraceRequest>>);
 
-pub(crate) fn budget<F: Future>(future: F) -> impl Future<Output = F::Output> {
-    Budgeted(future)
-}
-
 pub(crate) fn measure_poll(call: impl FnOnce()) -> u64 {
     let host_before = HOST_CALLS.get().1;
     let started = std::time::Instant::now();
@@ -170,15 +166,6 @@ impl Drop for HostCall {
             elapsed
         };
         HOST_CALLS.set((depth - 1, elapsed));
-    }
-}
-
-impl<F: Future> Future for Budgeted<F> {
-    type Output = F::Output;
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let future = unsafe { self.map_unchecked_mut(|budgeted| &mut budgeted.0) };
-        crate::task::coop::budget(|| future.poll(context))
     }
 }
 
@@ -978,10 +965,11 @@ impl<S: HostSchedule> Runner<S> {
 
 unsafe extern "C" fn poll_runner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
+    execution: *mut ::telekio::ExecutionState,
     waker: *const ::telekio::Waker,
 ) -> ::telekio::TaskPoll {
     match catch_unwind(AssertUnwindSafe(|| unsafe {
-        poll_runner_inner::<S>(data, waker)
+        ::telekio::with_execution_state(execution, || poll_runner_inner::<S>(data, waker))
     })) {
         Ok(poll) => poll,
         Err(_) => {
@@ -1039,10 +1027,13 @@ unsafe fn poll_runner_inner<S: HostSchedule>(
 
 unsafe extern "C" fn cancel_runner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
+    execution: *mut ::telekio::ExecutionState,
 ) -> ::telekio::CallResult {
-    callback(|| {
-        let runner = unsafe { &*data.cast::<Runner<S>>() };
-        runner.cancel();
+    callback(|| unsafe {
+        ::telekio::with_execution_state(execution, || {
+            let runner = &*data.cast::<Runner<S>>();
+            runner.cancel();
+        });
     })
 }
 
@@ -1054,24 +1045,30 @@ unsafe extern "C" fn release_runner<S: HostSchedule>(
 
 unsafe extern "C" fn run_blocking<S: HostSchedule>(
     data: *mut std::ffi::c_void,
+    execution: *mut ::telekio::ExecutionState,
 ) -> ::telekio::CallResult {
-    callback(|| {
-        let runner = unsafe { &mut *data.cast::<BlockingRunner<S>>() };
-        let schedule = runner.schedule.clone();
-        schedule.enter(|| runner.task.take().expect("blocking task ran twice").run());
+    callback(|| unsafe {
+        ::telekio::with_execution_state(execution, || {
+            let runner = &mut *data.cast::<BlockingRunner<S>>();
+            let schedule = runner.schedule.clone();
+            schedule.enter(|| runner.task.take().expect("blocking task ran twice").run());
+        });
     })
 }
 
 unsafe extern "C" fn cancel_blocking<S: HostSchedule>(
     data: *mut std::ffi::c_void,
+    execution: *mut ::telekio::ExecutionState,
 ) -> ::telekio::CallResult {
-    callback(|| {
-        let runner = unsafe { &mut *data.cast::<BlockingRunner<S>>() };
-        let schedule = runner.schedule.clone();
-        schedule.enter(|| {
-            if let Some(task) = runner.task.take() {
-                task.shutdown();
-            }
+    callback(|| unsafe {
+        ::telekio::with_execution_state(execution, || {
+            let runner = &mut *data.cast::<BlockingRunner<S>>();
+            let schedule = runner.schedule.clone();
+            schedule.enter(|| {
+                if let Some(task) = runner.task.take() {
+                    task.shutdown();
+                }
+            });
         });
     })
 }

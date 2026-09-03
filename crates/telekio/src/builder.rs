@@ -93,6 +93,8 @@ pub struct RuntimeConfig {
     pub global_queue_interval: u32,
     pub event_interval: u32,
     pub max_io_events_per_tick: usize,
+    pub rng_one: u32,
+    pub rng_two: u32,
     pub name: Bytes,
     pub disable_lifo_slot: u8,
     pub eager_driver_handoff: u8,

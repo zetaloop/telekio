@@ -10,7 +10,7 @@ impl CurrentThread {
                 .as_current_thread()
                 .telekio
                 .host()
-                .runtime_block_on(context::telekio::active(task::telekio::budget(future)))
+                .runtime_block_on(context::telekio::active(future))
         })
     }
 }
@@ -73,12 +73,10 @@ impl HostSchedule for Arc<Handle> {
         })
         .unwrap_or(false);
         if current {
-            context::telekio::enter(|| crate::task::coop::budget(run))
+            context::telekio::enter(run)
         } else {
             let handle = scheduler::Handle::CurrentThread(Arc::clone(self));
-            context::enter_runtime(&handle, false, |_| {
-                context::telekio::enter(|| crate::task::coop::budget(run))
-            })
+            context::enter_runtime(&handle, false, |_| context::telekio::enter(run))
         }
     }
 

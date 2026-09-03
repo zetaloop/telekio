@@ -330,7 +330,8 @@ impl Attachment {
             output: None,
         };
         let call = unsafe { GuestCall::from_raw((&raw mut state).cast(), run_guest_call::<F, R>) };
-        unsafe { raw.enter(call) }.resume("failed to enter Telekio guest runtime");
+        tokio::runtime::telekio::with_execution(|state| unsafe { raw.enter(state.cast(), call) })
+            .resume("failed to enter Telekio guest runtime");
         drop(activity);
         state.output.take().expect("Telekio guest call did not run")
     }
@@ -1564,6 +1565,7 @@ fn build_runtime(
     builder.event_interval(config.event_interval);
     #[cfg(any(unix, windows))]
     builder.max_io_events_per_tick(config.max_io_events_per_tick);
+    builder.telekio_rng_seed(config.rng_one, config.rng_two);
     if config.disable_lifo_slot != 0 {
         builder.telekio_disable_lifo_slot();
     }

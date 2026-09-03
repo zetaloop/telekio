@@ -30,6 +30,8 @@ fn prepare_guest_with(generated: PathBuf, telekio: Value) -> Result<PathBuf, Box
     patch_worker_metrics(&generated.join("src/runtime/metrics/worker.rs"))?;
     patch_runtime_metrics(&generated.join("src/runtime/metrics/runtime.rs"))?;
     patch_context(&generated.join("src/runtime/context/blocking.rs"))?;
+    patch_coop(&generated.join("src/task/coop/mod.rs"))?;
+    patch_rand(&generated)?;
     patch_defer(&generated)?;
     patch_time(&generated)?;
     patch_io(&generated)?;
@@ -1040,9 +1042,37 @@ fn patch_signal(generated: &Path) -> Result<(), Box<dyn Error>> {
     })
 }
 
+fn patch_coop(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| mount(source, "telekio", "coop.rs"))
+}
+
+fn patch_rand(generated: &Path) -> Result<(), Box<dyn Error>> {
+    patch(&generated.join("src/util/rand.rs"), |source| {
+        mount(source, "telekio", "rand.rs")
+    })?;
+    patch(&generated.join("src/util/rand/rt.rs"), |source| {
+        mount(source, "telekio", "rng_seed.rs")
+    })
+}
+
 fn patch_defer(generated: &Path) -> Result<(), Box<dyn Error>> {
     patch(&generated.join("src/runtime/context.rs"), |source| {
         mount_with(source, Some("pub(crate)"), "telekio", "defer.rs")?;
+        for (function, call, helper) in [
+            ("thread_rng_n", "with", "telekio::rng"),
+            ("budget", "try_with", "telekio::budget"),
+            ("set_current_task_id", "try_with", "telekio::task_id"),
+            ("current_task_id", "try_with", "telekio::task_id"),
+        ] {
+            edit::delegate_closure(
+                source,
+                edit::Scope::Function(function),
+                edit::Call::Method(call),
+                0,
+                helper,
+                &[],
+            )?;
+        }
         edit::delegate_closure(
             source,
             edit::Scope::Function("worker_index"),
@@ -1050,11 +1080,6 @@ fn patch_defer(generated: &Path) -> Result<(), Box<dyn Error>> {
             0,
             "telekio::worker_index",
             &[],
-        )?;
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Module("telekio"),
-            "#[cfg(feature = \"rt\")]",
         )
     })?;
     patch(&generated.join("src/task/yield_now.rs"), |source| {

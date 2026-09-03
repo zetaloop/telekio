@@ -50,13 +50,26 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
     for (target, helper, visibility, attribute) in [
         ("src/runtime/builder.rs", "builder.rs", None, None),
         (
+            "src/runtime/context.rs",
+            "context.rs",
+            Some("pub(crate)"),
+            None,
+        ),
+        ("src/task/coop/mod.rs", "coop.rs", None, None),
+        ("src/util/rand.rs", "rand.rs", None, None),
+        (
             "src/runtime/handle.rs",
             "handle.rs",
             Some("pub(crate)"),
             None,
         ),
         ("src/runtime/id.rs", "id.rs", None, None),
-        ("src/runtime/mod.rs", "runtime.rs", Some("pub"), None),
+        (
+            "src/runtime/mod.rs",
+            "runtime.rs",
+            Some("pub"),
+            Some("#[cfg(feature = \"rt\")]"),
+        ),
         (
             "src/runtime/process.rs",
             "process.rs",
@@ -142,6 +155,25 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
     let mut contents = fs::read_to_string(&target)?;
     edit::rename_method(&mut contents, "Id", "next", "next_local")?;
     edit::mount_module(&mut contents, None, "telekio", &helper)?;
+    fs::write(target, contents)?;
+
+    let target = source.join("src/runtime/context.rs");
+    let mut contents = fs::read_to_string(&target)?;
+    for (function, call, helper) in [
+        ("thread_rng_n", "with", "telekio::rng"),
+        ("budget", "try_with", "telekio::budget"),
+        ("set_current_task_id", "try_with", "telekio::task_id"),
+        ("current_task_id", "try_with", "telekio::task_id"),
+    ] {
+        edit::delegate_closure(
+            &mut contents,
+            edit::Scope::Function(function),
+            edit::Call::Method(call),
+            0,
+            helper,
+            &[],
+        )?;
+    }
     fs::write(target, contents)?;
 
     let target = source.join("src/runtime/scheduler/multi_thread/handle.rs");

@@ -24,7 +24,7 @@ impl Runtime {
         crate::runtime::context::enter_runtime(
             &self.handle.inner,
             flavor == ::telekio::Flavor::MultiThread,
-            |_| crate::runtime::context::telekio::enter(|| crate::task::coop::budget(call)),
+            |_| crate::runtime::context::telekio::enter(call),
         )
     }
 

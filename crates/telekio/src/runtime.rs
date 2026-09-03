@@ -6,6 +6,7 @@ use crate::{
 
 use std::{
     any::Any,
+    cell::Cell,
     ffi::c_void,
     fmt,
     future::Future as RustFuture,
@@ -18,6 +19,10 @@ use std::{
 };
 
 static ATTACHED: Mutex<Option<Handle>> = Mutex::new(None);
+
+thread_local! {
+    static EXECUTION: Cell<*mut ExecutionState> = const { Cell::new(std::ptr::null_mut()) };
+}
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -35,7 +40,7 @@ pub struct RawRuntime {
 #[repr(C)]
 pub struct RawAttachment {
     data: *mut c_void,
-    enter: unsafe extern "C" fn(*mut c_void, GuestCall) -> CallResult,
+    enter: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, GuestCall) -> CallResult,
     detach: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
@@ -50,6 +55,15 @@ pub struct GuestCall {
 pub struct AttachResult {
     pub call: CallResult,
     pub attachment: RawAttachment,
+}
+
+#[repr(C)]
+pub struct ExecutionState {
+    pub task_id: u64,
+    pub budget: u16,
+    pub rng_one: u32,
+    pub rng_two: u32,
+    pub rng_active: u8,
 }
 
 pub struct Handle {
@@ -195,14 +209,14 @@ pub struct OwnedBytes {
 #[repr(C)]
 pub struct Future {
     data: *mut c_void,
-    poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> Poll,
+    poll: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, *const Waker) -> Poll,
 }
 
 #[repr(C)]
 pub struct Task {
     data: *mut c_void,
-    poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> TaskPoll,
-    cancel: unsafe extern "C" fn(*mut c_void) -> CallResult,
+    poll: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, *const Waker) -> TaskPoll,
+    cancel: unsafe extern "C" fn(*mut c_void, *mut ExecutionState) -> CallResult,
     release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
@@ -217,8 +231,8 @@ pub struct TaskPoll {
 #[repr(C)]
 pub struct BlockingTask {
     data: *mut c_void,
-    run: unsafe extern "C" fn(*mut c_void) -> CallResult,
-    cancel: unsafe extern "C" fn(*mut c_void) -> CallResult,
+    run: unsafe extern "C" fn(*mut c_void, *mut ExecutionState) -> CallResult,
+    cancel: unsafe extern "C" fn(*mut c_void, *mut ExecutionState) -> CallResult,
     release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
@@ -272,7 +286,7 @@ impl RawAttachment {
     #[doc(hidden)]
     pub const unsafe fn from_raw(
         data: *mut c_void,
-        enter: unsafe extern "C" fn(*mut c_void, GuestCall) -> CallResult,
+        enter: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, GuestCall) -> CallResult,
         detach: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
@@ -286,8 +300,8 @@ impl RawAttachment {
     ///
     /// The plugin defining these callbacks must remain loaded.
     #[doc(hidden)]
-    pub unsafe fn enter(&self, call: GuestCall) -> CallResult {
-        unsafe { (self.enter)(self.data, call) }
+    pub unsafe fn enter(&self, state: *mut ExecutionState, call: GuestCall) -> CallResult {
+        unsafe { (self.enter)(self.data, state, call) }
     }
 
     /// # Safety
@@ -321,6 +335,35 @@ impl GuestCall {
     }
 }
 
+#[doc(hidden)]
+pub fn execution_state() -> *mut ExecutionState {
+    EXECUTION.get()
+}
+
+/// # Safety
+///
+/// `state` must remain exclusively available on the current thread for the
+/// duration of `call`.
+#[doc(hidden)]
+pub unsafe fn with_execution_state<R>(state: *mut ExecutionState, call: impl FnOnce() -> R) -> R {
+    struct Reset(*mut ExecutionState);
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            EXECUTION.set(self.0);
+        }
+    }
+
+    assert!(!state.is_null(), "Tokio execution state is missing");
+    let previous = EXECUTION.replace(state);
+    assert!(
+        previous.is_null() || previous == state,
+        "another Tokio execution state is active"
+    );
+    let _reset = Reset(previous);
+    call()
+}
+
 impl RawHandle {
     pub const fn is_empty(self) -> bool {
         self.context.is_null() || self.api.is_null()
@@ -349,14 +392,14 @@ impl Future {
     #[doc(hidden)]
     pub const unsafe fn from_raw(
         data: *mut c_void,
-        poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> Poll,
+        poll: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, *const Waker) -> Poll,
     ) -> Self {
         Self { data, poll }
     }
 
     #[doc(hidden)]
-    pub fn poll(&mut self, waker: &Waker) -> Poll {
-        unsafe { (self.poll)(self.data, waker) }
+    pub fn poll(&mut self, state: &mut ExecutionState, waker: &Waker) -> Poll {
+        unsafe { (self.poll)(self.data, state, waker) }
     }
 }
 
@@ -404,8 +447,8 @@ impl Task {
     #[doc(hidden)]
     pub const unsafe fn from_raw(
         data: *mut c_void,
-        poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> TaskPoll,
-        cancel: unsafe extern "C" fn(*mut c_void) -> CallResult,
+        poll: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, *const Waker) -> TaskPoll,
+        cancel: unsafe extern "C" fn(*mut c_void, *mut ExecutionState) -> CallResult,
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
@@ -417,16 +460,16 @@ impl Task {
     }
 
     #[doc(hidden)]
-    pub fn poll(&mut self, waker: &Waker) -> TaskPoll {
-        unsafe { (self.poll)(self.data, waker) }
+    pub fn poll(&mut self, state: &mut ExecutionState, waker: &Waker) -> TaskPoll {
+        unsafe { (self.poll)(self.data, state, waker) }
     }
 
     /// # Safety
     ///
     /// The task must not have been cancelled or completed already.
     #[doc(hidden)]
-    pub unsafe fn cancel(&mut self) {
-        unsafe { (self.cancel)(self.data) }.resume("failed to cancel Tokio task");
+    pub unsafe fn cancel(&mut self, state: *mut ExecutionState) {
+        unsafe { (self.cancel)(self.data, state) }.resume("failed to cancel Tokio task");
     }
 }
 
@@ -445,8 +488,8 @@ impl BlockingTask {
     #[doc(hidden)]
     pub const unsafe fn from_raw(
         data: *mut c_void,
-        run: unsafe extern "C" fn(*mut c_void) -> CallResult,
-        cancel: unsafe extern "C" fn(*mut c_void) -> CallResult,
+        run: unsafe extern "C" fn(*mut c_void, *mut ExecutionState) -> CallResult,
+        cancel: unsafe extern "C" fn(*mut c_void, *mut ExecutionState) -> CallResult,
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
@@ -461,16 +504,16 @@ impl BlockingTask {
     ///
     /// This task must not have been run or cancelled already.
     #[doc(hidden)]
-    pub unsafe fn run(&mut self) {
-        unsafe { (self.run)(self.data) }.resume("failed to run Tokio blocking task");
+    pub unsafe fn run(&mut self, state: *mut ExecutionState) {
+        unsafe { (self.run)(self.data, state) }.resume("failed to run Tokio blocking task");
     }
 
     /// # Safety
     ///
     /// This task must not have been run or cancelled already.
     #[doc(hidden)]
-    pub unsafe fn cancel(&mut self) {
-        unsafe { (self.cancel)(self.data) }.resume("failed to cancel Tokio blocking task");
+    pub unsafe fn cancel(&mut self, state: *mut ExecutionState) {
+        unsafe { (self.cancel)(self.data, state) }.resume("failed to cancel Tokio blocking task");
     }
 }
 
@@ -913,21 +956,27 @@ unsafe extern "C" fn release_bytes(data: *mut u8, len: usize) {
     }
 }
 
-unsafe extern "C" fn poll_future<F: RustFuture>(data: *mut c_void, waker: *const Waker) -> Poll {
+unsafe extern "C" fn poll_future<F: RustFuture>(
+    data: *mut c_void,
+    execution: *mut ExecutionState,
+    waker: *const Waker,
+) -> Poll {
     let state = unsafe { &mut *data.cast::<FutureState<F>>() };
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let waker = unsafe { (*waker).clone_rust_waker() };
-        let mut context = Context::from_waker(&waker);
-        let poll = state
-            .future
-            .as_mut()
-            .expect("completed future was polled")
-            .as_mut()
-            .poll(&mut context);
-        if poll.is_ready() {
-            state.future = None;
-        }
-        poll
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        with_execution_state(execution, || {
+            let waker = (*waker).clone_rust_waker();
+            let mut context = Context::from_waker(&waker);
+            let poll = state
+                .future
+                .as_mut()
+                .expect("completed future was polled")
+                .as_mut()
+                .poll(&mut context);
+            if poll.is_ready() {
+                state.future = None;
+            }
+            poll
+        })
     }));
     match result {
         Ok(RustPoll::Pending) => Poll::Pending,
@@ -1041,8 +1090,12 @@ unsafe fn raw_drop(data: *const ()) {
     unsafe { (waker.release)(waker.data) }.resume("failed to release Tokio waker");
 }
 
-unsafe extern "C" fn enter_empty(_: *mut c_void, call: GuestCall) -> CallResult {
-    unsafe { call.invoke() }
+unsafe extern "C" fn enter_empty(
+    _: *mut c_void,
+    state: *mut ExecutionState,
+    call: GuestCall,
+) -> CallResult {
+    unsafe { with_execution_state(state, || call.invoke()) }
 }
 
 unsafe extern "C" fn detach_empty(_: *mut c_void) -> CallResult {

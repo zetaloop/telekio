@@ -6,6 +6,10 @@ thread_local! {
 }
 
 impl Id {
+    pub(crate) fn from_telekio(value: u64) -> Self {
+        Self(std::num::NonZeroU64::new(value).expect("invalid Tokio task ID"))
+    }
+
     pub(crate) fn next() -> Self {
         TASK_ID.take().unwrap_or_else(Self::next_local)
     }
@@ -23,7 +27,7 @@ impl Id {
         }
     }
 
-        let id = Id(std::num::NonZeroU64::new(value).expect("invalid Tokio task ID"));
+        let id = Id::from_telekio(value);
         let reset = Reset(TASK_ID.replace(Some(id)));
         assert!(reset.0.is_none(), "Tokio task ID override is already active");
         call()
