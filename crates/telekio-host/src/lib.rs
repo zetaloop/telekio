@@ -331,12 +331,6 @@ impl OwnerState {
         self.state.lock().unwrap().accepting
     }
 
-    fn accepting(&self) -> Result<(), String> {
-        self.is_accepting()
-            .then_some(())
-            .ok_or_else(|| "Tokio owner is shutting down".to_owned())
-    }
-
     fn callback(self: &Arc<Self>, waker: std::task::Waker) -> Option<CallbackCleanup> {
         let mut state = self.state.lock().unwrap();
         if !state.accepting {
@@ -845,11 +839,10 @@ unsafe extern "C" fn metric(
 ) -> MetricResult {
     match catch_unwind(AssertUnwindSafe(|| {
         let context = unsafe { &*context.cast::<HandleContext>() };
-        context.owner.accepting()?;
         let metrics = context.handle.metrics();
         #[cfg(not(target_has_atomic = "64"))]
         let _ = (worker, bucket);
-        Ok::<_, String>(match metric {
+        match metric {
             Metric::GlobalQueueDepth => metrics.global_queue_depth() as u64,
             Metric::NumWorkers => metrics.num_workers() as u64,
             Metric::NumBlockingThreads => metrics.num_blocking_threads() as u64,
@@ -1043,15 +1036,11 @@ unsafe extern "C" fn metric(
                     0
                 }
             }
-        })
+        }
     })) {
-        Ok(Ok(value)) => MetricResult {
+        Ok(value) => MetricResult {
             call: result(Status::Ok, OwnedBytes::empty()),
             value,
-        },
-        Ok(Err(error)) => MetricResult {
-            call: result(Status::Error, OwnedBytes::from_string(error)),
-            value: 0,
         },
         Err(payload) => MetricResult {
             call: host_panic(&*payload),
