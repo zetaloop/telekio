@@ -32,16 +32,18 @@ impl Handle {
         self.telekio.install(host);
     }
 
-    fn run_host_task(self: &Arc<Self>, task: task::Notified<Arc<Self>>) {
+    fn run_host_task(self: &Arc<Self>, task: task::Notified<Arc<Self>>) -> u64 {
         #[cfg(tokio_unstable)]
         self.telekio.host().record_worker();
-        #[cfg(tokio_unstable)]
-        let task_meta = task.telekio_task_meta();
-        #[cfg(tokio_unstable)]
-        self.task_hooks.poll_start_callback(&task_meta);
-        self.shared.owned.assert_owner(task).run();
-        #[cfg(tokio_unstable)]
-        self.task_hooks.poll_stop_callback(&task_meta);
+        task::telekio::measure_poll(|| {
+            #[cfg(tokio_unstable)]
+            let task_meta = task.telekio_task_meta();
+            #[cfg(tokio_unstable)]
+            self.task_hooks.poll_start_callback(&task_meta);
+            self.shared.owned.assert_owner(task).run();
+            #[cfg(tokio_unstable)]
+            self.task_hooks.poll_stop_callback(&task_meta);
+        })
     }
 
     pub(super) fn schedule_host_task(self: &Arc<Self>, task: task::Notified<Arc<Self>>, _: bool) {
@@ -60,19 +62,19 @@ impl HostSchedule for Arc<Handle> {
         &self.telekio
     }
 
-    fn run(&self, task: task::Notified<Self>) {
+    fn run(&self, task: task::Notified<Self>) -> u64 {
         let current = context::with_current(|handle| match handle {
             scheduler::Handle::CurrentThread(_) => false,
             scheduler::Handle::MultiThread(handle) => Arc::ptr_eq(handle, self),
         })
         .unwrap_or(false);
         if current {
-            context::telekio::enter(|| crate::task::coop::budget(|| self.run_host_task(task)));
+            context::telekio::enter(|| crate::task::coop::budget(|| self.run_host_task(task)))
         } else {
             let handle = scheduler::Handle::MultiThread(Arc::clone(self));
             context::enter_runtime(&handle, true, |_| {
                 context::telekio::enter(|| crate::task::coop::budget(|| self.run_host_task(task)))
-            });
+            })
         }
     }
 

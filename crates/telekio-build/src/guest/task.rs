@@ -15,7 +15,7 @@ use std::{
 
 pub(crate) trait HostSchedule: Schedule + Clone + Send + Sync + 'static {
     fn registry(&self) -> &Registry<Self>;
-    fn run(&self, task: Notified<Self>);
+    fn run(&self, task: Notified<Self>) -> u64;
     fn enter<R>(&self, call: impl FnOnce() -> R) -> R;
 }
 
@@ -67,6 +67,15 @@ struct BlockingRunner<S: HostSchedule> {
 
 struct Budgeted<F>(F);
 
+struct HostCall {
+    started: std::time::Instant,
+    outer: bool,
+}
+
+thread_local! {
+    static HOST_CALLS: std::cell::Cell<(usize, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
 #[cfg(tokio_unstable)]
 struct RootState {
     waker: Mutex<Option<Waker>>,
@@ -107,6 +116,42 @@ struct TraceCompletion(Option<Arc<TraceRequest>>);
 
 pub(crate) fn budget<F: Future>(future: F) -> impl Future<Output = F::Output> {
     Budgeted(future)
+}
+
+pub(crate) fn measure_poll(call: impl FnOnce()) -> u64 {
+    let host_before = HOST_CALLS.get().1;
+    let started = std::time::Instant::now();
+    call();
+    let elapsed = started.elapsed().as_nanos().min(u64::MAX.into()) as u64;
+    elapsed.saturating_sub(HOST_CALLS.get().1.saturating_sub(host_before))
+}
+
+fn host_call<T>(call: impl FnOnce() -> T) -> T {
+    let _call = HostCall::new();
+    call()
+}
+
+impl HostCall {
+    fn new() -> Self {
+        let (depth, elapsed) = HOST_CALLS.get();
+        HOST_CALLS.set((depth + 1, elapsed));
+        Self {
+            started: std::time::Instant::now(),
+            outer: depth == 0,
+        }
+    }
+}
+
+impl Drop for HostCall {
+    fn drop(&mut self) {
+        let (depth, elapsed) = HOST_CALLS.get();
+        let elapsed = if self.outer {
+            elapsed.saturating_add(self.started.elapsed().as_nanos().min(u64::MAX.into()) as u64)
+        } else {
+            elapsed
+        };
+        HOST_CALLS.set((depth - 1, elapsed));
+    }
 }
 
 impl<F: Future> Future for Budgeted<F> {
@@ -188,11 +233,11 @@ impl Host {
     }
 
     pub(crate) fn defer(&self, waker: &::telekio::Waker) -> ::telekio::CallResult {
-        self.handle.defer(waker)
+        host_call(|| self.handle.defer(waker))
     }
 
     pub(crate) fn metric(&self, metric: ::telekio::Metric, worker: usize) -> u64 {
-        self.handle.metric(metric, worker)
+        host_call(|| self.handle.metric(metric, worker))
     }
 
     #[cfg(tokio_unstable)]
@@ -202,7 +247,7 @@ impl Host {
         worker: usize,
         bucket: usize,
     ) -> u64 {
-        self.handle.metric_bucket(metric, worker, bucket)
+        host_call(|| self.handle.metric_bucket(metric, worker, bucket))
     }
 
     #[cfg(tokio_unstable)]
@@ -444,12 +489,12 @@ impl TraceRequest {
 fn trace_notified<S: HostSchedule>(
     schedule: &S,
     notified: Notified<S>,
-) -> (task::Id, super::trace::Trace) {
+) -> (u64, (task::Id, super::trace::Trace)) {
     let id = notified.id();
     let waker = super::waker::waker_ref::<S>(notified.0.raw.header_ptr_ref());
     crate::runtime::context::telekio::defer(&waker);
-    let ((), trace) = super::trace::Trace::capture(|| schedule.run(notified));
-    (id, trace)
+    let (duration, trace) = super::trace::Trace::capture(|| schedule.run(notified));
+    (duration, (id, trace))
 }
 
 impl<S: HostSchedule> Registry<S> {
@@ -494,7 +539,7 @@ impl<S: HostSchedule> Registry<S> {
                     .take()
                     .or_else(|| runner.task.notify_for_tracing())?;
                 let schedule = notified.schedule();
-                Some(trace_notified(&schedule, notified))
+                Some(trace_notified(&schedule, notified).1)
             })
             .collect()
     }
@@ -544,6 +589,7 @@ impl<S: HostSchedule> Registry<S> {
     }
 
     pub(crate) fn schedule(&self, schedule: S, notified: Notified<S>, local: bool) {
+        let _call = HostCall::new();
         let id = notified.id();
         let mut runners = self.runners.lock().unwrap();
         if let Some(runner) = runners.get(&id) {
@@ -622,9 +668,7 @@ impl<S: HostSchedule> Registry<S> {
                 release_blocking::<S>,
             )
         };
-        self.host()
-            .handle
-            .spawn_blocking(task)
+        host_call(|| self.host().handle.spawn_blocking(task))
             .into_io_result()
             .unwrap_or_else(|error| panic!("failed to spawn blocking Tokio task {id}: {error}"));
         join
@@ -722,7 +766,7 @@ impl<S: HostSchedule> Runner<S> {
 unsafe extern "C" fn poll_runner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
     waker: *const ::telekio::Waker,
-) -> ::telekio::Poll {
+) -> ::telekio::TaskPoll {
     match catch_unwind(AssertUnwindSafe(|| unsafe {
         poll_runner_inner::<S>(data, waker)
     })) {
@@ -730,7 +774,7 @@ unsafe extern "C" fn poll_runner<S: HostSchedule>(
         Err(_) => {
             let task = unsafe { &mut *data.cast::<RunnerTask<S>>() };
             task.runner.abort.abort();
-            ::telekio::Poll::Panicked
+            ::telekio::TaskPoll::unmeasured(::telekio::Poll::Panicked)
         }
     }
 }
@@ -738,12 +782,13 @@ unsafe extern "C" fn poll_runner<S: HostSchedule>(
 unsafe fn poll_runner_inner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
     waker: *const ::telekio::Waker,
-) -> ::telekio::Poll {
+) -> ::telekio::TaskPoll {
     let task = unsafe { &mut *data.cast::<RunnerTask<S>>() };
     *task.runner.waker.lock().unwrap() = Some(unsafe { (*waker).clone_rust_waker() });
     if task.runner.complete.load(Ordering::Acquire) {
-        return ::telekio::Poll::Ready;
+        return ::telekio::TaskPoll::unmeasured(::telekio::Poll::Ready);
     }
+    let mut duration = None;
     let notified = task.runner.notified.lock().unwrap().take();
     if let Some(notified) = notified {
         #[cfg(feature = "taskdump")]
@@ -751,16 +796,19 @@ unsafe fn poll_runner_inner<S: HostSchedule>(
             let request = task.runner.trace.lock().unwrap().take();
             if let Some(request) = request {
                 let completion = TraceCompletion(Some(request));
-                let trace = trace_notified(&task.schedule, notified);
+                let (measured, trace) = trace_notified(&task.schedule, notified);
+                duration = Some(measured);
                 completion.complete(trace);
             } else {
-                task.schedule.run(notified);
+                duration = Some(task.schedule.run(notified));
             }
         }
         #[cfg(not(feature = "taskdump"))]
-        task.schedule.run(notified);
+        {
+            duration = Some(task.schedule.run(notified));
+        }
     }
-    if task.runner.complete.load(Ordering::Acquire) {
+    let state = if task.runner.complete.load(Ordering::Acquire) {
         ::telekio::Poll::Ready
     } else {
         #[cfg(feature = "taskdump")]
@@ -769,7 +817,11 @@ unsafe fn poll_runner_inner<S: HostSchedule>(
             task.runner.wake();
         }
         ::telekio::Poll::Pending
-    }
+    };
+    duration.map_or_else(
+        || ::telekio::TaskPoll::unmeasured(state),
+        |duration| ::telekio::TaskPoll::new(state, duration),
+    )
 }
 
 unsafe extern "C" fn cancel_runner<S: HostSchedule>(
@@ -780,7 +832,7 @@ unsafe extern "C" fn cancel_runner<S: HostSchedule>(
         task.runner.abort.abort();
         let notified = task.runner.notified.lock().unwrap().take();
         if let Some(notified) = notified {
-            task.schedule.run(notified);
+            _ = task.schedule.run(notified);
         }
     })
 }

@@ -6,6 +6,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context as TaskContext, Poll as RustPoll},
+    time::Instant,
 };
 
 use telekio::{BlockingTask, CallResult, Future, OwnedBytes, Poll, Status, Task, Waker};
@@ -218,7 +219,13 @@ impl RustFuture for GuestTask {
 
     fn poll(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> RustPoll<()> {
         let waker = unsafe { Waker::from_ref(context.waker()) };
-        match self.task.poll(&waker) {
+        let started = Instant::now();
+        let poll = self.task.poll(&waker);
+        if let Some(guest) = poll.duration_nanos() {
+            let actual = started.elapsed().as_nanos().min(u64::MAX.into()) as u64;
+            tokio::runtime::Handle::telekio_record_poll(actual, guest);
+        }
+        match poll.state() {
             Poll::Pending => RustPoll::Pending,
             Poll::Ready => {
                 self.complete = true;

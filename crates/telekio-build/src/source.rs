@@ -52,6 +52,12 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
         ("src/runtime/handle.rs", "handle.rs", None, None),
         ("src/runtime/id.rs", "id.rs", None, None),
         (
+            "src/runtime/scheduler/multi_thread/mod.rs",
+            "multi_thread.rs",
+            Some("pub(crate)"),
+            None,
+        ),
+        (
             "src/runtime/metrics/histogram.rs",
             "histogram.rs",
             None,
@@ -110,6 +116,31 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
             name: "telekio",
             ty: "super::worker::telekio::WorkerObservers",
         }],
+    )?;
+    fs::write(target, contents)?;
+
+    let helper = helpers.join("stats.rs");
+    println!("cargo::rerun-if-changed={}", helper.display());
+    let target = source.join("src/runtime/scheduler/multi_thread/stats.rs");
+    let mut contents = fs::read_to_string(&target)?;
+    edit::mount_module(&mut contents, Some("pub(super)"), "telekio", &helper)?;
+    edit::redirect_call(
+        &mut contents,
+        edit::Scope::Method {
+            owner: "Stats",
+            name: "start_processing_scheduled_tasks",
+        },
+        "Instant::now",
+        "telekio::start_poll_batch",
+    )?;
+    edit::redirect_call(
+        &mut contents,
+        edit::Scope::Method {
+            owner: "Stats",
+            name: "end_processing_scheduled_tasks",
+        },
+        "Instant::now",
+        "telekio::finish_poll_batch",
     )?;
     fs::write(target, contents)?;
 
