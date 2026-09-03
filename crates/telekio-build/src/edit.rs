@@ -250,8 +250,14 @@ pub fn set_method_visibility(
     if let Some(current) = method.visibility() {
         editor.replace(current.syntax(), visibility.syntax().clone());
     } else {
+        let first = method
+            .syntax()
+            .children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .find(|token| !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT))
+            .ok_or("method has no declaration token")?;
         editor.insert_all(
-            Position::before(method.fn_token().ok_or("method has no fn token")?),
+            Position::before(first),
             vec![
                 visibility.syntax().clone().into(),
                 make::tokens::whitespace(" ").into(),
