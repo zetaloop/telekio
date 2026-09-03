@@ -36,7 +36,7 @@ impl Handle {
         #[cfg(tokio_unstable)]
         self.telekio.host().record_worker();
         #[cfg(tokio_unstable)]
-        let task_meta = task.task_meta();
+        let task_meta = task.telekio_task_meta();
         #[cfg(tokio_unstable)]
         self.task_hooks.poll_start_callback(&task_meta);
         self.shared.owned.assert_owner(task).run();

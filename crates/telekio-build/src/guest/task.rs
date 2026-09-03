@@ -637,6 +637,11 @@ impl<S: HostSchedule> Notified<S> {
         schedule.registry().schedule(schedule.clone(), self, local);
     }
 
+    #[cfg(tokio_unstable)]
+    pub(crate) fn telekio_task_meta<'meta>(&self) -> crate::runtime::TaskMeta<'meta> {
+        self.0.task_meta()
+    }
+
     #[cfg(feature = "taskdump")]
     fn trace_task(&self) -> Task<S> {
         let raw = self.0.raw.clone();
