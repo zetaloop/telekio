@@ -73,11 +73,19 @@ fn block_on_result(outcome: Result<Status, Box<dyn Any + Send>>) -> CallResult {
     }
 }
 
-pub(super) unsafe extern "C" fn spawn(context: *const c_void, task: Task) -> CallResult {
+pub(super) unsafe extern "C" fn abort(context: *const c_void, id: u64) -> CallResult {
+    let context = unsafe { &*context.cast::<HandleContext>() };
+    match catch_unwind(AssertUnwindSafe(|| context.owner.abort_task(id))) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => host_panic(&*payload),
+    }
+}
+
+pub(super) unsafe extern "C" fn spawn(context: *const c_void, task: Task, id: u64) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     match catch_unwind(AssertUnwindSafe(|| {
         let task = GuestTask::new(task);
-        let tracking_id = context.owner.reserve_task()?;
+        let tracking_id = context.owner.reserve_task(id)?;
         let task = TrackedTask {
             task,
             cleanup: TaskCleanup {
@@ -85,7 +93,7 @@ pub(super) unsafe extern "C" fn spawn(context: *const c_void, task: Task) -> Cal
                 id: tracking_id,
             },
         };
-        let handle = context.handle.spawn(task);
+        let handle = context.handle.telekio_spawn(task, id);
         context
             .owner
             .register_task(tracking_id, handle.abort_handle());
@@ -98,11 +106,15 @@ pub(super) unsafe extern "C" fn spawn(context: *const c_void, task: Task) -> Cal
     }
 }
 
-pub(super) unsafe extern "C" fn spawn_local(context: *const c_void, task: Task) -> CallResult {
+pub(super) unsafe extern "C" fn spawn_local(
+    context: *const c_void,
+    task: Task,
+    id: u64,
+) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     let spawned = catch_unwind(AssertUnwindSafe(|| {
         let task = GuestTask::new(task);
-        let tracking_id = context.owner.reserve_task()?;
+        let tracking_id = context.owner.reserve_task(id)?;
         let task = TrackedTask {
             task,
             cleanup: TaskCleanup {
@@ -114,7 +126,8 @@ pub(super) unsafe extern "C" fn spawn_local(context: *const c_void, task: Task) 
             .local
             .as_ref()
             .ok_or_else(|| "spawn_local requires a LocalRuntime".to_owned())?;
-        let handle = local.with(|runtime| runtime.spawn_local(task))?;
+        let handle =
+            local.with(|runtime| unsafe { runtime.handle().telekio_spawn_local(task, id) })?;
         context
             .owner
             .register_task(tracking_id, handle.abort_handle());
@@ -131,11 +144,12 @@ pub(super) unsafe extern "C" fn spawn_local(context: *const c_void, task: Task) 
 pub(super) unsafe extern "C" fn spawn_blocking(
     context: *const c_void,
     task: BlockingTask,
+    id: u64,
 ) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     let spawned = catch_unwind(AssertUnwindSafe(|| {
         let task = GuestBlockingTask::new(task);
-        let tracking_id = context.owner.reserve_task()?;
+        let tracking_id = context.owner.reserve_task(id)?;
         let task = TrackedBlockingTask {
             task,
             cleanup: TaskCleanup {
@@ -143,7 +157,9 @@ pub(super) unsafe extern "C" fn spawn_blocking(
                 id: tracking_id,
             },
         };
-        let handle = context.handle.spawn_blocking(move || task.run());
+        let handle = context
+            .handle
+            .telekio_spawn_blocking(move || task.run(), id);
         context
             .owner
             .register_task(tracking_id, handle.abort_handle());

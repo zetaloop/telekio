@@ -91,6 +91,36 @@ impl Drop for TelekioIo {
 }
 
 impl Handle {
+    pub fn telekio_spawn<F>(&self, future: F, id: u64) -> JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        runtime::telekio::with_task_id(id, || self.spawn(future))
+    }
+
+    pub fn telekio_spawn_blocking<F, R>(&self, function: F, id: u64) -> JoinHandle<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        runtime::telekio::with_task_id(id, || self.spawn_blocking(function))
+    }
+
+    /// # Safety
+    ///
+    /// The future and output must remain on the LocalRuntime's owning thread.
+    pub unsafe fn telekio_spawn_local<F>(&self, future: F, id: u64) -> JoinHandle<F::Output>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        let size = std::mem::size_of::<F>();
+        runtime::telekio::with_task_id(id, || unsafe {
+            self.spawn_local_named(future, SpawnMeta::new_unnamed(size))
+        })
+    }
+
     #[cfg(target_os = "freebsd")]
     #[doc(hidden)]
     pub fn telekio_register_aio(

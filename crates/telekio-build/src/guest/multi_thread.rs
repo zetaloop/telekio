@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::context;
+use crate::runtime::TaskMeta;
 use crate::runtime::task::{
     self,
     telekio::{Host, HostSchedule, Registry},
@@ -32,29 +33,6 @@ impl Handle {
         self.telekio.install(host);
     }
 
-    fn run_host_task(&self, task: task::Notified<Arc<Self>>) -> u64 {
-        #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
-        self.telekio.host().record_worker();
-        task::telekio::measure_poll(|| {
-            #[cfg(tokio_unstable)]
-            let task_meta = task.telekio_task_meta();
-            #[cfg(tokio_unstable)]
-            self.task_hooks.poll_start_callback(&task_meta);
-            self.shared.owned.assert_owner(task).run();
-            #[cfg(tokio_unstable)]
-            self.task_hooks.poll_stop_callback(&task_meta);
-        })
-    }
-
-    pub(super) fn schedule_host_task(&self, task: task::Notified<Arc<Self>>, _: bool) {
-        task.schedule_host(false);
-    }
-
-    pub(super) fn schedule_host_option(&self, task: Option<task::Notified<Arc<Self>>>) {
-        if let Some(task) = task {
-            self.schedule_host_task(task, false);
-        }
-    }
 }
 
 impl HostSchedule for Arc<Handle> {
@@ -62,18 +40,29 @@ impl HostSchedule for Arc<Handle> {
         &self.telekio
     }
 
-    fn run(&self, task: task::Notified<Self>) -> u64 {
+    fn run(&self, _meta: &TaskMeta<'_>, call: impl FnOnce()) -> u64 {
+        let run = || {
+            #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
+            self.telekio.host().record_worker();
+            task::telekio::measure_poll(|| {
+                #[cfg(tokio_unstable)]
+                self.task_hooks.poll_start_callback(_meta);
+                call();
+                #[cfg(tokio_unstable)]
+                self.task_hooks.poll_stop_callback(_meta);
+            })
+        };
         let current = context::with_current(|handle| match handle {
             scheduler::Handle::CurrentThread(_) => false,
             scheduler::Handle::MultiThread(handle) => Arc::ptr_eq(handle, self),
         })
         .unwrap_or(false);
         if current {
-            context::telekio::enter(|| crate::task::coop::budget(|| self.run_host_task(task)))
+            context::telekio::enter(|| crate::task::coop::budget(run))
         } else {
             let handle = scheduler::Handle::MultiThread(Arc::clone(self));
             context::enter_runtime(&handle, true, |_| {
-                context::telekio::enter(|| crate::task::coop::budget(|| self.run_host_task(task)))
+                context::telekio::enter(|| crate::task::coop::budget(run))
             })
         }
     }
@@ -82,6 +71,10 @@ impl HostSchedule for Arc<Handle> {
         let handle = scheduler::Handle::MultiThread(Arc::clone(self));
         let _guard = context::try_set_current(&handle);
         call()
+    }
+
+    fn spawn(&self, meta: &TaskMeta<'_>) {
+        self.task_hooks.spawn(meta);
     }
 }
 

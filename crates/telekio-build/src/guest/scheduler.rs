@@ -98,8 +98,17 @@ impl Handle {
         self.host().metric(::telekio::Metric::GlobalQueueDepth, 0) as usize
     }
 
+    pub(crate) fn host_num_alive_tasks(&self) -> usize {
+        self.host().metric(::telekio::Metric::NumAliveTasks, 0) as usize
+    }
+
     pub(crate) fn host_num_workers(&self) -> usize {
         self.host().metric(::telekio::Metric::NumWorkers, 0) as usize
+    }
+
+    #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
+    pub(crate) fn host_spawned_tasks_count(&self) -> u64 {
+        self.host().metric(::telekio::Metric::SpawnedTasksCount, 0)
     }
 
     #[cfg(tokio_unstable)]

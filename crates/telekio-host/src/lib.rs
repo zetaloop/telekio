@@ -22,7 +22,7 @@ use telekio::{
     AttachResult, Blocking, BuildResult, CallResult, Callback, ClockSample, DurationParts, Flavor,
     GuestCall, InstantOffset, Metric, MetricResult, NameResult, OperationPoll, OwnedBytes, Poll,
     RawAttachment, RawHandle, RawRuntime, RuntimeApi, RuntimeConfig, Shutdown, Status,
-    StringCallback, Timer, TimerResult, Waker, WorkerCallback,
+    StringCallback, TaskIdResult, Timer, TimerResult, Waker, WorkerCallback,
 };
 
 pub struct Runtime {
@@ -99,6 +99,7 @@ struct HandleRecord {
 }
 
 struct TaskRecord {
+    task_id: u64,
     handle: Option<tokio::task::AbortHandle>,
 }
 
@@ -174,6 +175,8 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     release_handle,
     release_runtime,
     detach,
+    task_id,
+    abort: task::abort,
     spawn: task::spawn,
     spawn_local: task::spawn_local,
     spawn_blocking: task::spawn_blocking,
@@ -230,6 +233,11 @@ impl Runtime {
     pub fn tokio(&self) -> &tokio::runtime::Runtime {
         &self.runtime
     }
+}
+
+#[doc(hidden)]
+pub fn next_task_id() -> u64 {
+    tokio::runtime::telekio::next_task_id()
 }
 
 #[doc(hidden)]
@@ -463,14 +471,20 @@ impl OwnerState {
         Ok(())
     }
 
-    fn reserve_task(&self) -> Result<u64, String> {
+    fn reserve_task(&self, task_id: u64) -> Result<u64, String> {
         let mut state = self.state.lock().unwrap();
         if !state.accepting {
             return Err("Tokio owner is shutting down".to_owned());
         }
         let id = state.next_id;
         state.next_id += 1;
-        state.tasks.insert(id, TaskRecord { handle: None });
+        state.tasks.insert(
+            id,
+            TaskRecord {
+                task_id,
+                handle: None,
+            },
+        );
         Ok(id)
     }
 
@@ -481,6 +495,21 @@ impl OwnerState {
         }
         if let Some(task) = state.tasks.get_mut(&id) {
             task.handle = Some(handle);
+        }
+    }
+
+    fn abort_task(&self, task_id: u64) {
+        let handles = self
+            .state
+            .lock()
+            .unwrap()
+            .tasks
+            .values()
+            .filter(|task| task.task_id == task_id)
+            .filter_map(|task| task.handle.clone())
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.abort();
         }
     }
 
@@ -854,6 +883,19 @@ unsafe extern "C" fn detach(context: *const c_void) -> CallResult {
     }
 }
 
+unsafe extern "C" fn task_id(_: *const c_void) -> TaskIdResult {
+    match catch_unwind(next_task_id) {
+        Ok(value) => TaskIdResult {
+            call: CallResult::ok(),
+            value,
+        },
+        Err(payload) => TaskIdResult {
+            call: host_panic(&*payload),
+            value: 0,
+        },
+    }
+}
+
 unsafe extern "C" fn defer(context: *const c_void, waker: *const Waker) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     match catch_unwind(AssertUnwindSafe(|| {
@@ -890,6 +932,11 @@ unsafe extern "C" fn metric(
         let _ = (worker, bucket);
         match metric {
             Metric::GlobalQueueDepth => metrics.global_queue_depth() as u64,
+            Metric::NumAliveTasks => metrics.num_alive_tasks() as u64,
+            #[cfg(target_has_atomic = "64")]
+            Metric::SpawnedTasksCount => metrics.spawned_tasks_count(),
+            #[cfg(not(target_has_atomic = "64"))]
+            Metric::SpawnedTasksCount => 0,
             Metric::NumWorkers => metrics.num_workers() as u64,
             Metric::NumBlockingThreads => metrics.num_blocking_threads() as u64,
             Metric::NumIdleBlockingThreads => metrics.num_idle_blocking_threads() as u64,

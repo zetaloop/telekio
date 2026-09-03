@@ -27,7 +27,6 @@ pub enum AttrTarget<'a> {
     Module(&'a str),
     Modules(&'a str),
     Method { owner: &'a str, name: &'a str },
-    Methods { owner: &'a str, name: &'a str },
     Impl { owner: &'a str, method: &'a str },
 }
 
@@ -1221,7 +1220,7 @@ fn attr_targets(
             .filter(|item| item.name().is_some_and(|candidate| candidate.text() == name))
             .map(|item| item.syntax().clone())
             .collect(),
-        AttrTarget::Method { owner, name } | AttrTarget::Methods { owner, name } => methods(root, owner)
+        AttrTarget::Method { owner, name } => methods(root, owner)
             .filter(|item| item.name().is_some_and(|candidate| candidate.text() == name))
             .map(|item| item.syntax().clone())
             .collect(),
@@ -1243,7 +1242,7 @@ fn attr_targets(
             .map(|item| item.syntax().clone())
             .collect(),
     };
-    if nodes.len() <= 1 || matches!(target, AttrTarget::Modules(_) | AttrTarget::Methods { .. }) {
+    if nodes.len() <= 1 || matches!(target, AttrTarget::Modules(_)) {
         Ok(nodes)
     } else {
         Err("attribute target appears more than once".into())

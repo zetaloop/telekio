@@ -1,13 +1,15 @@
-use super::{AbortHandle, Header, Notified, OwnedTasks, Schedule, Task, UnownedTask};
-use crate::runtime::task;
+use super::{
+    AbortHandle, Notified, OwnedTasks, Schedule, SpawnLocation, Task, TaskHarnessScheduleHooks,
+    UnownedTask,
+};
+use crate::{future::Future as TaskFuture, runtime::{TaskMeta, task}};
 use std::{
-    collections::HashMap,
     future::Future,
-    panic::{catch_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
     sync::{
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex, OnceLock,
     },
     task::{Context, Poll, Waker},
     time::Duration,
@@ -15,13 +17,18 @@ use std::{
 
 pub(crate) trait HostSchedule: Schedule + Clone + Send + Sync + 'static {
     fn registry(&self) -> &Registry<Self>;
-    fn run(&self, task: Notified<Self>) -> u64;
+    fn run(&self, meta: &TaskMeta<'_>, call: impl FnOnce()) -> u64;
     fn enter<R>(&self, call: impl FnOnce() -> R) -> R;
+    fn spawn(&self, meta: &TaskMeta<'_>);
 }
 
 pub(crate) struct Host {
     runtime: Option<::telekio::Runtime>,
     handle: ::telekio::Handle,
+    #[cfg_attr(
+        not(any(feature = "signal", all(unix, feature = "process"))),
+        expect(dead_code)
+    )]
     io_enabled: bool,
     #[cfg(tokio_unstable)]
     panicked: AtomicBool,
@@ -40,25 +47,36 @@ struct Workers {
 
 pub(crate) struct Registry<S: HostSchedule> {
     host: OnceLock<Arc<Host>>,
-    runners: Mutex<HashMap<task::Id, Arc<Runner<S>>>>,
+    marker: std::marker::PhantomData<fn() -> S>,
+    #[cfg(feature = "taskdump")]
+    runners: Mutex<Vec<Weak<Runner<S>>>>,
     #[cfg(feature = "taskdump")]
     tracing: TraceLock,
 }
 
-struct Runner<S: HostSchedule> {
-    notified: Mutex<Option<Notified<S>>>,
-    waker: Mutex<Option<Waker>>,
-    abort: AbortHandle,
-    complete: AtomicBool,
-    #[cfg(feature = "taskdump")]
-    task: Task<S>,
-    #[cfg(feature = "taskdump")]
-    trace: Mutex<Option<Arc<TraceRequest>>>,
+#[derive(Clone)]
+struct TaskSchedule<S: HostSchedule> {
+    schedule: S,
+    runner: Weak<Runner<S>>,
 }
 
-struct RunnerTask<S: HostSchedule> {
+enum Runnable<S: HostSchedule> {
+    Initial(UnownedTask<TaskSchedule<S>>),
+    Notified(Notified<TaskSchedule<S>>),
+}
+
+struct Runner<S: HostSchedule> {
     schedule: S,
-    runner: Arc<Runner<S>>,
+    runnable: Mutex<Option<Runnable<S>>>,
+    waker: Mutex<Option<Waker>>,
+    abort: OnceLock<AbortHandle>,
+    complete: AtomicBool,
+    id: task::Id,
+    spawned_at: SpawnLocation,
+    #[cfg(feature = "taskdump")]
+    task: OnceLock<Task<TaskSchedule<S>>>,
+    #[cfg(feature = "taskdump")]
+    trace: Mutex<Option<Arc<TraceRequest>>>,
 }
 
 struct BlockingRunner<S: HostSchedule> {
@@ -236,6 +254,11 @@ impl Host {
         host
     }
 
+    pub(crate) fn abort(&self, id: task::Id) {
+        host_call(|| self.handle.abort(id.as_u64()))
+            .resume("failed to abort Tokio task");
+    }
+
     pub(crate) fn defer(&self, waker: &::telekio::Waker) -> ::telekio::CallResult {
         host_call(|| self.handle.defer(waker))
     }
@@ -319,6 +342,16 @@ impl Host {
         #[cfg(tokio_unstable)]
         let future = self.root(future);
         self.handle.block_on(future)
+    }
+
+    #[cfg(tokio_unstable)]
+    fn is_panicked(&self) -> bool {
+        self.panicked.load(Ordering::Acquire)
+    }
+
+    #[cfg(not(tokio_unstable))]
+    fn is_panicked(&self) -> bool {
+        false
     }
 
     #[cfg(tokio_unstable)]
@@ -511,22 +544,24 @@ impl TraceRequest {
 }
 
 #[cfg(feature = "taskdump")]
-fn trace_notified<S: HostSchedule>(
-    schedule: &S,
-    notified: Notified<S>,
+fn trace_runnable<S: HostSchedule>(
+    runner: &Runner<S>,
+    runnable: Runnable<S>,
 ) -> (u64, (task::Id, super::trace::Trace)) {
-    let id = notified.id();
-    let waker = super::waker::waker_ref::<S>(notified.0.raw.header_ptr_ref());
+    let task = runner.task.get().unwrap();
+    let waker = super::waker::waker_ref::<TaskSchedule<S>>(task.raw.header_ptr_ref());
     crate::runtime::context::telekio::defer(&waker);
-    let (duration, trace) = super::trace::Trace::capture(|| schedule.run(notified));
-    (duration, (id, trace))
+    let (duration, trace) = super::trace::Trace::capture(|| runner.run(runnable));
+    (duration, (runner.id, trace))
 }
 
 impl<S: HostSchedule> Registry<S> {
     pub(crate) fn new() -> Self {
         Self {
             host: OnceLock::new(),
-            runners: Mutex::new(HashMap::new()),
+            marker: std::marker::PhantomData,
+            #[cfg(feature = "taskdump")]
+            runners: Mutex::new(Vec::new()),
             #[cfg(feature = "taskdump")]
             tracing: TraceLock::default(),
         }
@@ -543,28 +578,98 @@ impl<S: HostSchedule> Registry<S> {
         self.host.get().expect("Tokio runtime is not initialized")
     }
 
+    fn start(&self, runner: Arc<Runner<S>>, local: bool) {
+        #[cfg(feature = "taskdump")]
+        self.runners.lock().unwrap().push(Arc::downgrade(&runner));
+        let id = runner.id;
+        let task = unsafe {
+            ::telekio::Task::from_raw(
+                Arc::into_raw(runner).cast_mut().cast(),
+                poll_runner::<S>,
+                cancel_runner::<S>,
+                release_runner::<S>,
+            )
+        };
+        let result = if local {
+            self.host().handle.spawn_local(task, id.as_u64())
+        } else {
+            self.host().handle.spawn(task, id.as_u64())
+        };
+        result
+            .into_io_result()
+            .unwrap_or_else(|error| panic!("failed to spawn Tokio task {id}: {error}"));
+    }
+
+    fn bind<T>(
+        &self,
+        schedule: S,
+        future: T,
+        id: task::Id,
+        spawned_at: SpawnLocation,
+        local: bool,
+    ) -> task::JoinHandle<T::Output>
+    where
+        T: TaskFuture + Send + 'static,
+        T::Output: Send + 'static,
+    {
+        let runner = Runner::new(schedule.clone(), id, spawned_at);
+        let task_schedule = TaskSchedule {
+            schedule,
+            runner: Arc::downgrade(&runner),
+        };
+        let (task, join) = task::unowned(future, task_schedule, id, spawned_at);
+        runner.initialize(task, &join);
+        if self.host().is_panicked() {
+            runner.cancel();
+        } else {
+            self.start(runner, local);
+        }
+        join
+    }
+
+    unsafe fn bind_local<T>(
+        &self,
+        schedule: S,
+        future: T,
+        id: task::Id,
+        spawned_at: SpawnLocation,
+    ) -> task::JoinHandle<T::Output>
+    where
+        T: TaskFuture + 'static,
+        T::Output: 'static,
+    {
+        let runner = Runner::new(schedule.clone(), id, spawned_at);
+        let task_schedule = TaskSchedule {
+            schedule,
+            runner: Arc::downgrade(&runner),
+        };
+        let (task, join) = unsafe { unowned_local(future, task_schedule, id, spawned_at) };
+        runner.initialize(task, &join);
+        if self.host().is_panicked() {
+            runner.cancel();
+        } else {
+            self.start(runner, true);
+        }
+        join
+    }
+
+    #[cfg(feature = "taskdump")]
+    fn runners(&self) -> Vec<Arc<Runner<S>>> {
+        let mut runners = self.runners.lock().unwrap();
+        let active = runners.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+        runners.retain(|runner| runner.strong_count() != 0);
+        active
+    }
+
     #[cfg(feature = "taskdump")]
     pub(crate) fn dump_current(&self) -> Vec<(task::Id, super::trace::Trace)> {
         let current = crate::runtime::context::current_task_id();
-        let runners = self
-            .runners
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|runner| Some(runner.task.telekio_id()) != current)
-            .cloned()
-            .collect::<Vec<_>>();
-        runners
+        self.runners()
             .into_iter()
+            .filter(|runner| Some(runner.id) != current)
             .filter_map(|runner| {
-                let notified = runner
-                    .notified
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .or_else(|| runner.task.notify_for_tracing())?;
-                let schedule = notified.schedule();
-                Some(trace_notified(&schedule, notified).1)
+                let runnable = runner.take_or_notify()?;
+                Some(trace_runnable(&runner, runnable).1)
             })
             .collect()
     }
@@ -573,12 +678,9 @@ impl<S: HostSchedule> Registry<S> {
     pub(crate) async fn dump(&self) -> Vec<(task::Id, super::trace::Trace)> {
         let _guard = self.tracing.lock().await;
         let runners = self
-            .runners
-            .lock()
-            .unwrap()
-            .values()
+            .runners()
+            .into_iter()
             .filter(|runner| !runner.complete.load(Ordering::Acquire))
-            .cloned()
             .collect::<Vec<_>>();
         let request = Arc::new(TraceRequest {
             remaining: std::sync::atomic::AtomicUsize::new(runners.len()),
@@ -591,8 +693,8 @@ impl<S: HostSchedule> Registry<S> {
                 if let Some(request) = runner.trace.lock().unwrap().take() {
                     request.complete(None);
                 }
-            } else if let Some(notified) = runner.task.notify_for_tracing() {
-                runner.schedule(notified);
+            } else if let Some(runnable) = runner.notify_for_tracing() {
+                runner.schedule(runnable);
             } else {
                 runner.wake();
             }
@@ -611,55 +713,6 @@ impl<S: HostSchedule> Registry<S> {
         .await;
         let traces = std::mem::take(&mut *request.traces.lock().unwrap());
         traces
-    }
-
-    pub(crate) fn schedule(&self, schedule: S, notified: Notified<S>, local: bool) {
-        let _call = HostCall::new();
-        let id = notified.id();
-        let mut runners = self.runners.lock().unwrap();
-        if let Some(runner) = runners.get(&id) {
-            runner.schedule(notified);
-            return;
-        }
-
-        #[cfg(feature = "taskdump")]
-        let trace_task = notified.trace_task();
-        let runner = Arc::new(Runner {
-            abort: notified.abort_handle(),
-            notified: Mutex::new(Some(notified)),
-            waker: Mutex::new(None),
-            complete: AtomicBool::new(false),
-            #[cfg(feature = "taskdump")]
-            task: trace_task,
-            #[cfg(feature = "taskdump")]
-            trace: Mutex::new(None),
-        });
-        runners.insert(id, Arc::clone(&runner));
-        drop(runners);
-
-        let task = Box::new(RunnerTask { schedule, runner });
-        let task = unsafe {
-            ::telekio::Task::from_raw(
-                Box::into_raw(task).cast(),
-                poll_runner::<S>,
-                cancel_runner::<S>,
-                release_runner::<S>,
-            )
-        };
-        let result = if local {
-            self.host().handle.spawn_local(task)
-        } else {
-            self.host().handle.spawn(task)
-        };
-        result
-            .into_io_result()
-            .unwrap_or_else(|error| panic!("failed to spawn Tokio task {id}: {error}"));
-    }
-
-    pub(crate) fn release(&self, task: &Task<S>) {
-        if let Some(runner) = self.runners.lock().unwrap().remove(&task.telekio_id()) {
-            runner.finish();
-        }
     }
 
     pub(crate) fn spawn_blocking<F, R>(
@@ -693,69 +746,174 @@ impl<S: HostSchedule> Registry<S> {
                 release_blocking::<S>,
             )
         };
-        host_call(|| self.host().handle.spawn_blocking(task))
+        host_call(|| self.host().handle.spawn_blocking(task, id.as_u64()))
             .into_io_result()
             .unwrap_or_else(|error| panic!("failed to spawn blocking Tokio task {id}: {error}"));
         join
     }
 }
 
-impl<S: HostSchedule> Notified<S> {
-    pub(crate) fn schedule_host(self, local: bool) {
-        let schedule = self.schedule();
-        schedule.registry().schedule(schedule.clone(), self, local);
+impl<S: Schedule> Notified<S> {
+    fn cancelled(&self) -> bool {
+        self.0.header().state.load().is_cancelled()
     }
 
-    #[cfg(tokio_unstable)]
-    pub(crate) fn telekio_task_meta<'meta>(&self) -> crate::runtime::TaskMeta<'meta> {
-        self.0.task_meta()
-    }
-
-    #[cfg(feature = "taskdump")]
-    fn trace_task(&self) -> Task<S> {
-        let raw = self.0.raw.clone();
-        raw.ref_inc();
-        Task {
-            raw,
-            _p: std::marker::PhantomData,
-        }
-    }
-
-    fn abort_handle(&self) -> AbortHandle {
-        let raw = self.0.raw.clone();
-        raw.ref_inc();
-        AbortHandle::new(raw)
-    }
-
-    fn schedule(&self) -> S {
-        unsafe { Header::get_scheduler::<S>(self.0.header_ptr()).as_ref() }.clone()
-    }
-
-    fn id(&self) -> task::Id {
-        unsafe { Header::get_id(self.0.header_ptr()) }
+    fn run_host(self) {
+        let raw = self.0.raw;
+        std::mem::forget(self);
+        raw.poll();
     }
 }
 
-impl<S: HostSchedule> Task<S> {
-    fn telekio_id(&self) -> task::Id {
-        unsafe { Header::get_id(self.header_ptr()) }
-    }
-
-    fn schedule(&self) -> S {
-        unsafe { Header::get_scheduler::<S>(self.header_ptr()).as_ref() }.clone()
-    }
+impl crate::runtime::TaskHooks {
+    pub(crate) fn spawn_host(&self, _: &TaskMeta<'_>) {}
 }
 
 impl<S: HostSchedule> OwnedTasks<S> {
-    pub(crate) fn remove_host_task(&self, task: &Task<S>) -> Option<Task<S>> {
-        task.schedule().registry().release(task);
-        self.remove(task)
+    pub(crate) fn bind_host<T>(
+        &self,
+        future: T,
+        schedule: S,
+        id: task::Id,
+        spawned_at: SpawnLocation,
+    ) -> (task::JoinHandle<T::Output>, Option<Notified<S>>)
+    where
+        T: TaskFuture + Send + 'static,
+        T::Output: Send + 'static,
+    {
+        let meta = TaskMeta {
+            id,
+            spawned_at,
+            _phantom: Default::default(),
+        };
+        schedule.spawn(&meta);
+        let join = schedule
+            .registry()
+            .bind(schedule.clone(), future, id, spawned_at, false);
+        (join, None)
+    }
+
+    pub(crate) unsafe fn bind_local_host<T>(
+        &self,
+        future: T,
+        schedule: S,
+        id: task::Id,
+        spawned_at: SpawnLocation,
+    ) -> (task::JoinHandle<T::Output>, Option<Notified<S>>)
+    where
+        T: TaskFuture + 'static,
+        T::Output: 'static,
+    {
+        let meta = TaskMeta {
+            id,
+            spawned_at,
+            _phantom: Default::default(),
+        };
+        schedule.spawn(&meta);
+        let join = unsafe {
+            schedule
+                .registry()
+                .bind_local(schedule.clone(), future, id, spawned_at)
+        };
+        (join, None)
+    }
+}
+
+impl<S: HostSchedule> Schedule for TaskSchedule<S> {
+    fn release(&self, _: &Task<Self>) -> Option<Task<Self>> {
+        if let Some(runner) = self.runner.upgrade() {
+            runner.finish();
+        }
+        None
+    }
+
+    fn schedule(&self, task: Notified<Self>) {
+        let cancelled = task.cancelled();
+        if let Some(runner) = self.runner.upgrade() {
+            runner.schedule(Runnable::Notified(task));
+            if cancelled {
+                runner.schedule.registry().host().abort(runner.id);
+            }
+        }
+    }
+
+    fn hooks(&self) -> TaskHarnessScheduleHooks {
+        self.schedule.hooks()
+    }
+
+    fn yield_now(&self, task: Notified<Self>) {
+        self.schedule(task);
+    }
+
+    fn unhandled_panic(&self) {
+        self.schedule.unhandled_panic();
+    }
+}
+
+unsafe fn unowned_local<T, S>(
+    future: T,
+    schedule: S,
+    id: task::Id,
+    spawned_at: SpawnLocation,
+) -> (UnownedTask<S>, task::JoinHandle<T::Output>)
+where
+    S: Schedule,
+    T: TaskFuture + 'static,
+    T::Output: 'static,
+{
+    let (task, notified, join) = super::new_task(future, schedule, id, spawned_at);
+    let unowned = UnownedTask {
+        raw: task.raw,
+        _p: std::marker::PhantomData,
+    };
+    std::mem::forget(task);
+    std::mem::forget(notified);
+    (unowned, join)
+}
+
+#[cfg(feature = "taskdump")]
+fn trace_task<S>(task: &UnownedTask<S>) -> Task<S> {
+    let raw = task.raw.clone();
+    raw.ref_inc();
+    Task {
+        raw,
+        _p: std::marker::PhantomData,
     }
 }
 
 impl<S: HostSchedule> Runner<S> {
-    fn schedule(&self, notified: Notified<S>) {
-        let previous = self.notified.lock().unwrap().replace(notified);
+    fn new(schedule: S, id: task::Id, spawned_at: SpawnLocation) -> Arc<Self> {
+        Arc::new(Self {
+            schedule,
+            runnable: Mutex::new(None),
+            waker: Mutex::new(None),
+            abort: OnceLock::new(),
+            complete: AtomicBool::new(false),
+            id,
+            spawned_at,
+            #[cfg(feature = "taskdump")]
+            task: OnceLock::new(),
+            #[cfg(feature = "taskdump")]
+            trace: Mutex::new(None),
+        })
+    }
+
+    fn initialize<T>(&self, task: UnownedTask<TaskSchedule<S>>, join: &task::JoinHandle<T>) {
+        self.abort.set(join.abort_handle()).unwrap();
+        #[cfg(feature = "taskdump")]
+        self.task.set(trace_task(&task)).unwrap();
+        *self.runnable.lock().unwrap() = Some(Runnable::Initial(task));
+    }
+
+    fn cancel(&self) {
+        self.abort.get().unwrap().abort();
+        if let Some(runnable) = self.runnable.lock().unwrap().take() {
+            self.run(runnable);
+        }
+    }
+
+    fn schedule(&self, runnable: Runnable<S>) {
+        let previous = self.runnable.lock().unwrap().replace(runnable);
         assert!(previous.is_none(), "Tokio task was scheduled twice");
         self.wake();
     }
@@ -766,13 +924,43 @@ impl<S: HostSchedule> Runner<S> {
         }
     }
 
+    fn run(&self, runnable: Runnable<S>) -> u64 {
+        let meta = TaskMeta {
+            id: self.id,
+            spawned_at: self.spawned_at,
+            _phantom: Default::default(),
+        };
+        self.schedule.run(&meta, || match runnable {
+            Runnable::Initial(task) => task.run(),
+            Runnable::Notified(task) => task.run_host(),
+        })
+    }
+
+    #[cfg(feature = "taskdump")]
+    fn take_or_notify(&self) -> Option<Runnable<S>> {
+        self.runnable.lock().unwrap().take().or_else(|| {
+            self.task
+                .get()
+                .and_then(Task::notify_for_tracing)
+                .map(Runnable::Notified)
+        })
+    }
+
+    #[cfg(feature = "taskdump")]
+    fn notify_for_tracing(&self) -> Option<Runnable<S>> {
+        self.task
+            .get()
+            .and_then(Task::notify_for_tracing)
+            .map(Runnable::Notified)
+    }
+
     #[cfg(feature = "taskdump")]
     fn schedule_trace(&self) {
         if self.complete.load(Ordering::Acquire) || self.trace.lock().unwrap().is_none() {
             return;
         }
-        if let Some(notified) = self.task.notify_for_tracing() {
-            self.schedule(notified);
+        if let Some(runnable) = self.notify_for_tracing() {
+            self.schedule(runnable);
         } else {
             self.wake();
         }
@@ -797,8 +985,8 @@ unsafe extern "C" fn poll_runner<S: HostSchedule>(
     })) {
         Ok(poll) => poll,
         Err(_) => {
-            let task = unsafe { &mut *data.cast::<RunnerTask<S>>() };
-            task.runner.abort.abort();
+            let runner = unsafe { &*data.cast::<Runner<S>>() };
+            runner.abort.get().unwrap().abort();
             ::telekio::TaskPoll::unmeasured(::telekio::Poll::Panicked)
         }
     }
@@ -808,38 +996,38 @@ unsafe fn poll_runner_inner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
     waker: *const ::telekio::Waker,
 ) -> ::telekio::TaskPoll {
-    let task = unsafe { &mut *data.cast::<RunnerTask<S>>() };
-    *task.runner.waker.lock().unwrap() = Some(unsafe { (*waker).clone_rust_waker() });
-    if task.runner.complete.load(Ordering::Acquire) {
+    let runner = unsafe { &*data.cast::<Runner<S>>() };
+    *runner.waker.lock().unwrap() = Some(unsafe { (*waker).clone_rust_waker() });
+    if runner.complete.load(Ordering::Acquire) {
         return ::telekio::TaskPoll::unmeasured(::telekio::Poll::Ready);
     }
     let mut duration = None;
-    let notified = task.runner.notified.lock().unwrap().take();
-    if let Some(notified) = notified {
+    let runnable = runner.runnable.lock().unwrap().take();
+    if let Some(runnable) = runnable {
         #[cfg(feature = "taskdump")]
         {
-            let request = task.runner.trace.lock().unwrap().take();
+            let request = runner.trace.lock().unwrap().take();
             if let Some(request) = request {
                 let completion = TraceCompletion(Some(request));
-                let (measured, trace) = trace_notified(&task.schedule, notified);
+                let (measured, trace) = trace_runnable(runner, runnable);
                 duration = Some(measured);
                 completion.complete(trace);
             } else {
-                duration = Some(task.schedule.run(notified));
+                duration = Some(runner.run(runnable));
             }
         }
         #[cfg(not(feature = "taskdump"))]
         {
-            duration = Some(task.schedule.run(notified));
+            duration = Some(runner.run(runnable));
         }
     }
-    let state = if task.runner.complete.load(Ordering::Acquire) {
+    let state = if runner.complete.load(Ordering::Acquire) {
         ::telekio::Poll::Ready
     } else {
         #[cfg(feature = "taskdump")]
-        task.runner.schedule_trace();
-        if task.runner.notified.lock().unwrap().is_some() {
-            task.runner.wake();
+        runner.schedule_trace();
+        if runner.runnable.lock().unwrap().is_some() {
+            runner.wake();
         }
         ::telekio::Poll::Pending
     };
@@ -853,19 +1041,15 @@ unsafe extern "C" fn cancel_runner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
 ) -> ::telekio::CallResult {
     callback(|| {
-        let task = unsafe { &mut *data.cast::<RunnerTask<S>>() };
-        task.runner.abort.abort();
-        let notified = task.runner.notified.lock().unwrap().take();
-        if let Some(notified) = notified {
-            _ = task.schedule.run(notified);
-        }
+        let runner = unsafe { &*data.cast::<Runner<S>>() };
+        runner.cancel();
     })
 }
 
 unsafe extern "C" fn release_runner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
 ) -> ::telekio::CallResult {
-    callback(|| drop(unsafe { Box::from_raw(data.cast::<RunnerTask<S>>()) }))
+    callback(|| drop(unsafe { Arc::from_raw(data.cast::<Runner<S>>()) }))
 }
 
 unsafe extern "C" fn run_blocking<S: HostSchedule>(

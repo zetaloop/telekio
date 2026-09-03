@@ -136,6 +136,14 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
         fs::write(target, contents)?;
     }
 
+    let helper = helpers.join("task_id.rs");
+    println!("cargo::rerun-if-changed={}", helper.display());
+    let target = source.join("src/runtime/task/id.rs");
+    let mut contents = fs::read_to_string(&target)?;
+    edit::rename_method(&mut contents, "Id", "next", "next_local")?;
+    edit::mount_module(&mut contents, None, "telekio", &helper)?;
+    fs::write(target, contents)?;
+
     let target = source.join("src/runtime/scheduler/multi_thread/handle.rs");
     let mut contents = fs::read_to_string(&target)?;
     edit::append_fields(

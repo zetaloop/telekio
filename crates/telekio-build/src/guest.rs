@@ -15,16 +15,17 @@ use crate::edit;
 fn prepare_guest_with(generated: PathBuf, telekio: Value) -> Result<PathBuf, Box<dyn Error>> {
     patch_manifest(&generated.join("Cargo.toml"), telekio)?;
     patch_guest_root(&generated.join("src/lib.rs"))?;
+    patch_task_id(&generated.join("src/runtime/task/id.rs"))?;
     patch_task(&generated.join("src/runtime/task/mod.rs"))?;
+    patch_task_list(&generated.join("src/runtime/task/list.rs"))?;
+    patch_sharded_list(&generated.join("src/util/sharded_list.rs"))?;
     patch_current_thread(&generated.join("src/runtime/scheduler/current_thread/mod.rs"))?;
-    patch_inject(&generated.join("src/runtime/scheduler/inject.rs"))?;
     patch_multi_thread(&generated.join("src/runtime/scheduler/multi_thread"))?;
     patch_scheduler(&generated.join("src/runtime/scheduler/mod.rs"))?;
     patch_builder(&generated.join("src/runtime/builder.rs"))?;
     patch_runtime(&generated.join("src/runtime/runtime.rs"))?;
     patch_local_runtime(&generated.join("src/runtime/local_runtime/runtime.rs"))?;
     patch_blocking(&generated.join("src/runtime/blocking/pool.rs"))?;
-    patch_metrics(&generated.join("src/runtime/metrics/batch.rs"))?;
     patch_histogram(&generated.join("src/runtime/metrics/histogram.rs"))?;
     patch_worker_metrics(&generated.join("src/runtime/metrics/worker.rs"))?;
     patch_runtime_metrics(&generated.join("src/runtime/metrics/runtime.rs"))?;
@@ -74,9 +75,68 @@ fn patch_manifest(path: &Path, telekio: Value) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn patch_task_id(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        edit::rename_method(source, "Id", "next", "next_local")?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "Id",
+                name: "next_local",
+            },
+            "#[expect(dead_code)]",
+        )?;
+        mount(source, "telekio", "id.rs")
+    })
+}
+
 fn patch_task(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
         mount_with(source, Some("pub(crate)"), "telekio", "task.rs")
+    })
+}
+
+fn patch_task_list(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        for name in ["bind", "bind_local", "bind_inner", "spawned_tasks_count"] {
+            edit::add_attr(
+                source,
+                edit::AttrTarget::Method {
+                    owner: "OwnedTasks<S>",
+                    name,
+                },
+                "#[expect(dead_code)]",
+            )?;
+        }
+        Ok(())
+    })
+}
+
+fn patch_sharded_list(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Struct("ShardedList"),
+            "#[cfg_attr(not(tokio_unstable), expect(dead_code))]",
+        )?;
+        for target in [
+            edit::AttrTarget::Struct("ShardGuard"),
+            edit::AttrTarget::Method {
+                owner: "ShardedList<L>",
+                name: "lock_shard",
+            },
+            edit::AttrTarget::Method {
+                owner: "ShardGuard<'a, L>",
+                name: "push",
+            },
+            edit::AttrTarget::Method {
+                owner: "ShardedList<L>",
+                name: "added",
+            },
+        ] {
+            edit::add_attr(source, target, "#[expect(dead_code)]")?;
+        }
+        Ok(())
     })
 }
 
@@ -104,6 +164,26 @@ fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             }],
         )?;
         edit::rename_method(source, "CurrentThread", "block_on", "drive")?;
+        for (method, bind) in [("spawn", "bind"), ("spawn_local", "bind_local")] {
+            edit::redirect_call(
+                source,
+                edit::Scope::Method {
+                    owner: "Handle",
+                    name: method,
+                },
+                bind,
+                &format!("{bind}_host"),
+            )?;
+            edit::redirect_call(
+                source,
+                edit::Scope::Method {
+                    owner: "Handle",
+                    name: method,
+                },
+                "spawn",
+                "spawn_host",
+            )?;
+        }
         for target in [
             edit::AttrTarget::Method {
                 owner: "CurrentThread",
@@ -129,43 +209,13 @@ fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
         ] {
             edit::add_attr(source, target, "#[expect(dead_code)]")?;
         }
-        edit::redirect_call(
+        edit::add_attr(
             source,
-            edit::Scope::Method {
-                owner: "Arc<Handle>",
-                name: "release",
-            },
-            "remove",
-            "remove_host_task",
-        )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::MethodArgument {
-                owner: "Arc<Handle>",
-                name: "schedule",
-                call: edit::Call::Function("context::with_scheduler"),
-            },
-            "push_task",
-            "push_host_task",
-        )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::MethodArgument {
-                owner: "Arc<Handle>",
-                name: "schedule",
-                call: edit::Call::Function("context::with_scheduler"),
-            },
-            "push",
-            "push_host_task",
-        )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
+            edit::AttrTarget::Method {
                 owner: "Handle",
-                name: "spawn_local",
+                name: "spawned_tasks_count",
             },
-            "schedule",
-            "schedule_local",
+            "#[expect(dead_code)]",
         )?;
         edit::delegate_closure(
             source,
@@ -207,23 +257,27 @@ fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
     })
 }
 
-fn patch_inject(path: &Path) -> Result<(), Box<dyn Error>> {
-    patch(path, |source| {
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "Inject<T>",
-                name: "push",
-            },
-            "#[expect(dead_code)]",
-        )?;
-        mount(source, "telekio", "inject.rs")
-    })
-}
-
 fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(&path.join("handle.rs"), |source| {
         edit::rename_method(source, "Handle", "owned_id", "owned_id_inner")?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "Handle",
+                name: "bind_new_task",
+            },
+            "bind",
+            "bind_host",
+        )?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "Handle",
+                name: "bind_new_task",
+            },
+            "spawn",
+            "spawn_host",
+        )?;
         edit::append_fields(
             source,
             "Handle",
@@ -233,34 +287,6 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
                 ty: "task::telekio::Registry<Arc<Handle>>",
             }],
         )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "Handle",
-                name: "bind_new_task",
-            },
-            "schedule_option_task_without_yield",
-            "schedule_host_option",
-        )?;
-        for function in ["release", "schedule", "yield_now"] {
-            edit::redirect_call(
-                source,
-                edit::Scope::Method {
-                    owner: "Arc<Handle>",
-                    name: function,
-                },
-                if function == "release" {
-                    "remove"
-                } else {
-                    "schedule_task"
-                },
-                if function == "release" {
-                    "remove_host_task"
-                } else {
-                    "schedule_host_task"
-                },
-            )?;
-        }
         Ok(())
     })?;
     patch(&path.join("worker.rs"), |source| {
@@ -294,14 +320,6 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             "crate::runtime::context::exit_runtime",
             "telekio::exit_host_runtime",
         )?;
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Impl {
-                owner: "Handle",
-                method: "schedule_task",
-            },
-            "#[expect(dead_code)]",
-        )?;
         mount(source, "telekio", "worker.rs")
     })?;
     patch(&path.join("handle/taskdump.rs"), |source| {
@@ -317,7 +335,12 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
         mount(source, "telekio", "taskdump.rs")
     })?;
     patch(&path.join("handle/metrics.rs"), |source| {
-        for name in ["injection_queue_depth", "num_workers"] {
+        for name in [
+            "injection_queue_depth",
+            "num_workers",
+            "num_alive_tasks",
+            "spawned_tasks_count",
+        ] {
             edit::add_attr(
                 source,
                 edit::AttrTarget::Method {
@@ -365,16 +388,6 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
         }
         Ok(())
     })?;
-    patch(&path.join("stats.rs"), |source| {
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "Stats",
-                name: "inc_local_schedule_count",
-            },
-            "#[expect(dead_code)]",
-        )
-    })?;
     patch(&path.join("mod.rs"), |source| {
         edit::rename_method(source, "MultiThread", "block_on", "drive")?;
         edit::add_attr(
@@ -391,14 +404,16 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
 
 fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "Handle",
-                name: "num_workers",
-            },
-            "#[expect(dead_code)]",
-        )?;
+        for name in ["num_workers", "num_alive_tasks", "spawned_tasks_count"] {
+            edit::add_attr(
+                source,
+                edit::AttrTarget::Method {
+                    owner: "Handle",
+                    name,
+                },
+                "#[expect(dead_code)]",
+            )?;
+        }
         for name in [
             "injection_queue_depth",
             "num_blocking_threads",
@@ -546,19 +561,6 @@ fn patch_blocking(path: &Path) -> Result<(), Box<dyn Error>> {
             )
         },
     )
-}
-
-fn patch_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
-    patch(path, |source| {
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Methods {
-                owner: "MetricsBatch",
-                name: "inc_local_schedule_count",
-            },
-            "#[expect(dead_code)]",
-        )
-    })
 }
 
 fn patch_histogram(path: &Path) -> Result<(), Box<dyn Error>> {
@@ -1081,6 +1083,7 @@ fn patch_runtime_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
         for (name, call, replacement) in [
             ("num_workers", "num_workers", "host_num_workers"),
+            ("num_alive_tasks", "num_alive_tasks", "host_num_alive_tasks"),
             (
                 "global_queue_depth",
                 "injection_queue_depth",
@@ -1153,6 +1156,15 @@ fn patch_runtime_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
                 "host_worker_metrics",
             )?;
         }
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "RuntimeMetrics",
+                name: "spawned_tasks_count",
+            },
+            "spawned_tasks_count",
+            "host_spawned_tasks_count",
+        )?;
         edit::redirect_call(
             source,
             edit::Scope::Method {

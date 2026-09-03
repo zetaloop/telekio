@@ -17,7 +17,7 @@ pub use runtime::telekio_guest_attach;
 pub use runtime::{
     AttachResult, Blocking, BlockingTask, BoolResult, CallResult, ClockResult, Future, GuestCall,
     Handle, Metric, MetricResult, NameResult, OwnedBytes, Poll, RawAttachment, RawHandle,
-    RawRuntime, Runtime, RuntimeApi, Status, Task, TaskPoll, Waker,
+    RawRuntime, Runtime, RuntimeApi, Status, Task, TaskIdResult, TaskPoll, Waker,
 };
 #[doc(hidden)]
 pub use runtime::{attached, detach_attached, install_handle};

@@ -75,9 +75,11 @@ pub struct RuntimeApi {
     pub release_handle: unsafe extern "C" fn(*const c_void) -> CallResult,
     pub release_runtime: unsafe extern "C" fn(*mut c_void) -> CallResult,
     pub detach: unsafe extern "C" fn(*const c_void) -> CallResult,
-    pub spawn: unsafe extern "C" fn(*const c_void, Task) -> CallResult,
-    pub spawn_local: unsafe extern "C" fn(*const c_void, Task) -> CallResult,
-    pub spawn_blocking: unsafe extern "C" fn(*const c_void, BlockingTask) -> CallResult,
+    pub task_id: unsafe extern "C" fn(*const c_void) -> TaskIdResult,
+    pub abort: unsafe extern "C" fn(*const c_void, u64) -> CallResult,
+    pub spawn: unsafe extern "C" fn(*const c_void, Task, u64) -> CallResult,
+    pub spawn_local: unsafe extern "C" fn(*const c_void, Task, u64) -> CallResult,
+    pub spawn_blocking: unsafe extern "C" fn(*const c_void, BlockingTask, u64) -> CallResult,
     pub block_in_place: unsafe extern "C" fn(*const c_void, Blocking) -> CallResult,
     pub build: unsafe extern "C" fn(*const c_void, RuntimeConfig) -> BuildResult,
     pub clock: unsafe extern "C" fn(*const c_void) -> ClockResult,
@@ -118,6 +120,8 @@ pub enum Status {
 #[repr(u8)]
 pub enum Metric {
     GlobalQueueDepth,
+    NumAliveTasks,
+    SpawnedTasksCount,
     WorkerTotalBusyDuration,
     WorkerParkCount,
     WorkerParkUnparkCount,
@@ -152,6 +156,12 @@ pub enum Metric {
 
 #[repr(C)]
 pub struct MetricResult {
+    pub call: CallResult,
+    pub value: u64,
+}
+
+#[repr(C)]
+pub struct TaskIdResult {
     pub call: CallResult,
     pub value: u64,
 }
@@ -624,18 +634,30 @@ impl Handle {
         unsafe { ((*self.raw.api).reap_process)(self.raw.context, id) }
     }
 
-    pub fn spawn(&self, task: Task) -> CallResult {
-        unsafe { ((*self.raw.api).spawn)(self.raw.context, task) }
+    #[doc(hidden)]
+    pub fn next_task_id(&self) -> u64 {
+        let result = unsafe { ((*self.raw.api).task_id)(self.raw.context) };
+        result.call.resume("failed to allocate Tokio task ID");
+        result.value
     }
 
     #[doc(hidden)]
-    pub fn spawn_local(&self, task: Task) -> CallResult {
-        unsafe { ((*self.raw.api).spawn_local)(self.raw.context, task) }
+    pub fn abort(&self, id: u64) -> CallResult {
+        unsafe { ((*self.raw.api).abort)(self.raw.context, id) }
+    }
+
+    pub fn spawn(&self, task: Task, id: u64) -> CallResult {
+        unsafe { ((*self.raw.api).spawn)(self.raw.context, task, id) }
     }
 
     #[doc(hidden)]
-    pub fn spawn_blocking(&self, task: BlockingTask) -> CallResult {
-        unsafe { ((*self.raw.api).spawn_blocking)(self.raw.context, task) }
+    pub fn spawn_local(&self, task: Task, id: u64) -> CallResult {
+        unsafe { ((*self.raw.api).spawn_local)(self.raw.context, task, id) }
+    }
+
+    #[doc(hidden)]
+    pub fn spawn_blocking(&self, task: BlockingTask, id: u64) -> CallResult {
+        unsafe { ((*self.raw.api).spawn_blocking)(self.raw.context, task, id) }
     }
 
     #[doc(hidden)]
