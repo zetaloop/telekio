@@ -210,13 +210,13 @@ impl Handle {
             Handle::CurrentThread(handle) => {
                 handle
                     .telekio
-                    .spawn_blocking(Arc::clone(handle), function, id, spawned_at)
+                    .spawn_blocking(handle.clone(), function, id, spawned_at)
             }
             #[cfg(feature = "rt-multi-thread")]
             Handle::MultiThread(handle) => {
                 handle
                     .telekio
-                    .spawn_blocking(Arc::clone(handle), function, id, spawned_at)
+                    .spawn_blocking(handle.clone(), function, id, spawned_at)
             }
         }
     }

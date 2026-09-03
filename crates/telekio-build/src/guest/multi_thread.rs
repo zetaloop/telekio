@@ -28,11 +28,11 @@ impl Handle {
         NonZeroU64::new(self.telekio.host().id()).expect("invalid runtime ID")
     }
 
-    pub(crate) fn install(&self, host: Arc<Host>) {
+    pub(crate) fn install(&self, host: std::sync::Arc<Host>) {
         self.telekio.install(host);
     }
 
-    fn run_host_task(self: &Arc<Self>, task: task::Notified<Arc<Self>>) -> u64 {
+    fn run_host_task(&self, task: task::Notified<Arc<Self>>) -> u64 {
         #[cfg(tokio_unstable)]
         self.telekio.host().record_worker();
         task::telekio::measure_poll(|| {
@@ -46,11 +46,11 @@ impl Handle {
         })
     }
 
-    pub(super) fn schedule_host_task(self: &Arc<Self>, task: task::Notified<Arc<Self>>, _: bool) {
+    pub(super) fn schedule_host_task(&self, task: task::Notified<Arc<Self>>, _: bool) {
         task.schedule_host(false);
     }
 
-    pub(super) fn schedule_host_option(self: &Arc<Self>, task: Option<task::Notified<Arc<Self>>>) {
+    pub(super) fn schedule_host_option(&self, task: Option<task::Notified<Arc<Self>>>) {
         if let Some(task) = task {
             self.schedule_host_task(task, false);
         }
