@@ -58,6 +58,18 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
         ("src/runtime/id.rs", "id.rs", None, None),
         ("src/runtime/mod.rs", "runtime.rs", Some("pub"), None),
         (
+            "src/runtime/process.rs",
+            "process.rs",
+            None,
+            Some("#[cfg(unix)]"),
+        ),
+        (
+            "src/process/unix/mod.rs",
+            "orphan.rs",
+            Some("pub(crate)"),
+            Some("#[cfg(unix)]"),
+        ),
+        (
             "src/runtime/scheduler/multi_thread/mod.rs",
             "multi_thread.rs",
             Some("pub(crate)"),
@@ -202,6 +214,21 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
         "telekio::enter_worker",
         &["worker.clone()"],
     )?;
+    fs::write(target, contents)?;
+
+    let target = source.join("src/runtime/process.rs");
+    let mut contents = fs::read_to_string(&target)?;
+    for name in ["park", "park_timeout"] {
+        edit::redirect_call(
+            &mut contents,
+            edit::Scope::Method {
+                owner: "Driver",
+                name,
+            },
+            "GlobalOrphanQueue::reap_orphans",
+            "telekio::reap_orphans",
+        )?;
+    }
     fs::write(target, contents)?;
     Ok(())
 }

@@ -11,38 +11,10 @@ struct AttachedContext {
     flavor: ::telekio::Flavor,
 }
 
-#[cfg(not(any(telekio_host, feature = "telekio-test")))]
-fn attached() -> ::telekio::Handle {
-    ::telekio::attached()
-}
-
-#[cfg(any(telekio_host, feature = "telekio-test"))]
-fn host_owner() -> &'static ::telekio_host::Owner {
-    use std::sync::OnceLock;
-
-    static OWNER: OnceLock<::telekio_host::Owner> = OnceLock::new();
-    OWNER.get_or_init(|| ::telekio_host::Runtime::new().unwrap().owner())
-}
-
-#[cfg(all(feature = "telekio-test", not(test)))]
-#[unsafe(no_mangle)]
-pub(super) extern "C-unwind" fn telekio_default_handle() -> ::telekio::RawHandle {
-    host_owner().runtime().into_abi()
-}
-
-#[cfg(all(not(feature = "telekio-test"), any(telekio_host, not(test))))]
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub(super) extern "C-unwind" fn telekio_default_handle() -> ::telekio::RawHandle {
     ::telekio::RawHandle::empty()
-}
-
-#[cfg(any(telekio_host, feature = "telekio-test"))]
-fn attached() -> ::telekio::Handle {
-    let handle = host_owner().runtime();
-    if let Err(handle) = ::telekio::install_handle(handle) {
-        drop(handle);
-    }
-    ::telekio::attached()
 }
 
 impl Builder {
@@ -108,7 +80,7 @@ impl Builder {
             }
         };
         let keep_alive = self.keep_alive.unwrap_or_default();
-        let result = attached().build(::telekio::RuntimeConfig {
+        let config = ::telekio::RuntimeConfig {
             flavor,
             enable_io: self.enable_io.into(),
             enable_time: self.enable_time.into(),
@@ -173,7 +145,11 @@ impl Builder {
                     ::telekio::HistogramConfig::disabled()
                 }
             },
-        });
+        };
+        #[cfg(any(telekio_host, feature = "telekio-test"))]
+        let result = ::telekio_host::build_root(config);
+        #[cfg(not(any(telekio_host, feature = "telekio-test")))]
+        let result = ::telekio::attached().build(config);
         // Tokio's LocalRuntime keeps this value on its originating thread.
         unsafe { result.into_runtime() }.map(|(runtime, _)| runtime)
     }

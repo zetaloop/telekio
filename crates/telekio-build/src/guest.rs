@@ -991,6 +991,16 @@ fn patch_signal(generated: &Path) -> Result<(), Box<dyn Error>> {
         )?;
         mount_with(source, Some("pub(crate)"), "telekio", "signal.rs")
     })?;
+    patch(&generated.join("src/process/unix/orphan.rs"), |source| {
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Impl {
+                owner: "OrphanQueueImpl<T>",
+                method: "push_orphan",
+            },
+            "#[cfg_attr(all(not(test), any(telekio_host, feature = \"telekio-test\")), expect(dead_code))]",
+        )
+    })?;
     patch(&generated.join("src/process/unix/mod.rs"), |source| {
         edit::redirect_call(
             source,

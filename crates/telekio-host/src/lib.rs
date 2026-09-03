@@ -53,6 +53,7 @@ struct GuestCallState<F, R> {
 struct RuntimeOwner {
     id: OnceLock<u64>,
     owner: Weak<OwnerState>,
+    root_owner: Option<Arc<OwnerState>>,
     kind: RwLock<RuntimeKind>,
 }
 
@@ -107,7 +108,7 @@ trait OwnerResource: Send + Sync {
 }
 
 struct HostResource<T: Send> {
-    owner: Weak<OwnerState>,
+    owner: Arc<OwnerState>,
     id: OnceLock<u64>,
     value: Mutex<Option<T>>,
     waker: Mutex<Option<std::task::Waker>>,
@@ -186,7 +187,7 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     register_io: host_io::register,
     register_io_driver: host_io::register_driver,
     signal: host_signal::signal,
-    reap_process,
+    reap_process: reap_process_abi,
     shutdown,
     defer,
     metric,
@@ -229,6 +230,43 @@ impl Runtime {
     pub fn tokio(&self) -> &tokio::runtime::Runtime {
         &self.runtime
     }
+}
+
+#[doc(hidden)]
+pub fn build_root(config: RuntimeConfig) -> BuildResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let owner = owner_state();
+        match build_runtime(config, Arc::clone(&owner)) {
+            Ok((kind, handle, workers)) => {
+                let runtime = Arc::new(RuntimeOwner {
+                    id: OnceLock::new(),
+                    owner: Arc::downgrade(&owner),
+                    root_owner: Some(owner),
+                    kind: RwLock::new(kind),
+                });
+                let raw_handle = raw_handle(handle);
+                BuildResult::success(
+                    unsafe {
+                        RawRuntime::from_raw(Arc::into_raw(runtime).cast_mut().cast(), raw_handle)
+                    },
+                    workers,
+                )
+            }
+            Err(error) => BuildResult::error(result(
+                Status::Error,
+                OwnedBytes::from_string(error.to_string()),
+            )),
+        }
+    })) {
+        Ok(result) => result,
+        Err(payload) => BuildResult::error(host_panic(&*payload)),
+    }
+}
+
+#[cfg(unix)]
+#[doc(hidden)]
+pub fn reap_process(id: u32) {
+    tokio::runtime::telekio::reap_process(id);
 }
 
 impl Owner {
@@ -600,7 +638,7 @@ impl<T: Send + 'static> OwnerResource for HostResource<T> {
 impl<T: Send + 'static> HostResource<T> {
     fn new(owner: &Arc<OwnerState>, value: T) -> Result<Arc<Self>, String> {
         let resource = Arc::new(Self {
-            owner: Arc::downgrade(owner),
+            owner: Arc::clone(owner),
             id: OnceLock::new(),
             value: Mutex::new(Some(value)),
             waker: Mutex::new(None),
@@ -636,9 +674,7 @@ impl<T: Send + 'static> HostResource<T> {
     }
 
     fn release(&self) {
-        if let Some(owner) = self.owner.upgrade() {
-            let _resource = owner.unregister_resource(*self.id.get().unwrap());
-        }
+        let _resource = self.owner.unregister_resource(*self.id.get().unwrap());
     }
 }
 
@@ -670,6 +706,13 @@ async fn shutdown_owner(
 }
 
 impl RuntimeOwner {
+    fn owner(&self) -> Option<Arc<OwnerState>> {
+        self.root_owner
+            .as_ref()
+            .cloned()
+            .or_else(|| self.owner.upgrade())
+    }
+
     fn is_closed(&self) -> bool {
         matches!(&*self.kind.read().unwrap(), RuntimeKind::Closed)
     }
@@ -792,7 +835,9 @@ unsafe extern "C" fn release_handle(context: *const c_void) -> CallResult {
 unsafe extern "C" fn release_runtime(owner: *mut c_void) -> CallResult {
     host_callback(|| {
         let runtime = unsafe { &*owner.cast::<RuntimeOwner>() };
-        if let Some(owner) = runtime.owner.upgrade() {
+        if runtime.root_owner.is_some() {
+            drop(unsafe { Arc::from_raw(owner.cast::<RuntimeOwner>()) });
+        } else if let Some(owner) = runtime.owner.upgrade() {
             let _runtime = owner.unregister_runtime(*runtime.id.get().unwrap());
         }
     })
@@ -1187,6 +1232,7 @@ unsafe extern "C" fn build(context: *const c_void, config: RuntimeConfig) -> Bui
                 let runtime = Arc::new(RuntimeOwner {
                     id: OnceLock::new(),
                     owner: Arc::downgrade(&context.owner),
+                    root_owner: None,
                     kind: RwLock::new(kind),
                 });
                 let id = match context.owner.register_runtime(Arc::clone(&runtime)) {
@@ -1398,49 +1444,16 @@ fn instant_offset(origin: std::time::Instant, instant: std::time::Instant) -> In
     }
 }
 
-unsafe extern "C" fn reap_process(context: *const c_void, id: u32) -> CallResult {
+unsafe extern "C" fn reap_process_abi(_: *const c_void, id: u32) -> CallResult {
     #[cfg(unix)]
-    {
-        match catch_unwind(AssertUnwindSafe(|| {
-            let context = unsafe { &*context.cast::<HandleContext>() };
-            let _guard = context.handle.enter();
-            let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child());
-            match signal {
-                Ok(mut signal) => {
-                    context.handle.spawn(async move {
-                        loop {
-                            let result = unsafe {
-                                libc::waitpid(
-                                    id as libc::pid_t,
-                                    std::ptr::null_mut(),
-                                    libc::WNOHANG,
-                                )
-                            };
-                            if result > 0 {
-                                break;
-                            }
-                            if result < 0 {
-                                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                                    continue;
-                                }
-                                break;
-                            }
-                            signal.recv().await;
-                        }
-                    });
-                    result(Status::Ok, OwnedBytes::empty())
-                }
-                Err(error) => result(Status::Error, OwnedBytes::from_string(error.to_string())),
-            }
-        })) {
-            Ok(result) => result,
-            Err(payload) => host_panic(&*payload),
-        }
-    }
+    return match catch_unwind(AssertUnwindSafe(|| reap_process(id))) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => host_panic(&*payload),
+    };
     #[cfg(not(unix))]
     {
-        let _ = (context, id);
-        result(Status::Ok, OwnedBytes::empty())
+        let _ = id;
+        CallResult::ok()
     }
 }
 

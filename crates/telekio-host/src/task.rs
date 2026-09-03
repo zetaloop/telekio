@@ -20,8 +20,7 @@ pub(super) unsafe extern "C" fn runtime_block_on(owner: *mut c_void, future: Fut
     let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<Status, String> {
         let runtime = unsafe { &*owner.cast::<RuntimeOwner>() };
         let owner = runtime
-            .owner
-            .upgrade()
+            .owner()
             .ok_or_else(|| "Tokio owner has gone away".to_owned())?;
         let activity = owner.activity()?;
         let kind = runtime.kind.read().unwrap();

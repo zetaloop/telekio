@@ -16,3 +16,4 @@ tokio = { version = "=0.1.0", path = "../telekio-tokio", package = "telekio-toki
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.168"
+tokio = { version = "=0.1.0", path = "../telekio-tokio", package = "telekio-tokio", features = ["process"] }

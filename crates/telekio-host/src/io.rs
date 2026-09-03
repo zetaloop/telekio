@@ -509,10 +509,7 @@ unsafe extern "C" fn poll_registration(
 unsafe extern "C" fn ready(data: *mut std::ffi::c_void, interest: IoInterest) -> IoOperationResult {
     match catch_unwind(AssertUnwindSafe(|| {
         let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
-        let owner = registration
-            .owner
-            .upgrade()
-            .ok_or_else(|| "Tokio owner has gone away".to_owned())?;
+        let owner = Arc::clone(&registration.owner);
         let future =
             registration.with(|registration| operation_ready(registration.io.clone(), interest))?;
         let operation = HostResource::new(&owner, Operation { future })?;
