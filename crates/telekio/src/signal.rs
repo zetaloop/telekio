@@ -25,9 +25,8 @@ pub struct SignalRequest {
 
 #[repr(C)]
 pub struct Signal {
-    data: *mut c_void,
+    resource: crate::runtime::Resource,
     poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
-    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 #[repr(C)]
@@ -36,9 +35,6 @@ pub struct SignalResult {
     pub error: IoError,
     pub signal: Signal,
 }
-
-unsafe impl Send for Signal {}
-unsafe impl Sync for Signal {}
 
 impl SignalRequest {
     pub const fn unix(number: i32) -> Self {
@@ -56,9 +52,8 @@ impl SignalRequest {
 impl Signal {
     pub fn empty() -> Self {
         Self {
-            data: std::ptr::null_mut(),
+            resource: crate::runtime::Resource::empty(),
             poll: poll_empty,
-            release: release_empty,
         }
     }
 
@@ -73,9 +68,8 @@ impl Signal {
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
-            data,
+            resource: unsafe { crate::runtime::Resource::from_raw(data, release) },
             poll,
-            release,
         }
     }
 
@@ -90,7 +84,7 @@ impl Signal {
 
     pub fn poll_recv(&mut self, context: &mut Context<'_>) -> RustPoll<()> {
         let waker = unsafe { Waker::from_ref(context.waker()) };
-        let result = unsafe { (self.poll)(self.data, &raw const waker) };
+        let result = unsafe { (self.poll)(self.resource.data(), &raw const waker) };
         match result.state {
             Poll::Pending => {
                 unsafe { result.call.payload.release() };
@@ -108,17 +102,11 @@ impl Signal {
     }
 }
 
-impl Drop for Signal {
-    fn drop(&mut self) {
-        unsafe { (self.release)(self.data) }.resume("failed to release Tokio signal");
-    }
-}
-
 impl std::fmt::Debug for Signal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Signal")
-            .field("data", &self.data)
+            .field("data", &self.resource.data())
             .finish_non_exhaustive()
     }
 }
@@ -138,8 +126,4 @@ unsafe extern "C" fn poll_empty(_: *mut c_void, _: *const Waker) -> OperationPol
             payload: crate::OwnedBytes::empty(),
         },
     }
-}
-
-unsafe extern "C" fn release_empty(_: *mut c_void) -> CallResult {
-    CallResult::ok()
 }

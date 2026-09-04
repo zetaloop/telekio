@@ -115,19 +115,17 @@ pub struct IoError {
 
 #[repr(C)]
 pub struct IoRegistration {
-    data: *mut c_void,
+    resource: crate::runtime::Resource,
     poll: unsafe extern "C" fn(*mut c_void, IoInterest, *const Waker) -> IoPoll,
     ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoOperationResult,
     try_operate: unsafe extern "C" fn(*mut c_void, IoRequest) -> IoPoll,
     try_ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoPoll,
     clear: unsafe extern "C" fn(*mut c_void, u8, IoReady) -> IoCallResult,
-    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 #[repr(C)]
 pub struct IoDriverRegistration {
-    data: *mut c_void,
-    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
+    resource: crate::runtime::Resource,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,9 +146,8 @@ pub struct IoRequest {
 
 #[repr(C)]
 pub struct IoOperation {
-    data: *mut c_void,
+    resource: crate::runtime::Resource,
     poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> IoPoll,
-    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 #[derive(Clone, Copy)]
@@ -195,13 +192,6 @@ pub struct IoPoll {
     pub tick: u8,
     pub value: usize,
 }
-
-unsafe impl Send for IoRegistration {}
-unsafe impl Sync for IoRegistration {}
-unsafe impl Send for IoDriverRegistration {}
-unsafe impl Sync for IoDriverRegistration {}
-unsafe impl Send for IoOperation {}
-unsafe impl Sync for IoOperation {}
 
 impl IoResource {
     /// # Safety
@@ -396,13 +386,12 @@ impl IoCallResult {
 impl IoRegistration {
     pub fn empty() -> Self {
         Self {
-            data: std::ptr::null_mut(),
+            resource: crate::runtime::Resource::empty(),
             poll: poll_empty,
             ready: ready_empty,
             try_operate: try_operate_empty,
             try_ready: try_ready_empty,
             clear: clear_empty,
-            release: release_empty,
         }
     }
 
@@ -420,13 +409,12 @@ impl IoRegistration {
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
-            data,
+            resource: unsafe { crate::runtime::Resource::from_raw(data, release) },
             poll,
             ready,
             try_operate,
             try_ready,
             clear,
-            release,
         }
     }
 
@@ -442,38 +430,29 @@ impl IoRegistration {
     }
 
     pub fn poll(&self, interest: IoInterest, waker: &Waker) -> IoPoll {
-        unsafe { (self.poll)(self.data, interest, waker) }
+        unsafe { (self.poll)(self.resource.data(), interest, waker) }
     }
 
     pub fn ready(&self, interest: IoInterest) -> IoOperation {
-        let result = unsafe { (self.ready)(self.data, interest) };
+        let result = unsafe { (self.ready)(self.resource.data(), interest) };
         result.call.resume("failed to create Tokio I/O operation");
         result.operation
     }
 
     pub fn try_operate(&self, request: IoRequest) -> IoPoll {
-        unsafe { (self.try_operate)(self.data, request) }
+        unsafe { (self.try_operate)(self.resource.data(), request) }
     }
 
     pub fn try_ready(&self, interest: IoInterest) -> IoPoll {
-        unsafe { (self.try_ready)(self.data, interest) }
+        unsafe { (self.try_ready)(self.resource.data(), interest) }
     }
 
     pub fn clear(&self, tick: u8, ready: IoReady) -> std::io::Result<()> {
-        unsafe { (self.clear)(self.data, tick, ready) }.into_io_result()
+        unsafe { (self.clear)(self.resource.data(), tick, ready) }.into_io_result()
     }
 
     pub fn close(&mut self) {
-        if !self.data.is_null() {
-            unsafe { (self.release)(self.data) }.resume("failed to release Tokio I/O registration");
-            self.data = std::ptr::null_mut();
-        }
-    }
-}
-
-impl Drop for IoRegistration {
-    fn drop(&mut self) {
-        self.close();
+        self.resource.close();
     }
 }
 
@@ -481,7 +460,7 @@ impl std::fmt::Debug for IoRegistration {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("IoRegistration")
-            .field("data", &self.data)
+            .field("data", &self.resource.data())
             .finish_non_exhaustive()
     }
 }
@@ -489,8 +468,7 @@ impl std::fmt::Debug for IoRegistration {
 impl IoDriverRegistration {
     pub fn empty() -> Self {
         Self {
-            data: std::ptr::null_mut(),
-            release: release_empty,
+            resource: crate::runtime::Resource::empty(),
         }
     }
 
@@ -501,7 +479,9 @@ impl IoDriverRegistration {
         data: *mut c_void,
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
-        Self { data, release }
+        Self {
+            resource: unsafe { crate::runtime::Resource::from_raw(data, release) },
+        }
     }
 
     pub fn from_result(result: IoDriverResult) -> std::io::Result<Self> {
@@ -510,26 +490,15 @@ impl IoDriverRegistration {
     }
 
     pub fn close(&mut self) {
-        if !self.data.is_null() {
-            unsafe { (self.release)(self.data) }
-                .resume("failed to release Tokio I/O driver registration");
-            self.data = std::ptr::null_mut();
-        }
-    }
-}
-
-impl Drop for IoDriverRegistration {
-    fn drop(&mut self) {
-        self.close();
+        self.resource.close();
     }
 }
 
 impl IoOperation {
     pub fn empty() -> Self {
         Self {
-            data: std::ptr::null_mut(),
+            resource: crate::runtime::Resource::empty(),
             poll: poll_operation_empty,
-            release: release_empty,
         }
     }
 
@@ -544,9 +513,8 @@ impl IoOperation {
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
-            data,
+            resource: unsafe { crate::runtime::Resource::from_raw(data, release) },
             poll,
-            release,
         }
     }
 }
@@ -556,7 +524,7 @@ impl Future for IoOperation {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> RustPoll<Self::Output> {
         let waker = unsafe { Waker::from_ref(context.waker()) };
-        let result = unsafe { (self.poll)(self.data, &raw const waker) };
+        let result = unsafe { (self.poll)(self.resource.data(), &raw const waker) };
         match result.state {
             Poll::Pending => {
                 unsafe { result.call.payload.release() };
@@ -574,12 +542,6 @@ impl Future for IoOperation {
                 unreachable!()
             }
         }
-    }
-}
-
-impl Drop for IoOperation {
-    fn drop(&mut self) {
-        unsafe { (self.release)(self.data) }.resume("failed to release Tokio I/O operation");
     }
 }
 
@@ -608,11 +570,7 @@ unsafe extern "C" fn try_operate_empty(_: *mut c_void, _: IoRequest) -> IoPoll {
 unsafe extern "C" fn ready_empty(_: *mut c_void, _: IoInterest) -> IoOperationResult {
     IoOperationResult {
         call: CallResult::ok(),
-        operation: IoOperation {
-            data: std::ptr::null_mut(),
-            poll: poll_operation_empty,
-            release: release_empty,
-        },
+        operation: IoOperation::empty(),
     }
 }
 
@@ -645,9 +603,5 @@ unsafe extern "C" fn clear_empty(_: *mut c_void, _: u8, _: IoReady) -> IoCallRes
     }
 }
 unsafe extern "C" fn configure_empty(_: *mut c_void, _: i32, _: usize) -> CallResult {
-    CallResult::ok()
-}
-
-unsafe extern "C" fn release_empty(_: *mut c_void) -> CallResult {
     CallResult::ok()
 }

@@ -43,44 +43,37 @@ unsafe impl Send for Bytes {}
 unsafe impl Sync for Bytes {}
 
 #[repr(C)]
-pub struct Callback {
+struct CallbackOwner {
     data: *const c_void,
-    call: unsafe extern "C" fn(*const c_void) -> CallResult,
     release: unsafe extern "C" fn(*const c_void) -> CallResult,
 }
 
-unsafe impl Send for Callback {}
-unsafe impl Sync for Callback {}
+unsafe impl Send for CallbackOwner {}
+unsafe impl Sync for CallbackOwner {}
+
+#[repr(C)]
+pub struct Callback {
+    owner: CallbackOwner,
+    call: unsafe extern "C" fn(*const c_void) -> CallResult,
+}
 
 #[repr(C)]
 pub struct WorkerCallback {
-    data: *const c_void,
+    owner: CallbackOwner,
     call: unsafe extern "C" fn(*const c_void, usize) -> CallResult,
-    release: unsafe extern "C" fn(*const c_void) -> CallResult,
 }
-
-unsafe impl Send for WorkerCallback {}
-unsafe impl Sync for WorkerCallback {}
 
 #[repr(C)]
 pub struct TaskCallback {
-    data: *const c_void,
+    owner: CallbackOwner,
     call: unsafe extern "C" fn(*const c_void, TaskEvent, u64) -> CallResult,
-    release: unsafe extern "C" fn(*const c_void) -> CallResult,
 }
-
-unsafe impl Send for TaskCallback {}
-unsafe impl Sync for TaskCallback {}
 
 #[repr(C)]
 pub struct StringCallback {
-    data: *const c_void,
+    owner: CallbackOwner,
     call: unsafe extern "C" fn(*const c_void) -> CallResult,
-    release: unsafe extern "C" fn(*const c_void) -> CallResult,
 }
-
-unsafe impl Send for StringCallback {}
-unsafe impl Sync for StringCallback {}
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -210,111 +203,103 @@ impl Bytes {
     }
 }
 
+impl CallbackOwner {
+    fn none() -> Self {
+        Self {
+            data: std::ptr::null(),
+            release: release_none,
+        }
+    }
+
+    fn from_arc<T: ?Sized>(callback: Arc<T>) -> Self {
+        Self {
+            data: Box::into_raw(Box::new(callback)).cast(),
+            release: release_arc::<T>,
+        }
+    }
+}
+
+impl Drop for CallbackOwner {
+    fn drop(&mut self) {
+        unsafe { (self.release)(self.data) }.resume("failed to release Tokio callback");
+    }
+}
+
 impl Callback {
     pub fn none() -> Self {
         Self {
-            data: std::ptr::null(),
+            owner: CallbackOwner::none(),
             call: call_none,
-            release: release_none,
         }
     }
 
     pub fn from_arc(callback: Arc<dyn Fn() + Send + Sync>) -> Self {
         Self {
-            data: Box::into_raw(Box::new(callback)).cast(),
+            owner: CallbackOwner::from_arc(callback),
             call: call_callback,
-            release: release_callback,
         }
     }
 
     pub fn is_some(&self) -> bool {
-        !self.data.is_null()
+        !self.owner.data.is_null()
     }
 
     #[doc(hidden)]
     pub fn call(&self) -> CallResult {
-        unsafe { (self.call)(self.data) }
-    }
-}
-
-impl Drop for Callback {
-    fn drop(&mut self) {
-        unsafe { (self.release)(self.data) }.resume("failed to release Tokio callback");
+        unsafe { (self.call)(self.owner.data) }
     }
 }
 
 impl WorkerCallback {
     pub fn from_arc(callback: Arc<dyn Fn(usize) + Send + Sync>) -> Self {
         Self {
-            data: Box::into_raw(Box::new(callback)).cast(),
+            owner: CallbackOwner::from_arc(callback),
             call: call_worker_callback,
-            release: release_worker_callback,
         }
     }
 
     #[doc(hidden)]
     pub fn call(&self, worker: usize) -> CallResult {
-        unsafe { (self.call)(self.data, worker) }
-    }
-}
-
-impl Drop for WorkerCallback {
-    fn drop(&mut self) {
-        unsafe { (self.release)(self.data) }.resume("failed to release Tokio worker callback");
+        unsafe { (self.call)(self.owner.data, worker) }
     }
 }
 
 impl TaskCallback {
     pub fn none() -> Self {
         Self {
-            data: std::ptr::null(),
+            owner: CallbackOwner::none(),
             call: call_no_task_callback,
-            release: release_none,
         }
     }
 
     pub fn from_arc(callback: Arc<dyn Fn(TaskEvent, u64) + Send + Sync>) -> Self {
         Self {
-            data: Box::into_raw(Box::new(callback)).cast(),
+            owner: CallbackOwner::from_arc(callback),
             call: call_task_callback,
-            release: release_task_callback,
         }
     }
 
     pub fn is_some(&self) -> bool {
-        !self.data.is_null()
+        !self.owner.data.is_null()
     }
 
     #[doc(hidden)]
     pub fn call(&self, event: TaskEvent, id: u64) -> CallResult {
-        unsafe { (self.call)(self.data, event, id) }
-    }
-}
-
-impl Drop for TaskCallback {
-    fn drop(&mut self) {
-        unsafe { (self.release)(self.data) }.resume("failed to release Tokio task callback");
+        unsafe { (self.call)(self.owner.data, event, id) }
     }
 }
 
 impl StringCallback {
     pub fn from_arc(callback: Arc<dyn Fn() -> String + Send + Sync>) -> Self {
         Self {
-            data: Box::into_raw(Box::new(callback)).cast(),
+            owner: CallbackOwner::from_arc(callback),
             call: call_string_callback,
-            release: release_string_callback,
         }
     }
 
     #[doc(hidden)]
     pub fn call(&self) -> CallResult {
-        unsafe { (self.call)(self.data) }
-    }
-}
-
-impl Drop for StringCallback {
-    fn drop(&mut self) {
-        unsafe { (self.release)(self.data) }.resume("failed to release Tokio string callback");
+        unsafe { (self.call)(self.owner.data) }
     }
 }
 
@@ -334,9 +319,9 @@ unsafe extern "C" fn call_callback(data: *const c_void) -> CallResult {
     }
 }
 
-unsafe extern "C" fn release_callback(data: *const c_void) -> CallResult {
+unsafe extern "C" fn release_arc<T: ?Sized>(data: *const c_void) -> CallResult {
     match catch_unwind(AssertUnwindSafe(|| {
-        drop(unsafe { Box::from_raw(data.cast_mut().cast::<Arc<dyn Fn() + Send + Sync>>()) });
+        drop(unsafe { Box::from_raw(data.cast_mut().cast::<Arc<T>>()) });
     })) {
         Ok(()) => CallResult::ok(),
         Err(payload) => CallResult::panicked(&*payload),
@@ -359,32 +344,9 @@ unsafe extern "C" fn call_task_callback(
     }
 }
 
-unsafe extern "C" fn release_task_callback(data: *const c_void) -> CallResult {
-    match catch_unwind(AssertUnwindSafe(|| {
-        drop(unsafe {
-            Box::from_raw(
-                data.cast_mut()
-                    .cast::<Arc<dyn Fn(TaskEvent, u64) + Send + Sync>>(),
-            )
-        });
-    })) {
-        Ok(()) => CallResult::ok(),
-        Err(payload) => CallResult::panicked(&*payload),
-    }
-}
-
 unsafe extern "C" fn call_worker_callback(data: *const c_void, worker: usize) -> CallResult {
     let callback = unsafe { &*data.cast::<Arc<dyn Fn(usize) + Send + Sync>>() };
     match catch_unwind(AssertUnwindSafe(|| callback(worker))) {
-        Ok(()) => CallResult::ok(),
-        Err(payload) => CallResult::panicked(&*payload),
-    }
-}
-
-unsafe extern "C" fn release_worker_callback(data: *const c_void) -> CallResult {
-    match catch_unwind(AssertUnwindSafe(|| {
-        drop(unsafe { Box::from_raw(data.cast_mut().cast::<Arc<dyn Fn(usize) + Send + Sync>>()) });
-    })) {
         Ok(()) => CallResult::ok(),
         Err(payload) => CallResult::panicked(&*payload),
     }
@@ -394,20 +356,6 @@ unsafe extern "C" fn call_string_callback(data: *const c_void) -> CallResult {
     let callback = unsafe { &*data.cast::<Arc<dyn Fn() -> String + Send + Sync>>() };
     match catch_unwind(AssertUnwindSafe(|| callback())) {
         Ok(value) => call_ok(OwnedBytes::from_string(value)),
-        Err(payload) => CallResult::panicked(&*payload),
-    }
-}
-
-unsafe extern "C" fn release_string_callback(data: *const c_void) -> CallResult {
-    match catch_unwind(AssertUnwindSafe(|| {
-        drop(unsafe {
-            Box::from_raw(
-                data.cast_mut()
-                    .cast::<Arc<dyn Fn() -> String + Send + Sync>>(),
-            )
-        });
-    })) {
-        Ok(()) => CallResult::ok(),
         Err(payload) => CallResult::panicked(&*payload),
     }
 }

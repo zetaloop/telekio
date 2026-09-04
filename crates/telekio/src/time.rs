@@ -32,11 +32,10 @@ pub struct ClockSample {
 
 #[repr(C)]
 pub struct Timer {
-    data: *mut c_void,
+    resource: crate::runtime::Resource,
     poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
     reset: unsafe extern "C" fn(*mut c_void, InstantOffset) -> CallResult,
     is_elapsed: unsafe extern "C" fn(*const c_void) -> BoolResult,
-    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 #[repr(C)]
@@ -50,9 +49,6 @@ pub struct OperationPoll {
     pub state: Poll,
     pub call: CallResult,
 }
-
-unsafe impl Send for Timer {}
-unsafe impl Sync for Timer {}
 
 impl InstantOffset {
     fn between(origin: std::time::Instant, instant: std::time::Instant) -> Self {
@@ -142,11 +138,10 @@ impl Handle {
 impl Timer {
     pub fn empty() -> Self {
         Self {
-            data: std::ptr::null_mut(),
+            resource: crate::runtime::Resource::empty(),
             poll: poll_empty,
             reset: reset_empty,
             is_elapsed: elapsed_empty,
-            release: release_empty,
         }
     }
 
@@ -163,11 +158,10 @@ impl Timer {
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
-            data,
+            resource: unsafe { crate::runtime::Resource::from_raw(data, release) },
             poll,
             reset,
             is_elapsed,
-            release,
         }
     }
 
@@ -181,27 +175,26 @@ impl Timer {
 
     pub fn poll(&mut self, context: &mut Context<'_>) -> RustPoll<()> {
         let waker = unsafe { Waker::from_ref(context.waker()) };
-        let result = unsafe { (self.poll)(self.data, &raw const waker) };
+        let result = unsafe { (self.poll)(self.resource.data(), &raw const waker) };
         poll_result(result)
     }
 
     pub fn reset(&mut self, deadline: std::time::Instant) {
         let origin = *CLOCK_ORIGIN.get().expect("Tokio clock is not initialized");
-        unsafe { (self.reset)(self.data, InstantOffset::between(origin, deadline)) }
-            .into_io_result()
-            .expect("failed to reset Tokio timer");
+        unsafe {
+            (self.reset)(
+                self.resource.data(),
+                InstantOffset::between(origin, deadline),
+            )
+        }
+        .into_io_result()
+        .expect("failed to reset Tokio timer");
     }
 
     pub fn is_elapsed(&self) -> bool {
-        let result = unsafe { (self.is_elapsed)(self.data) };
+        let result = unsafe { (self.is_elapsed)(self.resource.data()) };
         result.call.resume("failed to inspect Tokio timer");
         result.value
-    }
-}
-
-impl Drop for Timer {
-    fn drop(&mut self) {
-        unsafe { (self.release)(self.data) }.resume("failed to release Tokio timer");
     }
 }
 
@@ -227,10 +220,6 @@ unsafe extern "C" fn elapsed_empty(_: *const c_void) -> BoolResult {
         call: CallResult::ok(),
         value: true,
     }
-}
-
-unsafe extern "C" fn release_empty(_: *mut c_void) -> CallResult {
-    CallResult::ok()
 }
 
 fn poll_result(result: OperationPoll) -> RustPoll<()> {

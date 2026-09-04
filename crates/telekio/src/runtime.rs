@@ -226,6 +226,15 @@ pub struct OwnedBytes {
 }
 
 #[repr(C)]
+pub(crate) struct Resource {
+    data: *mut c_void,
+    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
+}
+
+unsafe impl Send for Resource {}
+unsafe impl Sync for Resource {}
+
+#[repr(C)]
 pub struct Future {
     data: *mut c_void,
     poll: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, *const Waker) -> Poll,
@@ -233,9 +242,8 @@ pub struct Future {
 
 #[repr(C)]
 pub struct DumpOperation {
-    data: *mut c_void,
+    resource: Resource,
     poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
-    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 #[repr(C)]
@@ -248,10 +256,9 @@ unsafe impl Send for DumpOperation {}
 
 #[repr(C)]
 pub struct Task {
-    data: *mut c_void,
+    resource: Resource,
     poll: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, *const Waker) -> TaskPoll,
     cancel: unsafe extern "C" fn(*mut c_void, *mut ExecutionState) -> CallResult,
-    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 #[derive(Clone, Copy)]
@@ -264,10 +271,9 @@ pub struct TaskPoll {
 
 #[repr(C)]
 pub struct BlockingTask {
-    data: *mut c_void,
+    resource: Resource,
     run: unsafe extern "C" fn(*mut c_void, *mut ExecutionState) -> CallResult,
     cancel: unsafe extern "C" fn(*mut c_void, *mut ExecutionState) -> CallResult,
-    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
 }
 
 unsafe impl Send for BlockingTask {}
@@ -504,12 +510,43 @@ impl TaskPoll {
     }
 }
 
+impl Resource {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            data: std::ptr::null_mut(),
+            release: release_resource_empty,
+        }
+    }
+
+    pub(crate) const unsafe fn from_raw(
+        data: *mut c_void,
+        release: unsafe extern "C" fn(*mut c_void) -> CallResult,
+    ) -> Self {
+        Self { data, release }
+    }
+
+    pub(crate) const fn data(&self) -> *mut c_void {
+        self.data
+    }
+
+    pub(crate) fn close(&mut self) {
+        if !self.data.is_null() {
+            drop(std::mem::replace(self, Self::empty()));
+        }
+    }
+}
+
+impl Drop for Resource {
+    fn drop(&mut self) {
+        unsafe { (self.release)(self.data) }.resume("failed to release Tokio resource");
+    }
+}
+
 impl DumpOperation {
     pub const fn empty() -> Self {
         Self {
-            data: std::ptr::null_mut(),
+            resource: Resource::empty(),
             poll: poll_dump_empty,
-            release: release_dump_empty,
         }
     }
 
@@ -523,15 +560,14 @@ impl DumpOperation {
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
-            data,
+            resource: unsafe { Resource::from_raw(data, release) },
             poll,
-            release,
         }
     }
 
     #[doc(hidden)]
     pub fn poll(&mut self, waker: &Waker) -> RustPoll<Vec<u8>> {
-        let result = unsafe { (self.poll)(self.data, waker) };
+        let result = unsafe { (self.poll)(self.resource.data(), waker) };
         match result.state {
             crate::Poll::Pending => {
                 result.call.resume("failed to poll Tokio runtime dump");
@@ -552,12 +588,6 @@ impl DumpOperation {
     }
 }
 
-impl Drop for DumpOperation {
-    fn drop(&mut self) {
-        unsafe { (self.release)(self.data) }.resume("failed to release Tokio runtime dump");
-    }
-}
-
 impl Task {
     /// # Safety
     ///
@@ -573,16 +603,15 @@ impl Task {
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
-            data,
+            resource: unsafe { Resource::from_raw(data, release) },
             poll,
             cancel,
-            release,
         }
     }
 
     #[doc(hidden)]
     pub fn poll(&mut self, state: &mut ExecutionState, waker: &Waker) -> TaskPoll {
-        unsafe { (self.poll)(self.data, state, waker) }
+        unsafe { (self.poll)(self.resource.data(), state, waker) }
     }
 
     /// # Safety
@@ -590,13 +619,7 @@ impl Task {
     /// The task must not have been cancelled or completed already.
     #[doc(hidden)]
     pub unsafe fn cancel(&mut self, state: *mut ExecutionState) {
-        unsafe { (self.cancel)(self.data, state) }.resume("failed to cancel Tokio task");
-    }
-}
-
-impl Drop for Task {
-    fn drop(&mut self) {
-        unsafe { (self.release)(self.data) }.resume("failed to release Tokio task");
+        unsafe { (self.cancel)(self.resource.data(), state) }.resume("failed to cancel Tokio task");
     }
 }
 
@@ -614,10 +637,9 @@ impl BlockingTask {
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
-            data,
+            resource: unsafe { Resource::from_raw(data, release) },
             run,
             cancel,
-            release,
         }
     }
 
@@ -626,7 +648,8 @@ impl BlockingTask {
     /// This task must not have been run or cancelled already.
     #[doc(hidden)]
     pub unsafe fn run(&mut self, state: *mut ExecutionState) {
-        unsafe { (self.run)(self.data, state) }.resume("failed to run Tokio blocking task");
+        unsafe { (self.run)(self.resource.data(), state) }
+            .resume("failed to run Tokio blocking task");
     }
 
     /// # Safety
@@ -634,13 +657,8 @@ impl BlockingTask {
     /// This task must not have been run or cancelled already.
     #[doc(hidden)]
     pub unsafe fn cancel(&mut self, state: *mut ExecutionState) {
-        unsafe { (self.cancel)(self.data, state) }.resume("failed to cancel Tokio blocking task");
-    }
-}
-
-impl Drop for BlockingTask {
-    fn drop(&mut self) {
-        unsafe { (self.release)(self.data) }.resume("failed to release Tokio blocking task");
+        unsafe { (self.cancel)(self.resource.data(), state) }
+            .resume("failed to cancel Tokio blocking task");
     }
 }
 
@@ -1255,7 +1273,7 @@ unsafe extern "C" fn poll_dump_empty(_: *mut c_void, _: *const Waker) -> Operati
     }
 }
 
-unsafe extern "C" fn release_dump_empty(_: *mut c_void) -> CallResult {
+unsafe extern "C" fn release_resource_empty(_: *mut c_void) -> CallResult {
     CallResult::ok()
 }
 

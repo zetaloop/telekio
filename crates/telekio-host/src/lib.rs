@@ -129,11 +129,6 @@ struct WorkerObserver {
     id: Option<u64>,
 }
 
-struct WorkerCallbackOwner(WorkerCallback);
-
-unsafe impl Send for WorkerCallbackOwner {}
-unsafe impl Sync for WorkerCallbackOwner {}
-
 struct OwnerContext {
     previous: *const OwnerState,
 }
@@ -199,13 +194,6 @@ struct TimeTimer {
 struct CallbackOwner(Callback);
 struct TaskCallbackOwner(TaskCallback);
 struct StringCallbackOwner(StringCallback);
-
-unsafe impl Send for CallbackOwner {}
-unsafe impl Sync for CallbackOwner {}
-unsafe impl Send for TaskCallbackOwner {}
-unsafe impl Sync for TaskCallbackOwner {}
-unsafe impl Send for StringCallbackOwner {}
-unsafe impl Sync for StringCallbackOwner {}
 
 // LocalRuntime stays in its originating thread. HandleContext only shares the slot's
 // address and checks that thread before every access to the contained runtime.
@@ -868,12 +856,6 @@ impl CallbackOwner {
     }
 }
 
-impl WorkerCallbackOwner {
-    fn call(&self, worker: usize) -> CallResult {
-        self.0.call(worker)
-    }
-}
-
 impl TaskCallbackOwner {
     fn call(&self, event: TaskEvent, id: u64) {
         self.0
@@ -1323,7 +1305,7 @@ unsafe extern "C" fn observe_workers(
             drop(callback);
             return Ok(());
         }
-        let callback = Arc::new(WorkerCallbackOwner(callback));
+        let callback = Arc::new(callback);
         let owner = Arc::clone(&context.owner);
         let id = context
             .handle
