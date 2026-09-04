@@ -1,6 +1,6 @@
 mod package;
 
-pub use package::{Role, prepare_guest, prepare_patch, prepare_tests};
+pub use package::{Role, prepare_guest, prepare_mixed_guest_patch, prepare_patch, prepare_tests};
 
 use std::{
     error::Error,

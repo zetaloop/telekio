@@ -85,7 +85,20 @@ pub fn prepare_guest() -> Result<PathBuf, Box<dyn Error>> {
 }
 
 pub fn prepare_patch(directory: &Path, role: Role, offline: bool) -> Result<(), Box<dyn Error>> {
-    if patch_current(directory, role)? {
+    prepare_patch_with(directory, role, role, offline)
+}
+
+pub fn prepare_mixed_guest_patch(directory: &Path, offline: bool) -> Result<(), Box<dyn Error>> {
+    prepare_patch_with(directory, Role::Guest, Role::Host, offline)
+}
+
+fn prepare_patch_with(
+    directory: &Path,
+    source_role: Role,
+    dependency_role: Role,
+    offline: bool,
+) -> Result<(), Box<dyn Error>> {
+    if patch_current(directory, source_role, dependency_role)? {
         return Ok(());
     }
     let source_cache = directory
@@ -93,12 +106,16 @@ pub fn prepare_patch(directory: &Path, role: Role, offline: bool) -> Result<(), 
         .ok_or("patch directory has no parent")?
         .join("source");
     let source = prepare_tokio_in(&source_cache, offline, false)?;
-    write_patch(directory, &source, role)?;
+    write_patch(directory, &source, source_role, dependency_role)?;
     fs::remove_dir_all(source_cache)?;
     Ok(())
 }
 
-fn patch_current(directory: &Path, role: Role) -> Result<bool, Box<dyn Error>> {
+fn patch_current(
+    directory: &Path,
+    source_role: Role,
+    dependency_role: Role,
+) -> Result<bool, Box<dyn Error>> {
     let manifest = directory.join("Cargo.toml");
     let build = directory.join("build.rs");
     let source = directory.join("src/lib.rs");
@@ -108,6 +125,7 @@ fn patch_current(directory: &Path, role: Role) -> Result<bool, Box<dyn Error>> {
     {
         return Ok(false);
     }
+    let build = fs::read_to_string(build)?;
     let manifest: Value = toml::from_str(&fs::read_to_string(manifest)?)?;
     let dependencies = manifest
         .get("dependencies")
@@ -151,8 +169,9 @@ fn patch_current(directory: &Path, role: Role) -> Result<bool, Box<dyn Error>> {
         && rust_version == Some(env!("CARGO_PKG_RUST_VERSION"))
         && features.is_some_and(|features| features.contains_key("telekio-test"))
         && !dependencies.contains_key("telekio-host")
-        && host == (role == Role::Host)
-        && forwards_taskdump == (role == Role::Host)
+        && build.contains("rustc-cfg=telekio_host") == (source_role == Role::Host)
+        && host == (dependency_role == Role::Host)
+        && forwards_taskdump == (dependency_role == Role::Host)
         && !forwards_schedule_latency
         && dependencies
             .values()
@@ -177,7 +196,12 @@ fn patch_current(directory: &Path, role: Role) -> Result<bool, Box<dyn Error>> {
         }))
 }
 
-fn write_patch(directory: &Path, source: &Path, role: Role) -> Result<(), Box<dyn Error>> {
+fn write_patch(
+    directory: &Path,
+    source: &Path,
+    source_role: Role,
+    dependency_role: Role,
+) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(directory.join("src"))?;
     let mut manifest: Value = toml::from_str(&fs::read_to_string(source.join("Cargo.toml"))?)?;
     let package = manifest
@@ -222,7 +246,7 @@ fn write_patch(directory: &Path, source: &Path, role: Role) -> Result<(), Box<dy
         .and_then(Value::as_table_mut)
         .ok_or("Tokio manifest has no features")?;
     features.insert("telekio-test".to_owned(), Value::Array(Vec::new()));
-    if role == Role::Host {
+    if dependency_role == Role::Host {
         features
             .get_mut("taskdump")
             .and_then(Value::as_array_mut)
@@ -236,7 +260,7 @@ fn write_patch(directory: &Path, source: &Path, role: Role) -> Result<(), Box<dy
         .ok_or("Tokio manifest has no dependencies")?;
     dependencies.insert("telekio".to_owned(), registry_dependency(true));
     dependencies.remove("telekio-host");
-    if role == Role::Host {
+    if dependency_role == Role::Host {
         manifest
             .as_table_mut()
             .ok_or("Tokio manifest is not a table")?
@@ -266,7 +290,7 @@ fn write_patch(directory: &Path, source: &Path, role: Role) -> Result<(), Box<dy
         );
 
     let source_root = fs::read_to_string(source.join("src/lib.rs"))?;
-    let host = if role == Role::Host {
+    let host = if source_role == Role::Host {
         "    if (std::env::var_os(\"CARGO_CFG_UNIX\").is_some() || std::env::var_os(\"CARGO_CFG_WINDOWS\").is_some()) && std::env::var_os(\"CARGO_CFG_LOOM\").is_none() {\n        println!(\"cargo::rustc-cfg=telekio_host\");\n    }\n"
     } else {
         ""
