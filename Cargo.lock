@@ -573,7 +573,6 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "toml",
- "toml_edit",
 ]
 
 [[package]]
@@ -582,6 +581,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "telekio-build",
+ "toml_edit",
 ]
 
 [[package]]
