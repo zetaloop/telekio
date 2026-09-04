@@ -159,13 +159,7 @@ struct BlockingRunner<S: HostSchedule> {
     id: task::Id,
 }
 
-struct HostCall {
-    started: std::time::Instant,
-    outer: bool,
-}
-
 thread_local! {
-    static HOST_CALLS: std::cell::Cell<(usize, u64)> = const { std::cell::Cell::new((0, 0)) };
     static SPAWN_LOCATION: std::cell::Cell<Option<::telekio::SourceLocation>> = const { std::cell::Cell::new(None) };
 }
 
@@ -297,39 +291,9 @@ struct Root<'a, F> {
 }
 
 pub(crate) fn measure_poll(call: impl FnOnce()) -> u64 {
-    let host_before = HOST_CALLS.get().1;
     let started = std::time::Instant::now();
     call();
-    let elapsed = started.elapsed().as_nanos().min(u64::MAX.into()) as u64;
-    elapsed.saturating_sub(HOST_CALLS.get().1.saturating_sub(host_before))
-}
-
-fn host_call<T>(call: impl FnOnce() -> T) -> T {
-    let _call = HostCall::new();
-    call()
-}
-
-impl HostCall {
-    fn new() -> Self {
-        let (depth, elapsed) = HOST_CALLS.get();
-        HOST_CALLS.set((depth + 1, elapsed));
-        Self {
-            started: std::time::Instant::now(),
-            outer: depth == 0,
-        }
-    }
-}
-
-impl Drop for HostCall {
-    fn drop(&mut self) {
-        let (depth, elapsed) = HOST_CALLS.get();
-        let elapsed = if self.outer {
-            elapsed.saturating_add(self.started.elapsed().as_nanos().min(u64::MAX.into()) as u64)
-        } else {
-            elapsed
-        };
-        HOST_CALLS.set((depth - 1, elapsed));
-    }
+    started.elapsed().as_nanos().min(u64::MAX.into()) as u64
 }
 
 #[cfg(tokio_unstable)]
@@ -399,21 +363,24 @@ impl Host {
     }
 
     pub(crate) fn unhandled_panic(&self) {
-        host_call(|| self.handle.task_panicked()).resume("failed to apply Tokio panic policy");
+        self.handle
+            .task_panicked()
+            .resume("failed to apply Tokio panic policy");
     }
 
     pub(crate) fn abort(&self, id: task::Id) {
-        host_call(|| self.handle.abort(id.as_u64()))
+        self.handle
+            .abort(id.as_u64())
             .resume("failed to abort Tokio task");
     }
 
     pub(crate) fn defer(&self, waker: &::telekio::Waker) -> ::telekio::CallResult {
-        host_call(|| self.handle.defer(waker))
+        self.handle.defer(waker)
     }
 
     #[cfg(feature = "taskdump")]
     pub(crate) async fn dump(&self) -> crate::runtime::Dump {
-        let ::telekio::DumpResult { call, mut dump } = host_call(|| self.handle.dump());
+        let ::telekio::DumpResult { call, mut dump } = self.handle.dump();
         call.resume("failed to start Tokio runtime dump");
         let bytes = std::future::poll_fn(|context| {
             let waker = unsafe { ::telekio::Waker::from_ref(context.waker()) };
@@ -429,11 +396,11 @@ impl Host {
         root: *const std::ffi::c_void,
         leaf: *const std::ffi::c_void,
     ) -> ::telekio::CallResult {
-        host_call(|| unsafe { self.handle.trace_leaf(root, leaf) })
+        unsafe { self.handle.trace_leaf(root, leaf) }
     }
 
     pub(crate) fn metric(&self, metric: ::telekio::Metric, worker: usize) -> u64 {
-        host_call(|| self.handle.metric(metric, worker))
+        self.handle.metric(metric, worker)
     }
 
     #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
@@ -443,7 +410,7 @@ impl Host {
         worker: usize,
         bucket: usize,
     ) -> u64 {
-        host_call(|| self.handle.metric_bucket(metric, worker, bucket))
+        self.handle.metric_bucket(metric, worker, bucket)
     }
 
     #[cfg(tokio_unstable)]
@@ -733,12 +700,11 @@ impl<S: HostSchedule> Registry<S> {
                 release_blocking::<S>,
             )
         };
-        if let Err(error) = host_call(|| {
-            self.host()
-                .handle
-                .spawn_blocking(task, id.as_u64(), location)
-        })
-        .into_io_result()
+        if let Err(error) = self
+            .host()
+            .handle
+            .spawn_blocking(task, id.as_u64(), location)
+            .into_io_result()
         {
             self.host().task_hooks.remove(id);
             panic!("failed to spawn blocking Tokio task {id}: {error}");
