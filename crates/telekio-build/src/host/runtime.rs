@@ -36,46 +36,22 @@ pub fn record_forced_yields(count: u64) {
     let _ = count;
 }
 
-pub fn is_tracing() -> bool {
-    #[cfg(all(
-        tokio_unstable,
-        feature = "taskdump",
-        target_os = "linux",
-        any(
-            target_arch = "aarch64",
-            target_arch = "x86",
-            target_arch = "x86_64",
-            target_arch = "s390x"
-        )
-    ))]
-    return super::task::trace::telekio::is_tracing();
-    #[cfg(not(all(
-        tokio_unstable,
-        feature = "taskdump",
-        target_os = "linux",
-        any(
-            target_arch = "aarch64",
-            target_arch = "x86",
-            target_arch = "x86_64",
-            target_arch = "s390x"
-        )
-    )))]
-    false
+cfg_taskdump! {
+    pub fn is_tracing() -> bool {
+        super::task::trace::telekio::is_tracing()
+    }
+
+    pub fn trace_leaf(root: *const std::ffi::c_void, leaf: *const std::ffi::c_void) {
+        super::task::trace::telekio::trace_leaf(root, leaf);
+    }
 }
 
-#[cfg(all(
-    tokio_unstable,
-    feature = "taskdump",
-    target_os = "linux",
-    any(
-        target_arch = "aarch64",
-        target_arch = "x86",
-        target_arch = "x86_64",
-        target_arch = "s390x"
-    )
-))]
-pub fn trace_leaf(root: *const std::ffi::c_void, leaf: *const std::ffi::c_void) {
-    super::task::trace::telekio::trace_leaf(root, leaf);
+cfg_not_taskdump! {
+    pub fn is_tracing() -> bool {
+        false
+    }
+
+    pub fn trace_leaf(_: *const std::ffi::c_void, _: *const std::ffi::c_void) {}
 }
 
 #[cfg(feature = "rt")]

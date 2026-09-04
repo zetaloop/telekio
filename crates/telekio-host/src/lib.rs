@@ -943,28 +943,7 @@ unsafe extern "C" fn trace_leaf(
     leaf: *const c_void,
 ) -> CallResult {
     match catch_unwind(AssertUnwindSafe(|| {
-        #[cfg(all(
-            feature = "taskdump",
-            target_os = "linux",
-            any(
-                target_arch = "aarch64",
-                target_arch = "x86",
-                target_arch = "x86_64",
-                target_arch = "s390x"
-            )
-        ))]
         tokio::runtime::telekio::trace_leaf(root, leaf);
-        #[cfg(not(all(
-            feature = "taskdump",
-            target_os = "linux",
-            any(
-                target_arch = "aarch64",
-                target_arch = "x86",
-                target_arch = "x86_64",
-                target_arch = "s390x"
-            )
-        )))]
-        let _ = (root, leaf);
     })) {
         Ok(()) => CallResult::ok(),
         Err(payload) => host_panic(&*payload),
