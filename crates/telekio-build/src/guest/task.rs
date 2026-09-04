@@ -6,8 +6,6 @@ use crate::{
     future::Future as TaskFuture,
     runtime::{TaskHooks, TaskMeta, task},
 };
-#[cfg(any(tokio_unstable, feature = "taskdump"))]
-use std::task::Poll;
 use std::{
     collections::HashMap,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -20,6 +18,8 @@ use std::{
 };
 #[cfg(tokio_unstable)]
 use std::{future::Future, pin::Pin, task::Context};
+#[cfg(any(tokio_unstable, feature = "taskdump"))]
+use std::task::Poll;
 
 pub(crate) trait HostSchedule: Schedule + Clone + Send + Sync + 'static {
     fn registry(&self) -> &Registry<Self>;
@@ -62,10 +62,6 @@ struct TaskHookState {
 pub(crate) struct Registry<S: HostSchedule> {
     host: OnceLock<Arc<Host>>,
     marker: std::marker::PhantomData<fn() -> S>,
-    #[cfg(feature = "taskdump")]
-    runners: Mutex<Vec<Weak<Runner<S>>>>,
-    #[cfg(feature = "taskdump")]
-    tracing: TraceLock,
 }
 
 #[derive(Clone)]
@@ -84,11 +80,11 @@ struct Runner<S: HostSchedule> {
     waker: Mutex<Option<Waker>>,
     abort: OnceLock<AbortHandle>,
     complete: AtomicBool,
+    polling: AtomicBool,
     id: task::Id,
     #[cfg(feature = "taskdump")]
     task: OnceLock<Task<TaskSchedule<S>>>,
-    #[cfg(feature = "taskdump")]
-    trace: Mutex<Option<Arc<TraceRequest>>>,
+
 }
 
 #[derive(Clone)]
@@ -149,16 +145,18 @@ impl HostTaskHooks {
     }
 
     fn hooks_active(hooks: &TaskHooks) -> bool {
-        hooks.task_spawn_callback.is_some() || hooks.task_terminate_callback.is_some() || {
-            #[cfg(tokio_unstable)]
-            {
-                hooks.before_poll_callback.is_some() || hooks.after_poll_callback.is_some()
+        hooks.task_spawn_callback.is_some()
+            || hooks.task_terminate_callback.is_some()
+            || {
+                #[cfg(tokio_unstable)]
+                {
+                    hooks.before_poll_callback.is_some() || hooks.after_poll_callback.is_some()
+                }
+                #[cfg(not(tokio_unstable))]
+                {
+                    false
+                }
             }
-            #[cfg(not(tokio_unstable))]
-            {
-                false
-            }
-        }
     }
 
     pub(crate) fn callback(self: &Arc<Self>) -> ::telekio::TaskCallback {
@@ -236,32 +234,6 @@ struct Root<'a, F> {
     future: F,
     host: &'a Host,
 }
-
-#[cfg(feature = "taskdump")]
-struct TraceRequest {
-    remaining: std::sync::atomic::AtomicUsize,
-    traces: Mutex<Vec<(task::Id, super::trace::Trace)>>,
-    waker: Mutex<Option<Waker>>,
-}
-
-#[cfg(feature = "taskdump")]
-#[derive(Default)]
-struct TraceLock {
-    state: Mutex<TraceLockState>,
-}
-
-#[cfg(feature = "taskdump")]
-#[derive(Default)]
-struct TraceLockState {
-    active: bool,
-    waiters: Vec<Waker>,
-}
-
-#[cfg(feature = "taskdump")]
-struct TraceGuard<'a>(&'a TraceLock);
-
-#[cfg(feature = "taskdump")]
-struct TraceCompletion(Option<Arc<TraceRequest>>);
 
 pub(crate) fn measure_poll(call: impl FnOnce()) -> u64 {
     let host_before = HOST_CALLS.get().1;
@@ -370,11 +342,33 @@ impl Host {
     }
 
     pub(crate) fn abort(&self, id: task::Id) {
-        host_call(|| self.handle.abort(id.as_u64())).resume("failed to abort Tokio task");
+        host_call(|| self.handle.abort(id.as_u64()))
+            .resume("failed to abort Tokio task");
     }
 
     pub(crate) fn defer(&self, waker: &::telekio::Waker) -> ::telekio::CallResult {
         host_call(|| self.handle.defer(waker))
+    }
+
+    #[cfg(feature = "taskdump")]
+    pub(crate) async fn dump(&self) -> crate::runtime::Dump {
+        let ::telekio::DumpResult { call, mut dump } = host_call(|| self.handle.dump());
+        call.resume("failed to start Tokio runtime dump");
+        let bytes = std::future::poll_fn(|context| {
+            let waker = unsafe { ::telekio::Waker::from_ref(context.waker()) };
+            dump.poll(&waker)
+        })
+        .await;
+        crate::runtime::dump::telekio::decode(&bytes)
+    }
+
+    #[cfg(feature = "taskdump")]
+    pub(crate) fn trace_leaf(
+        &self,
+        root: *const std::ffi::c_void,
+        leaf: *const std::ffi::c_void,
+    ) -> ::telekio::CallResult {
+        host_call(|| unsafe { self.handle.trace_leaf(root, leaf) })
     }
 
     pub(crate) fn metric(&self, metric: ::telekio::Metric, worker: usize) -> u64 {
@@ -547,94 +541,11 @@ impl Host {
     }
 }
 
-#[cfg(feature = "taskdump")]
-impl TraceLock {
-    async fn lock(&self) -> TraceGuard<'_> {
-        std::future::poll_fn(|context| {
-            let mut state = self.state.lock().unwrap();
-            if !state.active {
-                state.active = true;
-                Poll::Ready(TraceGuard(self))
-            } else {
-                if !state
-                    .waiters
-                    .iter()
-                    .any(|waker| waker.will_wake(context.waker()))
-                {
-                    state.waiters.push(context.waker().clone());
-                }
-                Poll::Pending
-            }
-        })
-        .await
-    }
-}
-
-#[cfg(feature = "taskdump")]
-impl Drop for TraceGuard<'_> {
-    fn drop(&mut self) {
-        let waiters = {
-            let mut state = self.0.state.lock().unwrap();
-            state.active = false;
-            std::mem::take(&mut state.waiters)
-        };
-        for waker in waiters {
-            waker.wake();
-        }
-    }
-}
-
-#[cfg(feature = "taskdump")]
-impl TraceCompletion {
-    fn complete(mut self, trace: (task::Id, super::trace::Trace)) {
-        self.0.take().unwrap().complete(Some(trace));
-    }
-}
-
-#[cfg(feature = "taskdump")]
-impl Drop for TraceCompletion {
-    fn drop(&mut self) {
-        if let Some(request) = self.0.take() {
-            request.complete(None);
-        }
-    }
-}
-
-#[cfg(feature = "taskdump")]
-impl TraceRequest {
-    fn complete(&self, trace: Option<(task::Id, super::trace::Trace)>) {
-        if let Some(trace) = trace {
-            self.traces.lock().unwrap().push(trace);
-        }
-        if self.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
-            if let Some(waker) = self.waker.lock().unwrap().take() {
-                waker.wake();
-            }
-        }
-    }
-}
-
-#[cfg(feature = "taskdump")]
-fn trace_runnable<S: HostSchedule>(
-    runner: &Runner<S>,
-    runnable: Runnable<S>,
-) -> (u64, (task::Id, super::trace::Trace)) {
-    let task = runner.task.get().unwrap();
-    let waker = super::waker::waker_ref::<TaskSchedule<S>>(task.raw.header_ptr_ref());
-    crate::runtime::context::telekio::defer(&waker);
-    let (duration, trace) = super::trace::Trace::capture(|| runner.run(runnable));
-    (duration, (runner.id, trace))
-}
-
 impl<S: HostSchedule> Registry<S> {
     pub(crate) fn new() -> Self {
         Self {
             host: OnceLock::new(),
             marker: std::marker::PhantomData,
-            #[cfg(feature = "taskdump")]
-            runners: Mutex::new(Vec::new()),
-            #[cfg(feature = "taskdump")]
-            tracing: TraceLock::default(),
         }
     }
 
@@ -649,9 +560,12 @@ impl<S: HostSchedule> Registry<S> {
         self.host.get().expect("Tokio runtime is not initialized")
     }
 
-    fn start(&self, runner: Arc<Runner<S>>, local: bool, location: ::telekio::SourceLocation) {
-        #[cfg(feature = "taskdump")]
-        self.runners.lock().unwrap().push(Arc::downgrade(&runner));
+    fn start(
+        &self,
+        runner: Arc<Runner<S>>,
+        local: bool,
+        location: ::telekio::SourceLocation,
+    ) {
         let id = runner.id;
         let task = unsafe {
             ::telekio::Task::from_raw(
@@ -662,7 +576,9 @@ impl<S: HostSchedule> Registry<S> {
             )
         };
         let result = if local {
-            self.host().handle.spawn_local(task, id.as_u64(), location)
+            self.host()
+                .handle
+                .spawn_local(task, id.as_u64(), location)
         } else {
             self.host().handle.spawn(task, id.as_u64(), location)
         };
@@ -717,68 +633,6 @@ impl<S: HostSchedule> Registry<S> {
         runner.initialize(task, &join);
         self.start(runner, true, location);
         join
-    }
-
-    #[cfg(feature = "taskdump")]
-    fn runners(&self) -> Vec<Arc<Runner<S>>> {
-        let mut runners = self.runners.lock().unwrap();
-        let active = runners.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
-        runners.retain(|runner| runner.strong_count() != 0);
-        active
-    }
-
-    #[cfg(feature = "taskdump")]
-    pub(crate) fn dump_current(&self) -> Vec<(task::Id, super::trace::Trace)> {
-        let current = crate::runtime::context::current_task_id();
-        self.runners()
-            .into_iter()
-            .filter(|runner| Some(runner.id) != current)
-            .filter_map(|runner| {
-                let runnable = runner.take_or_notify()?;
-                Some(trace_runnable(&runner, runnable).1)
-            })
-            .collect()
-    }
-
-    #[cfg(feature = "taskdump")]
-    pub(crate) async fn dump(&self) -> Vec<(task::Id, super::trace::Trace)> {
-        let _guard = self.tracing.lock().await;
-        let runners = self
-            .runners()
-            .into_iter()
-            .filter(|runner| !runner.complete.load(Ordering::Acquire))
-            .collect::<Vec<_>>();
-        let request = Arc::new(TraceRequest {
-            remaining: std::sync::atomic::AtomicUsize::new(runners.len()),
-            traces: Mutex::new(Vec::new()),
-            waker: Mutex::new(None),
-        });
-        for runner in &runners {
-            *runner.trace.lock().unwrap() = Some(Arc::clone(&request));
-            if runner.complete.load(Ordering::Acquire) {
-                if let Some(request) = runner.trace.lock().unwrap().take() {
-                    request.complete(None);
-                }
-            } else if let Some(runnable) = runner.notify_for_tracing() {
-                runner.schedule(runnable);
-            } else {
-                runner.wake();
-            }
-        }
-        std::future::poll_fn(|context| {
-            if request.remaining.load(Ordering::Acquire) == 0 {
-                return Poll::Ready(());
-            }
-            *request.waker.lock().unwrap() = Some(context.waker().clone());
-            if request.remaining.load(Ordering::Acquire) == 0 {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await;
-        let traces = std::mem::take(&mut *request.traces.lock().unwrap());
-        traces
     }
 
     pub(crate) fn spawn_blocking<F, R>(
@@ -885,13 +739,15 @@ impl<S: HostSchedule> OwnedTasks<S> {
         T::Output: 'static,
     {
         let join = unsafe {
-            schedule.registry().bind_local(
-                schedule.clone(),
-                future,
-                id,
-                spawned_at,
-                SpawnLocation::take_telekio(),
-            )
+            schedule
+                .registry()
+                .bind_local(
+                    schedule.clone(),
+                    future,
+                    id,
+                    spawned_at,
+                    SpawnLocation::take_telekio(),
+                )
         };
         (join, None)
     }
@@ -999,11 +855,10 @@ impl<S: HostSchedule> Runner<S> {
             waker: Mutex::new(None),
             abort: OnceLock::new(),
             complete: AtomicBool::new(false),
+            polling: AtomicBool::new(false),
             id,
             #[cfg(feature = "taskdump")]
             task: OnceLock::new(),
-            #[cfg(feature = "taskdump")]
-            trace: Mutex::new(None),
         })
     }
 
@@ -1028,6 +883,10 @@ impl<S: HostSchedule> Runner<S> {
     }
 
     fn wake(&self) {
+        let state = ::telekio::execution_state();
+        if !state.is_null() && unsafe { (*state).tracing } != 0 {
+            return;
+        }
         if let Some(waker) = self.waker.lock().unwrap().as_ref() {
             waker.wake_by_ref();
         }
@@ -1042,41 +901,30 @@ impl<S: HostSchedule> Runner<S> {
 
     #[cfg(feature = "taskdump")]
     fn take_or_notify(&self) -> Option<Runnable<S>> {
-        self.runnable.lock().unwrap().take().or_else(|| {
+        let runnable = self.runnable.lock().unwrap().take().or_else(|| {
             self.task
                 .get()
                 .and_then(Task::notify_for_tracing)
                 .map(Runnable::Notified)
-        })
-    }
-
-    #[cfg(feature = "taskdump")]
-    fn notify_for_tracing(&self) -> Option<Runnable<S>> {
-        self.task
-            .get()
-            .and_then(Task::notify_for_tracing)
-            .map(Runnable::Notified)
-    }
-
-    #[cfg(feature = "taskdump")]
-    fn schedule_trace(&self) {
-        if self.complete.load(Ordering::Acquire) || self.trace.lock().unwrap().is_none() {
-            return;
+        });
+        if runnable.is_some() {
+            let task = self.task.get().unwrap();
+            let waker = super::waker::waker_ref::<TaskSchedule<S>>(task.raw.header_ptr_ref());
+            let waker = unsafe { ::telekio::Waker::from_ref(&waker) };
+            self.schedule
+                .registry()
+                .host()
+                .defer(&waker)
+                .resume("failed to resume traced Tokio task");
         }
-        if let Some(runnable) = self.notify_for_tracing() {
-            self.schedule(runnable);
-        } else {
-            self.wake();
-        }
+        runnable
     }
 
     fn finish(&self) {
         self.complete.store(true, Ordering::Release);
-        #[cfg(feature = "taskdump")]
-        if let Some(request) = self.trace.lock().unwrap().take() {
-            request.complete(None);
+        if !self.polling.load(Ordering::Acquire) {
+            self.wake();
         }
-        self.wake();
     }
 }
 
@@ -1101,36 +949,43 @@ unsafe fn poll_runner_inner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
     waker: *const ::telekio::Waker,
 ) -> ::telekio::TaskPoll {
+    struct Polling<'a>(&'a AtomicBool);
+
+    impl Drop for Polling<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+
     let runner = unsafe { &*data.cast::<Runner<S>>() };
+    assert!(
+        !runner.polling.swap(true, Ordering::AcqRel),
+        "Tokio task is already being polled"
+    );
+    let _polling = Polling(&runner.polling);
     *runner.waker.lock().unwrap() = Some(unsafe { (*waker).clone_rust_waker() });
     if runner.complete.load(Ordering::Acquire) {
         return ::telekio::TaskPoll::unmeasured(::telekio::Poll::Ready);
     }
     let mut duration = None;
-    let runnable = runner.runnable.lock().unwrap().take();
-    if let Some(runnable) = runnable {
+    let runnable = if unsafe { (*::telekio::execution_state()).tracing } != 0 {
         #[cfg(feature = "taskdump")]
         {
-            let request = runner.trace.lock().unwrap().take();
-            if let Some(request) = request {
-                let completion = TraceCompletion(Some(request));
-                let (measured, trace) = trace_runnable(runner, runnable);
-                duration = Some(measured);
-                completion.complete(trace);
-            } else {
-                duration = Some(runner.run(runnable));
-            }
+            runner.take_or_notify()
         }
         #[cfg(not(feature = "taskdump"))]
         {
-            duration = Some(runner.run(runnable));
+            None
         }
+    } else {
+        runner.runnable.lock().unwrap().take()
+    };
+    if let Some(runnable) = runnable {
+        duration = Some(runner.run(runnable));
     }
     let state = if runner.complete.load(Ordering::Acquire) {
         ::telekio::Poll::Ready
     } else {
-        #[cfg(feature = "taskdump")]
-        runner.schedule_trace();
         if runner.runnable.lock().unwrap().is_some() {
             runner.wake();
         }

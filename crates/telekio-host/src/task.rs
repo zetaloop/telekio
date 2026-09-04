@@ -69,6 +69,10 @@ fn with_execution<R>(call: impl FnOnce(*mut ExecutionState) -> R) -> R {
     tokio::runtime::telekio::with_execution(|state| call(state.cast()))
 }
 
+fn with_task_execution<R>(call: impl FnOnce(*mut ExecutionState) -> R) -> R {
+    tokio::runtime::telekio::with_task_execution(|state| call(state.cast()))
+}
+
 fn block_on_result(outcome: Result<Status, Box<dyn Any + Send>>) -> CallResult {
     match outcome {
         Ok(Status::Error) => result(
@@ -256,7 +260,7 @@ impl RustFuture for GuestTask {
     fn poll(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> RustPoll<()> {
         let waker = unsafe { Waker::from_ref(context.waker()) };
         let started = Instant::now();
-        let poll = with_execution(|state| self.task.poll(unsafe { &mut *state }, &waker));
+        let poll = with_task_execution(|state| self.task.poll(unsafe { &mut *state }, &waker));
         if let Some(guest) = poll.duration_nanos() {
             let actual = started.elapsed().as_nanos().min(u64::MAX.into()) as u64;
             tokio::runtime::Handle::telekio_record_poll(actual, guest);
@@ -287,7 +291,7 @@ impl RustFuture for TrackedTask {
 impl Drop for GuestTask {
     fn drop(&mut self) {
         if !self.complete {
-            with_execution(|state| unsafe { self.task.cancel(state) });
+            with_task_execution(|state| unsafe { self.task.cancel(state) });
         }
     }
 }
@@ -311,7 +315,7 @@ impl GuestBlockingTask {
     }
 
     fn run(&mut self) {
-        with_execution(|state| unsafe { self.task.run(state) });
+        with_task_execution(|state| unsafe { self.task.run(state) });
         self.complete = true;
     }
 }
@@ -328,7 +332,7 @@ impl TrackedBlockingTask {
 impl Drop for GuestBlockingTask {
     fn drop(&mut self) {
         if !self.complete {
-            with_execution(|state| unsafe { self.task.cancel(state) });
+            with_task_execution(|state| unsafe { self.task.cancel(state) });
         }
     }
 }

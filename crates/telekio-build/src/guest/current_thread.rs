@@ -25,16 +25,6 @@ impl Handle {
         self.telekio.install(host);
     }
 
-    #[cfg(feature = "taskdump")]
-    pub(crate) fn dump(&self) -> crate::runtime::Dump {
-        let tasks = self
-            .telekio
-            .dump_current()
-            .into_iter()
-            .map(|(id, trace)| crate::runtime::dump::Task::new(id, trace))
-            .collect();
-        crate::runtime::Dump::new(tasks)
-    }
 }
 
 impl HostSchedule for Arc<Handle> {
@@ -67,4 +57,5 @@ impl HostSchedule for Arc<Handle> {
         let _guard = context::try_set_current(&handle);
         call()
     }
+
 }

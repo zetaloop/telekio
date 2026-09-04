@@ -12,21 +12,15 @@ cfg_taskdump! {
     where
         F: std::future::Future<Output = crate::runtime::Dump>,
     {
-        match &handle.inner {
-            scheduler::Handle::CurrentThread(inner)
-                if inner.telekio.host().flavor() == ::telekio::Flavor::MultiThread =>
-            {
-                let tasks = inner
-                    .telekio
-                    .dump()
-                    .await
-                    .into_iter()
-                    .map(|(id, trace)| crate::runtime::dump::Task::new(id, trace))
-                    .collect();
-                crate::runtime::Dump::new(tasks)
-            }
-            _ => original.await,
-        }
+        let _ = original;
+        handle.inner.host().dump().await
+    }
+}
+
+cfg_taskdump! {
+    pub(super) fn is_tracing() -> bool {
+        let state = ::telekio::execution_state();
+        !state.is_null() && unsafe { (*state).tracing } != 0
     }
 }
 

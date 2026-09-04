@@ -32,6 +32,11 @@ pub fn prepare_tests() -> Result<PathBuf, Box<dyn Error>> {
         "telekio-test".to_owned(),
         Value::Array(vec![Value::String("dep:telekio-host".to_owned())]),
     );
+    features
+        .get_mut("taskdump")
+        .and_then(Value::as_array_mut)
+        .ok_or("Tokio manifest has no taskdump feature")?
+        .push(Value::String("telekio-host/taskdump".to_owned()));
     let mut host_dependency = package_dependency("telekio-host", false);
     host_dependency
         .as_table_mut()
@@ -134,11 +139,20 @@ fn patch_current(directory: &Path, role: Role) -> Result<bool, Box<dyn Error>> {
                 .filter_map(Value::as_str)
                 .any(|feature| feature.starts_with("telekio-host"))
         });
+    let forwards_taskdump = features
+        .and_then(|features| features.get("taskdump"))
+        .and_then(Value::as_array)
+        .is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| feature.as_str() == Some("telekio-host/taskdump"))
+        });
     Ok(version == Some(concat!("=", env!("CARGO_PKG_VERSION")))
         && rust_version == Some(env!("CARGO_PKG_RUST_VERSION"))
         && features.is_some_and(|features| features.contains_key("telekio-test"))
         && !dependencies.contains_key("telekio-host")
         && host == (role == Role::Host)
+        && forwards_taskdump == (role == Role::Host)
         && !forwards_schedule_latency
         && dependencies
             .values()
@@ -203,11 +217,18 @@ fn write_patch(directory: &Path, source: &Path, role: Role) -> Result<(), Box<dy
             }
         });
     }
-    manifest
+    let features = manifest
         .get_mut("features")
         .and_then(Value::as_table_mut)
-        .ok_or("Tokio manifest has no features")?
-        .insert("telekio-test".to_owned(), Value::Array(Vec::new()));
+        .ok_or("Tokio manifest has no features")?;
+    features.insert("telekio-test".to_owned(), Value::Array(Vec::new()));
+    if role == Role::Host {
+        features
+            .get_mut("taskdump")
+            .and_then(Value::as_array_mut)
+            .ok_or("Tokio manifest has no taskdump feature")?
+            .push(Value::String("telekio-host/taskdump".to_owned()));
+    }
 
     let dependencies = manifest
         .get_mut("dependencies")

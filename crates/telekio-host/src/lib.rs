@@ -1,3 +1,5 @@
+#[path = "dump.rs"]
+mod host_dump;
 #[path = "io.rs"]
 mod host_io;
 #[path = "signal.rs"]
@@ -146,6 +148,50 @@ struct CallbackCleanup {
     id: u64,
 }
 
+struct Deferred {
+    state: Mutex<DeferredState>,
+}
+
+struct DeferredState {
+    waker: Option<std::task::Waker>,
+    cleanup: Option<CallbackCleanup>,
+    woken: bool,
+}
+
+impl Deferred {
+    fn wake(&self) {
+        let (waker, cleanup) = {
+            let mut state = self.state.lock().unwrap();
+            state.woken = true;
+            (state.waker.take(), state.cleanup.take())
+        };
+        if let Some(waker) = waker {
+            waker.wake_by_ref();
+        }
+        drop(cleanup);
+    }
+
+    fn install(&self, cleanup: CallbackCleanup) {
+        let mut state = self.state.lock().unwrap();
+        if state.woken {
+            drop(state);
+            drop(cleanup);
+        } else {
+            state.cleanup = Some(cleanup);
+        }
+    }
+}
+
+impl std::task::Wake for Deferred {
+    fn wake(self: Arc<Self>) {
+        Deferred::wake(&self);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        Deferred::wake(self);
+    }
+}
+
 struct TimeTimer {
     sleep: Pin<Box<tokio::time::Sleep>>,
 }
@@ -185,6 +231,8 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     spawn_local: task::spawn_local,
     spawn_blocking: task::spawn_blocking,
     task_panicked: task::panicked,
+    trace_leaf,
+    dump: host_dump::start,
     block_in_place,
     build,
     clock,
@@ -907,23 +955,58 @@ unsafe extern "C" fn task_id(_: *const c_void) -> TaskIdResult {
     }
 }
 
+unsafe extern "C" fn trace_leaf(
+    _: *const c_void,
+    root: *const c_void,
+    leaf: *const c_void,
+) -> CallResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(all(
+            feature = "taskdump",
+            target_os = "linux",
+            any(
+                target_arch = "aarch64",
+                target_arch = "x86",
+                target_arch = "x86_64",
+                target_arch = "s390x"
+            )
+        ))]
+        tokio::runtime::telekio::trace_leaf(root, leaf);
+        #[cfg(not(all(
+            feature = "taskdump",
+            target_os = "linux",
+            any(
+                target_arch = "aarch64",
+                target_arch = "x86",
+                target_arch = "x86_64",
+                target_arch = "s390x"
+            )
+        )))]
+        let _ = (root, leaf);
+    })) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => host_panic(&*payload),
+    }
+}
+
 unsafe extern "C" fn defer(context: *const c_void, waker: *const Waker) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     match catch_unwind(AssertUnwindSafe(|| {
-        let waker = unsafe { (*waker).clone_rust_waker() };
+        let guest = unsafe { (*waker).clone_rust_waker() };
+        let deferred = Arc::new(Deferred {
+            state: Mutex::new(DeferredState {
+                waker: Some(guest.clone()),
+                cleanup: None,
+                woken: false,
+            }),
+        });
+        let waker = std::task::Waker::from(Arc::clone(&deferred));
         let Some(cleanup) = context.owner.callback(waker.clone()) else {
-            waker.wake();
+            guest.wake();
             return;
         };
-        let wake = waker.clone();
-        let task = context.handle.spawn(async move {
-            tokio::task::yield_now().await;
-            waker.wake();
-            drop(cleanup);
-        });
-        if task.is_finished() {
-            wake.wake();
-        }
+        deferred.install(cleanup);
+        tokio::runtime::telekio::defer(&waker);
     })) {
         Ok(()) => result(Status::Ok, OwnedBytes::empty()),
         Err(payload) => host_panic(&*payload),
@@ -948,6 +1031,10 @@ unsafe extern "C" fn metric(
             Metric::SpawnedTasksCount => metrics.spawned_tasks_count(),
             #[cfg(not(target_has_atomic = "64"))]
             Metric::SpawnedTasksCount => 0,
+            #[cfg(target_has_atomic = "64")]
+            Metric::BudgetForcedYieldCount => metrics.budget_forced_yield_count(),
+            #[cfg(not(target_has_atomic = "64"))]
+            Metric::BudgetForcedYieldCount => 0,
             Metric::NumWorkers => metrics.num_workers() as u64,
             Metric::NumBlockingThreads => metrics.num_blocking_threads() as u64,
             Metric::NumIdleBlockingThreads => metrics.num_idle_blocking_threads() as u64,

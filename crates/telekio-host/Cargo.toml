@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Host runtime backend for Telekio"
 
+[features]
+taskdump = ["tokio/taskdump"]
+
 [dependencies]
 telekio = { version = "=0.1.0", path = "../telekio" }
 tokio = { version = "=0.1.0", path = "../telekio-tokio", package = "telekio-tokio", features = ["net", "rt", "rt-multi-thread", "signal", "sync", "test-util", "time"] }

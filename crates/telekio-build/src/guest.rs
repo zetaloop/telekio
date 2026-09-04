@@ -17,6 +17,9 @@ fn prepare_guest_with(generated: PathBuf, telekio: Value) -> Result<PathBuf, Box
     patch_guest_root(&generated.join("src/lib.rs"))?;
     patch_task_id(&generated.join("src/runtime/task/id.rs"))?;
     patch_task(&generated.join("src/runtime/task/mod.rs"))?;
+    patch_task_trace(&generated.join("src/runtime/task/trace/mod.rs"))?;
+    patch_task_trace_tree(&generated.join("src/runtime/task/trace/tree.rs"))?;
+    patch_dump(&generated.join("src/runtime/dump.rs"))?;
     patch_task_list(&generated.join("src/runtime/task/list.rs"))?;
     patch_sharded_list(&generated.join("src/util/sharded_list.rs"))?;
     patch_current_thread(&generated.join("src/runtime/scheduler/current_thread/mod.rs"))?;
@@ -41,6 +44,11 @@ fn prepare_guest_with(generated: PathBuf, telekio: Value) -> Result<PathBuf, Box
 
 fn patch_guest_root(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
+        edit::retarget_use(
+            source,
+            "trace_leaf",
+            "crate::runtime::task::trace::telekio::trace_leaf",
+        )?;
         mount(source, "telekio_context", "plugin.rs")?;
         edit::add_attr(
             source,
@@ -96,6 +104,76 @@ fn patch_task(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
         edit::rename_method(source, "SpawnLocation", "capture", "capture_local")?;
         mount_with(source, Some("pub(crate)"), "telekio", "task.rs")
+    })
+}
+
+fn patch_task_trace(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "Context",
+                name: "is_tracing",
+            },
+            "#[expect(dead_code)]",
+        )?;
+        edit::append_fields(
+            source,
+            "Trace",
+            &[edit::Field {
+                visibility: None,
+                name: "foreign",
+                ty: "Option<crate::runtime::dump::telekio::ForeignTrace>",
+            }],
+        )?;
+        edit::append_record_fields(
+            source,
+            edit::Scope::Method {
+                owner: "Trace",
+                name: "empty",
+            },
+            "Self",
+            &[edit::FieldInit {
+                name: "foreign",
+                value: "None",
+            }],
+        )?;
+        mount_with(source, Some("pub(crate)"), "telekio", "trace.rs")
+    })
+}
+
+fn patch_task_trace_tree(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        mount_with(source, Some("pub(super)"), "telekio", "trace_tree.rs")
+    })
+}
+
+fn patch_dump(path: &Path) -> Result<(), Box<dyn Error>> {
+    patch(path, |source| {
+        edit::rename_method(
+            source,
+            "Trace",
+            "resolve_backtraces",
+            "resolve_backtraces_local",
+        )?;
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "Trace",
+                name: "resolve_backtraces_local",
+            },
+            "#[doc(hidden)]",
+        )?;
+        edit::redirect_call(
+            source,
+            edit::Scope::Method {
+                owner: "Trace",
+                name: "fmt",
+            },
+            "fmt",
+            "telekio_fmt",
+        )?;
+        mount_with(source, Some("pub(crate)"), "telekio", "dump.rs")
     })
 }
 
@@ -221,15 +299,6 @@ fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             "#[expect(dead_code)]",
         )?;
         edit::rename_method(source, "Handle", "owned_id", "owned_id_inner")?;
-        edit::rename_method(source, "Handle", "dump", "dump_local")?;
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "Handle",
-                name: "dump_local",
-            },
-            "#[expect(dead_code)]",
-        )?;
         for name in [
             "worker_local_queue_depth",
             "num_blocking_threads",
@@ -313,18 +382,6 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             "telekio::exit_host_runtime",
         )?;
         mount(source, "telekio", "worker.rs")
-    })?;
-    patch(&path.join("handle/taskdump.rs"), |source| {
-        edit::rename_method(source, "Handle", "dump", "dump_local")?;
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "Handle",
-                name: "dump_local",
-            },
-            "#[expect(dead_code)]",
-        )?;
-        mount(source, "telekio", "taskdump.rs")
     })?;
     patch(&path.join("handle/metrics.rs"), |source| {
         for name in [
@@ -1041,7 +1098,17 @@ fn patch_signal(generated: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn patch_coop(path: &Path) -> Result<(), Box<dyn Error>> {
-    patch(path, |source| mount(source, "telekio", "coop.rs"))
+    patch(path, |source| {
+        edit::delegate_closure(
+            source,
+            edit::Scope::Function("inc_budget_forced_yield_count"),
+            edit::Call::Function("context::with_current"),
+            0,
+            "telekio::forced_yield",
+            &[],
+        )?;
+        mount(source, "telekio", "coop.rs")
+    })
 }
 
 fn patch_rand(generated: &Path) -> Result<(), Box<dyn Error>> {
@@ -1188,15 +1255,17 @@ fn patch_runtime_metrics(path: &Path) -> Result<(), Box<dyn Error>> {
             "spawned_tasks_count",
             "host_spawned_tasks_count",
         )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "RuntimeMetrics",
-                name: "remote_schedule_count",
-            },
-            "scheduler_metrics",
-            "host_scheduler_metrics",
-        )?;
+        for name in ["remote_schedule_count", "budget_forced_yield_count"] {
+            edit::redirect_call(
+                source,
+                edit::Scope::Method {
+                    owner: "RuntimeMetrics",
+                    name,
+                },
+                "scheduler_metrics",
+                "host_scheduler_metrics",
+            )?;
+        }
         edit::add_attr(
             source,
             edit::AttrTarget::Method {
@@ -1246,6 +1315,15 @@ fn patch_context(path: &Path) -> Result<(), Box<dyn Error>> {
                 },
                 "telekio::dump",
                 &["self"],
+            )?;
+            edit::redirect_call(
+                source,
+                edit::Scope::Method {
+                    owner: "Handle",
+                    name: "is_tracing",
+                },
+                "super::task::trace::Context::is_tracing",
+                "telekio::is_tracing",
             )?;
             edit::redirect_call(
                 source,

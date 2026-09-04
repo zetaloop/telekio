@@ -7,6 +7,7 @@
     clippy::missing_safety_doc,
     clippy::module_inception,
     clippy::needless_doctest_main,
+    clippy::needless_late_init,
     clippy::new_without_default,
     clippy::unnecessary_map_or
 )]

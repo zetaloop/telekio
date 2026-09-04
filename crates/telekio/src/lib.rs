@@ -15,10 +15,10 @@ pub use io::{
 };
 pub use runtime::telekio_guest_attach;
 pub use runtime::{
-    AttachResult, Blocking, BlockingTask, BoolResult, CallResult, ClockResult, ExecutionState,
-    Future, GuestCall, Handle, Metric, MetricResult, NameResult, OwnedBytes, Poll, RawAttachment,
-    RawHandle, RawRuntime, Runtime, RuntimeApi, SourceLocation, Status, Task, TaskIdResult,
-    TaskPoll, Waker,
+    AttachResult, Blocking, BlockingTask, BoolResult, CallResult, ClockResult, DumpOperation,
+    DumpResult, ExecutionState, Future, GuestCall, Handle, Metric, MetricResult, NameResult,
+    OwnedBytes, Poll, RawAttachment, RawHandle, RawRuntime, Runtime, RuntimeApi, SourceLocation,
+    Status, Task, TaskIdResult, TaskPoll, Waker,
 };
 #[doc(hidden)]
 pub use runtime::{

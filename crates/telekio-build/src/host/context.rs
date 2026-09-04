@@ -11,6 +11,8 @@ struct State {
     rng_one: u32,
     rng_two: u32,
     rng_active: u8,
+    tracing: u8,
+    forced_yields: u64,
 }
 
 thread_local! {
@@ -20,12 +22,13 @@ thread_local! {
 #[cfg(feature = "rt")]
 struct Reset {
     state: *mut State,
+    previous: *mut State,
 }
 
 #[cfg(feature = "rt")]
 impl Drop for Reset {
     fn drop(&mut self) {
-        ACTIVE.set(std::ptr::null_mut());
+        ACTIVE.set(self.previous);
         let state = unsafe { &*self.state };
         set_current_task_id((state.task_id != 0).then(|| {
             crate::runtime::task::Id::from_telekio(state.task_id)
@@ -38,6 +41,7 @@ impl Drop for Reset {
                 FastRand::from_telekio(state.rng_one, state.rng_two)
             }));
         });
+        crate::runtime::telekio::record_forced_yields(state.forced_yields);
     }
 }
 
@@ -47,6 +51,16 @@ pub(crate) fn with<R>(call: impl FnOnce(*mut c_void) -> R) -> R {
     if !active.is_null() {
         return call(active.cast());
     }
+    enter(call)
+}
+
+#[cfg(feature = "rt")]
+pub(crate) fn with_task<R>(call: impl FnOnce(*mut c_void) -> R) -> R {
+    enter(call)
+}
+
+#[cfg(feature = "rt")]
+fn enter<R>(call: impl FnOnce(*mut c_void) -> R) -> R {
     let task_id = current_task_id().map_or(0, |id| id.telekio_value());
     let budget = super::budget(|budget| budget.get().telekio_value()).unwrap_or(u16::MAX);
     let rng = CONTEXT.with(|context| context.rng.get());
@@ -57,10 +71,12 @@ pub(crate) fn with<R>(call: impl FnOnce(*mut c_void) -> R) -> R {
         rng_one,
         rng_two,
         rng_active: rng.is_some().into(),
+        tracing: crate::runtime::telekio::is_tracing().into(),
+        forced_yields: 0,
     };
-    ACTIVE.set(&raw mut state);
     let _reset = Reset {
         state: &raw mut state,
+        previous: ACTIVE.replace(&raw mut state),
     };
     call((&raw mut state).cast())
 }

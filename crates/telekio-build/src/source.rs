@@ -126,6 +126,13 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
             Some("#[cfg(all(windows, feature = \"net\"))]"),
         ),
         ("src/net/windows/named_pipe.rs", "named_pipe.rs", None, None),
+        (
+            "src/runtime/task/trace/mod.rs",
+            "trace.rs",
+            Some("pub(crate)"),
+            None,
+        ),
+        ("src/runtime/dump.rs", "dump.rs", None, None),
     ] {
         let helper = helpers.join(helper);
         println!("cargo::rerun-if-changed={}", helper.display());

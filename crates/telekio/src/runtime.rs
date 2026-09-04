@@ -1,7 +1,7 @@
 use crate::{
     BuildResult, Callback, ClockSample, DurationParts, InstantOffset, IoDriverResult, IoInterest,
-    IoResource, IoResult, RuntimeConfig, Shutdown, SignalRequest, SignalResult, TimerResult,
-    WorkerCallback,
+    IoResource, IoResult, OperationPoll, RuntimeConfig, Shutdown, SignalRequest, SignalResult,
+    TimerResult, WorkerCallback,
 };
 
 use std::{
@@ -64,6 +64,8 @@ pub struct ExecutionState {
     pub rng_one: u32,
     pub rng_two: u32,
     pub rng_active: u8,
+    pub tracing: u8,
+    pub forced_yields: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +110,8 @@ pub struct RuntimeApi {
     pub spawn_blocking:
         unsafe extern "C" fn(*const c_void, BlockingTask, u64, SourceLocation) -> CallResult,
     pub task_panicked: unsafe extern "C" fn(*const c_void) -> CallResult,
+    pub trace_leaf: unsafe extern "C" fn(*const c_void, *const c_void, *const c_void) -> CallResult,
+    pub dump: unsafe extern "C" fn(*const c_void) -> DumpResult,
     pub block_in_place: unsafe extern "C" fn(*const c_void, Blocking) -> CallResult,
     pub build: unsafe extern "C" fn(*const c_void, RuntimeConfig) -> BuildResult,
     pub clock: unsafe extern "C" fn(*const c_void) -> ClockResult,
@@ -150,6 +154,7 @@ pub enum Metric {
     GlobalQueueDepth,
     NumAliveTasks,
     SpawnedTasksCount,
+    BudgetForcedYieldCount,
     WorkerTotalBusyDuration,
     WorkerParkCount,
     WorkerParkUnparkCount,
@@ -225,6 +230,21 @@ pub struct Future {
     data: *mut c_void,
     poll: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, *const Waker) -> Poll,
 }
+
+#[repr(C)]
+pub struct DumpOperation {
+    data: *mut c_void,
+    poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
+    release: unsafe extern "C" fn(*mut c_void) -> CallResult,
+}
+
+#[repr(C)]
+pub struct DumpResult {
+    pub call: CallResult,
+    pub dump: DumpOperation,
+}
+
+unsafe impl Send for DumpOperation {}
 
 #[repr(C)]
 pub struct Task {
@@ -407,10 +427,6 @@ pub unsafe fn with_execution_state<R>(state: *mut ExecutionState, call: impl FnO
 
     assert!(!state.is_null(), "Tokio execution state is missing");
     let previous = EXECUTION.replace(state);
-    assert!(
-        previous.is_null() || previous == state,
-        "another Tokio execution state is active"
-    );
     let _reset = Reset(previous);
     call()
 }
@@ -485,6 +501,60 @@ impl TaskPoll {
         } else {
             Some(self.duration_nanos)
         }
+    }
+}
+
+impl DumpOperation {
+    pub const fn empty() -> Self {
+        Self {
+            data: std::ptr::null_mut(),
+            poll: poll_dump_empty,
+            release: release_dump_empty,
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `data` and the callbacks must describe one owned dump operation.
+    #[doc(hidden)]
+    pub const unsafe fn from_raw(
+        data: *mut c_void,
+        poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
+        release: unsafe extern "C" fn(*mut c_void) -> CallResult,
+    ) -> Self {
+        Self {
+            data,
+            poll,
+            release,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn poll(&mut self, waker: &Waker) -> RustPoll<Vec<u8>> {
+        let result = unsafe { (self.poll)(self.data, waker) };
+        match result.state {
+            crate::Poll::Pending => {
+                result.call.resume("failed to poll Tokio runtime dump");
+                RustPoll::Pending
+            }
+            crate::Poll::Ready => match result.call.status {
+                Status::Ok => RustPoll::Ready(unsafe { result.call.payload.into_vec() }),
+                Status::Error | Status::Panicked | Status::HostPanicked => {
+                    result.call.resume("failed to poll Tokio runtime dump");
+                    unreachable!()
+                }
+            },
+            crate::Poll::Panicked => {
+                result.call.resume("Tokio runtime dump panicked");
+                unreachable!()
+            }
+        }
+    }
+}
+
+impl Drop for DumpOperation {
+    fn drop(&mut self) {
+        unsafe { (self.release)(self.data) }.resume("failed to release Tokio runtime dump");
     }
 }
 
@@ -764,6 +834,19 @@ impl Handle {
         unsafe { ((*self.raw.api).task_panicked)(self.raw.context) }
     }
 
+    /// # Safety
+    ///
+    /// `root` and `leaf` must be code addresses in the calling artifact.
+    #[doc(hidden)]
+    pub unsafe fn trace_leaf(&self, root: *const c_void, leaf: *const c_void) -> CallResult {
+        unsafe { ((*self.raw.api).trace_leaf)(self.raw.context, root, leaf) }
+    }
+
+    #[doc(hidden)]
+    pub fn dump(&self) -> DumpResult {
+        unsafe { ((*self.raw.api).dump)(self.raw.context) }
+    }
+
     #[doc(hidden)]
     pub fn defer(&self, waker: &Waker) -> CallResult {
         unsafe { ((*self.raw.api).defer)(self.raw.context, waker) }
@@ -927,7 +1010,12 @@ impl OwnedBytes {
     }
 
     pub fn from_string(value: String) -> Self {
-        let bytes = value.into_bytes().into_boxed_slice();
+        Self::from_vec(value.into_bytes())
+    }
+
+    #[doc(hidden)]
+    pub fn from_vec(value: Vec<u8>) -> Self {
+        let bytes = value.into_boxed_slice();
         let len = bytes.len();
         if len == 0 {
             return Self::empty();
@@ -952,13 +1040,22 @@ impl OwnedBytes {
     /// This descriptor must contain one uniquely owned UTF-8 allocation.
     #[doc(hidden)]
     pub unsafe fn into_string(self) -> String {
+        String::from_utf8(unsafe { self.into_vec() })
+            .unwrap_or_else(|_| "host Tokio runtime panicked".to_owned())
+    }
+
+    /// # Safety
+    ///
+    /// This descriptor must contain one uniquely owned allocation.
+    #[doc(hidden)]
+    pub unsafe fn into_vec(self) -> Vec<u8> {
         let bytes = if self.len == 0 {
             Vec::new()
         } else {
             unsafe { slice::from_raw_parts(self.data, self.len) }.to_vec()
         };
         unsafe { self.release() };
-        String::from_utf8(bytes).unwrap_or_else(|_| "host Tokio runtime panicked".to_owned())
+        bytes
     }
 }
 
@@ -1149,6 +1246,17 @@ unsafe fn raw_wake_by_ref(data: *const ()) {
 unsafe fn raw_drop(data: *const ()) {
     let waker = unsafe { Box::from_raw(data.cast_mut().cast::<Waker>()) };
     unsafe { (waker.release)(waker.data) }.resume("failed to release Tokio waker");
+}
+
+unsafe extern "C" fn poll_dump_empty(_: *mut c_void, _: *const Waker) -> OperationPoll {
+    OperationPoll {
+        state: crate::Poll::Ready,
+        call: CallResult::error("Tokio runtime dump is unavailable"),
+    }
+}
+
+unsafe extern "C" fn release_dump_empty(_: *mut c_void) -> CallResult {
+    CallResult::ok()
 }
 
 unsafe extern "C" fn enter_empty(

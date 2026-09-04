@@ -1,9 +1,9 @@
 use super::*;
 use crate::runtime::task;
 use crate::runtime::task::telekio::Host;
-use std::sync::Arc;
 #[cfg(target_has_atomic = "64")]
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 #[cfg(target_has_atomic = "64")]
 pub(crate) struct HostWorkerMetrics {
@@ -37,6 +37,7 @@ pub(crate) struct HostWorkerMetrics {
 #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
 pub(crate) struct HostSchedulerMetrics {
     pub(crate) remote_schedule_count: HostMetric,
+    pub(crate) budget_forced_yield_count: HostMetric,
 }
 
 #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
@@ -141,6 +142,11 @@ impl Handle {
                 metric: ::telekio::Metric::RemoteScheduleCount,
                 worker: 0,
             },
+            budget_forced_yield_count: HostMetric {
+                host: Arc::clone(self.host()),
+                metric: ::telekio::Metric::BudgetForcedYieldCount,
+                worker: 0,
+            },
         }
     }
 
@@ -223,17 +229,21 @@ impl Handle {
         let spawned_at = task::SpawnLocation::capture();
         let location = task::SpawnLocation::take_telekio();
         match self {
-            Handle::CurrentThread(handle) => {
-                handle
-                    .telekio
-                    .spawn_blocking(handle.clone(), function, id, spawned_at, location)
-            }
+            Handle::CurrentThread(handle) => handle.telekio.spawn_blocking(
+                handle.clone(),
+                function,
+                id,
+                spawned_at,
+                location,
+            ),
             #[cfg(feature = "rt-multi-thread")]
-            Handle::MultiThread(handle) => {
-                handle
-                    .telekio
-                    .spawn_blocking(handle.clone(), function, id, spawned_at, location)
-            }
+            Handle::MultiThread(handle) => handle.telekio.spawn_blocking(
+                handle.clone(),
+                function,
+                id,
+                spawned_at,
+                location,
+            ),
         }
     }
 }
