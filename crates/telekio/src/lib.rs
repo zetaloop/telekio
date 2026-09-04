@@ -1,31 +1,32 @@
-mod builder;
+mod abi;
+mod attachment;
 mod io;
 mod runtime;
 mod signal;
 mod time;
 
-pub use builder::{
-    BuildResult, Bytes, Callback, Flavor, HistogramConfig, RuntimeConfig, Shutdown, StringCallback,
-    TaskCallback, TaskEvent, WorkerCallback,
+pub use abi::{
+    BoolResult, Bytes, CallResult, Callback, OperationPoll, OwnedBytes, Poll, RuntimeApi, Status,
+    StringCallback, Waker,
 };
+pub use attachment::{AttachResult, GuestCall, RawAttachment, telekio_guest_attach};
+#[doc(hidden)]
+pub use attachment::{attached, detach_attached, install_handle};
 pub use io::{
     IO_DRIVER_DISABLED_ERROR, IoCallResult, IoDriverRegistration, IoDriverResult, IoError, IoEvent,
     IoInterest, IoKind, IoOperation, IoOperationKind, IoOperationResult, IoPoll, IoReady,
     IoRegistration, IoRequest, IoResource, IoResult,
 };
-pub use runtime::telekio_guest_attach;
 pub use runtime::{
-    AttachResult, Blocking, BlockingTask, BoolResult, CallResult, ClockResult, DumpOperation,
-    DumpResult, ExecutionState, Future, GuestCall, Handle, Metric, MetricResult, NameResult,
-    OwnedBytes, Poll, RawAttachment, RawHandle, RawRuntime, Runtime, RuntimeApi, SourceLocation,
-    Status, Task, TaskIdResult, TaskPoll, Waker,
+    Blocking, BlockingTask, BuildResult, DumpOperation, DumpResult, ExecutionState, Flavor, Future,
+    Handle, HistogramConfig, Metric, MetricResult, NameResult, RawHandle, RawRuntime, Runtime,
+    RuntimeConfig, Shutdown, SourceLocation, Task, TaskCallback, TaskEvent, TaskIdResult, TaskPoll,
+    WorkerCallback,
 };
 #[doc(hidden)]
-pub use runtime::{
-    attached, detach_attached, execution_state, install_handle, with_execution_state,
-};
+pub use runtime::{execution_state, with_execution_state};
 pub use signal::{Signal, SignalKind, SignalRequest, SignalResult};
-pub use time::{ClockSample, DurationParts, InstantOffset, OperationPoll, Timer, TimerResult};
+pub use time::{ClockResult, ClockSample, DurationParts, InstantOffset, Timer, TimerResult};
 
 #[doc(hidden)]
 pub fn require_package(package: &str) {

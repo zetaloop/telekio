@@ -25,7 +25,7 @@ pub struct SignalRequest {
 
 #[repr(C)]
 pub struct Signal {
-    resource: crate::runtime::Resource,
+    resource: crate::abi::Resource,
     poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
 }
 
@@ -52,7 +52,7 @@ impl SignalRequest {
 impl Signal {
     pub fn empty() -> Self {
         Self {
-            resource: crate::runtime::Resource::empty(),
+            resource: crate::abi::Resource::empty(),
             poll: poll_empty,
         }
     }
@@ -68,7 +68,7 @@ impl Signal {
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
-            resource: unsafe { crate::runtime::Resource::from_raw(data, release) },
+            resource: unsafe { crate::abi::Resource::from_raw(data, release) },
             poll,
         }
     }

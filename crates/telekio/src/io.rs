@@ -5,7 +5,7 @@ use std::{
     task::{Context, Poll as RustPoll},
 };
 
-use crate::{CallResult, Handle, Poll, Waker};
+use crate::{CallResult, Callback, Handle, Poll, Waker};
 
 #[doc(hidden)]
 pub const IO_DRIVER_DISABLED_ERROR: &str = "A Tokio 1.x context was found, but IO is disabled. Call `enable_io` on the runtime builder to enable IO.";
@@ -115,7 +115,7 @@ pub struct IoError {
 
 #[repr(C)]
 pub struct IoRegistration {
-    resource: crate::runtime::Resource,
+    resource: crate::abi::Resource,
     poll: unsafe extern "C" fn(*mut c_void, IoInterest, *const Waker) -> IoPoll,
     ready: unsafe extern "C" fn(*mut c_void, IoInterest) -> IoOperationResult,
     try_operate: unsafe extern "C" fn(*mut c_void, IoRequest) -> IoPoll,
@@ -125,7 +125,7 @@ pub struct IoRegistration {
 
 #[repr(C)]
 pub struct IoDriverRegistration {
-    resource: crate::runtime::Resource,
+    resource: crate::abi::Resource,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,7 +146,7 @@ pub struct IoRequest {
 
 #[repr(C)]
 pub struct IoOperation {
-    resource: crate::runtime::Resource,
+    resource: crate::abi::Resource,
     poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> IoPoll,
 }
 
@@ -386,7 +386,7 @@ impl IoCallResult {
 impl IoRegistration {
     pub fn empty() -> Self {
         Self {
-            resource: crate::runtime::Resource::empty(),
+            resource: crate::abi::Resource::empty(),
             poll: poll_empty,
             ready: ready_empty,
             try_operate: try_operate_empty,
@@ -409,7 +409,7 @@ impl IoRegistration {
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
-            resource: unsafe { crate::runtime::Resource::from_raw(data, release) },
+            resource: unsafe { crate::abi::Resource::from_raw(data, release) },
             poll,
             ready,
             try_operate,
@@ -468,7 +468,7 @@ impl std::fmt::Debug for IoRegistration {
 impl IoDriverRegistration {
     pub fn empty() -> Self {
         Self {
-            resource: crate::runtime::Resource::empty(),
+            resource: crate::abi::Resource::empty(),
         }
     }
 
@@ -480,7 +480,7 @@ impl IoDriverRegistration {
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
-            resource: unsafe { crate::runtime::Resource::from_raw(data, release) },
+            resource: unsafe { crate::abi::Resource::from_raw(data, release) },
         }
     }
 
@@ -497,7 +497,7 @@ impl IoDriverRegistration {
 impl IoOperation {
     pub fn empty() -> Self {
         Self {
-            resource: crate::runtime::Resource::empty(),
+            resource: crate::abi::Resource::empty(),
             poll: poll_operation_empty,
         }
     }
@@ -513,7 +513,7 @@ impl IoOperation {
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
-            resource: unsafe { crate::runtime::Resource::from_raw(data, release) },
+            resource: unsafe { crate::abi::Resource::from_raw(data, release) },
             poll,
         }
     }
@@ -546,6 +546,11 @@ impl Future for IoOperation {
 }
 
 impl Handle {
+    #[doc(hidden)]
+    pub fn register_io_driver(&self, resource: IoResource, callback: Callback) -> IoDriverResult {
+        unsafe { ((*self.raw.api).register_io_driver)(self.raw.context, resource, callback) }
+    }
+
     #[doc(hidden)]
     #[track_caller]
     pub fn register_io(

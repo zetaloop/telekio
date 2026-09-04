@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{BoolResult, CallResult, Handle, Poll, Status, Waker};
+use crate::{BoolResult, CallResult, Handle, OperationPoll, Poll, Status, Waker};
 
 static CLOCK_ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
 
@@ -32,7 +32,7 @@ pub struct ClockSample {
 
 #[repr(C)]
 pub struct Timer {
-    resource: crate::runtime::Resource,
+    resource: crate::abi::Resource,
     poll: unsafe extern "C" fn(*mut c_void, *const Waker) -> OperationPoll,
     reset: unsafe extern "C" fn(*mut c_void, InstantOffset) -> CallResult,
     is_elapsed: unsafe extern "C" fn(*const c_void) -> BoolResult,
@@ -45,9 +45,9 @@ pub struct TimerResult {
 }
 
 #[repr(C)]
-pub struct OperationPoll {
-    pub state: Poll,
+pub struct ClockResult {
     pub call: CallResult,
+    pub value: ClockSample,
 }
 
 impl InstantOffset {
@@ -138,7 +138,7 @@ impl Handle {
 impl Timer {
     pub fn empty() -> Self {
         Self {
-            resource: crate::runtime::Resource::empty(),
+            resource: crate::abi::Resource::empty(),
             poll: poll_empty,
             reset: reset_empty,
             is_elapsed: elapsed_empty,
@@ -158,7 +158,7 @@ impl Timer {
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
         Self {
-            resource: unsafe { crate::runtime::Resource::from_raw(data, release) },
+            resource: unsafe { crate::abi::Resource::from_raw(data, release) },
             poll,
             reset,
             is_elapsed,
