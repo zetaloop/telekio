@@ -27,6 +27,67 @@ pub(crate) trait HostSchedule: Schedule + Clone + Send + Sync + 'static {
     fn enter<R>(&self, call: impl FnOnce() -> R) -> R;
 }
 
+macro_rules! host_schedule {
+    ($variant:ident, $other:ident, $block_in_place:literal) => {
+        impl Handle {
+            pub(crate) fn owned_id(&self) -> std::num::NonZeroU64 {
+                let _ = self.owned_id_inner();
+                std::num::NonZeroU64::new(self.telekio.host().id())
+                    .expect("invalid runtime ID")
+            }
+
+            pub(crate) fn install(
+                &self,
+                host: std::sync::Arc<crate::runtime::task::telekio::Host>,
+            ) {
+                self.telekio.install(host);
+            }
+        }
+
+        impl crate::runtime::task::telekio::HostSchedule for std::sync::Arc<Handle> {
+            fn registry(&self) -> &crate::runtime::task::telekio::Registry<Self> {
+                &self.telekio
+            }
+
+            fn run(&self, call: impl FnOnce()) -> u64 {
+                let run = || {
+                    #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
+                    self.telekio.host().record_worker();
+                    crate::runtime::task::telekio::measure_poll(call)
+                };
+                let current = crate::runtime::context::with_current(|handle| match handle {
+                    crate::runtime::scheduler::Handle::$variant(handle) => {
+                        std::sync::Arc::ptr_eq(handle, self)
+                    }
+                    #[cfg(feature = "rt-multi-thread")]
+                    crate::runtime::scheduler::Handle::$other(_) => false,
+                })
+                .unwrap_or(false);
+                if current {
+                    crate::runtime::context::telekio::enter(run)
+                } else {
+                    let handle = crate::runtime::scheduler::Handle::$variant(
+                        std::sync::Arc::clone(self),
+                    );
+                    crate::runtime::context::enter_runtime(&handle, $block_in_place, |_| {
+                        crate::runtime::context::telekio::enter(run)
+                    })
+                }
+            }
+
+            fn enter<R>(&self, call: impl FnOnce() -> R) -> R {
+                let handle = crate::runtime::scheduler::Handle::$variant(
+                    std::sync::Arc::clone(self),
+                );
+                let _guard = crate::runtime::context::try_set_current(&handle);
+                call()
+            }
+        }
+    };
+}
+
+pub(crate) use host_schedule;
+
 pub(crate) struct Host {
     runtime: Option<::telekio::Runtime>,
     handle: ::telekio::Handle,
