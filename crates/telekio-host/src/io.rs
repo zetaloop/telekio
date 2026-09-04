@@ -4,8 +4,6 @@ use std::{
 };
 
 use std::sync::Arc;
-#[cfg(windows)]
-use std::sync::Mutex;
 #[cfg(any(unix, windows))]
 use std::{future::Future, pin::Pin};
 
@@ -17,12 +15,24 @@ use telekio::{
 
 #[cfg(any(unix, windows))]
 use telekio::IoKind;
-#[cfg(windows)]
-use telekio::IoOperationKind;
 
 #[cfg(target_os = "linux")]
 use super::{CallbackOwner, host_callback};
 use super::{HandleContext, HostResource};
+
+#[cfg(unix)]
+#[path = "io/unix.rs"]
+mod imp;
+#[cfg(windows)]
+#[path = "io/windows.rs"]
+mod imp;
+#[cfg(not(any(unix, windows)))]
+#[path = "io/other.rs"]
+mod imp;
+
+use imp::{Registration, register_inner};
+#[cfg(not(any(unix, windows)))]
+use imp::{clear, poll_registration, ready, try_operate, try_ready};
 
 #[cfg(any(unix, windows))]
 type OperationFuture = Pin<Box<dyn Future<Output = io::Result<HostReady>> + Send>>;
@@ -31,133 +41,6 @@ type OperationFuture = Pin<Box<dyn Future<Output = io::Result<HostReady>> + Send
 struct HostReady {
     tick: u8,
     ready: IoReady,
-}
-
-#[cfg(not(any(unix, windows)))]
-struct Registration;
-
-#[cfg(unix)]
-struct RawIo(std::os::fd::RawFd);
-
-#[cfg(unix)]
-impl std::os::fd::AsRawFd for RawIo {
-    fn as_raw_fd(&self) -> std::os::fd::RawFd {
-        self.0
-    }
-}
-
-#[cfg(unix)]
-#[derive(Clone)]
-enum UnixIo {
-    Fd(Arc<tokio::io::unix::AsyncFd<RawIo>>),
-    #[cfg(target_os = "freebsd")]
-    Aio(Arc<tokio::runtime::telekio::TelekioAio>),
-}
-
-#[cfg(unix)]
-struct Registration {
-    io: UnixIo,
-}
-
-#[cfg(unix)]
-impl UnixIo {
-    fn poll_ready(
-        &self,
-        context: &mut std::task::Context<'_>,
-        interest: IoInterest,
-    ) -> std::task::Poll<io::Result<(u8, tokio::io::Ready, bool)>> {
-        match self {
-            Self::Fd(io) => match host_interest(interest) {
-                Ok(interest) => io.poll_telekio_ready(context, interest),
-                Err(error) => std::task::Poll::Ready(Err(error)),
-            },
-            #[cfg(target_os = "freebsd")]
-            Self::Aio(io) => io.poll_ready(context),
-        }
-    }
-
-    async fn ready(&self, interest: IoInterest) -> io::Result<(u8, tokio::io::Ready, bool)> {
-        match self {
-            Self::Fd(io) => io.telekio_ready(host_interest(interest)?).await,
-            #[cfg(target_os = "freebsd")]
-            Self::Aio(io) => io.ready().await,
-        }
-    }
-
-    fn try_ready(
-        &self,
-        interest: IoInterest,
-    ) -> std::task::Poll<io::Result<(u8, tokio::io::Ready, bool)>> {
-        match self {
-            Self::Fd(io) => {
-                std::task::Poll::Ready(Ok(io.try_telekio_ready(host_interest(interest)?)))
-            }
-            #[cfg(target_os = "freebsd")]
-            Self::Aio(io) => io.try_ready(),
-        }
-    }
-
-    fn clear_ready(&self, tick: u8, ready: tokio::io::Ready) {
-        match self {
-            Self::Fd(io) => io.clear_telekio_ready(tick, ready),
-            #[cfg(target_os = "freebsd")]
-            Self::Aio(io) => io.clear_ready(tick, ready),
-        }
-    }
-}
-
-#[cfg(windows)]
-#[derive(Clone)]
-enum WindowsIo {
-    Socket(Arc<tokio::net::telekio::Socket>),
-    Pipe(Arc<tokio::net::windows::named_pipe::NamedPipeServer>),
-}
-
-#[cfg(windows)]
-impl WindowsIo {
-    fn poll_telekio_ready(
-        &self,
-        context: &mut std::task::Context<'_>,
-        interest: tokio::io::Interest,
-    ) -> std::task::Poll<io::Result<(u8, tokio::io::Ready, bool)>> {
-        match self {
-            Self::Socket(io) => io.poll_ready(context, interest),
-            Self::Pipe(io) => io.poll_telekio_ready(context, interest),
-        }
-    }
-
-    async fn telekio_ready(
-        &self,
-        interest: tokio::io::Interest,
-    ) -> io::Result<(u8, tokio::io::Ready, bool)> {
-        match self {
-            Self::Socket(io) => io.ready(interest).await,
-            Self::Pipe(io) => io.telekio_ready(interest).await,
-        }
-    }
-
-    fn try_telekio_ready(&self, interest: tokio::io::Interest) -> (u8, tokio::io::Ready, bool) {
-        match self {
-            Self::Socket(io) => io.try_ready(interest),
-            Self::Pipe(io) => io.try_telekio_ready(interest),
-        }
-    }
-
-    fn clear_telekio_ready(&self, tick: u8, ready: tokio::io::Ready) -> io::Result<()> {
-        match self {
-            Self::Socket(io) => io.clear_ready(tick, ready),
-            Self::Pipe(io) => {
-                io.clear_telekio_ready(tick, ready);
-                Ok(())
-            }
-        }
-    }
-}
-
-#[cfg(windows)]
-struct Registration {
-    io: WindowsIo,
-    connect: Mutex<Option<OperationFuture>>,
 }
 
 #[cfg(any(unix, windows))]
@@ -315,110 +198,6 @@ unsafe extern "C" fn release_driver(data: *mut std::ffi::c_void) -> CallResult {
     })
 }
 
-#[cfg(unix)]
-fn register_inner(
-    context: &HandleContext,
-    resource: IoResource,
-    interest: IoInterest,
-) -> io::Result<Registration> {
-    #[cfg(target_os = "freebsd")]
-    use std::os::fd::AsRawFd;
-    use std::os::fd::RawFd;
-
-    let io = match resource.kind() {
-        IoKind::Fd => {
-            let raw = resource.raw() as u32 as RawFd;
-            if raw < 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid file descriptor",
-                ));
-            }
-            let _guard = context.handle.enter();
-            UnixIo::Fd(Arc::new(tokio::io::unix::AsyncFd::with_interest(
-                RawIo(raw),
-                host_interest(interest)?,
-            )?))
-        }
-        #[cfg(target_os = "freebsd")]
-        IoKind::Aio => {
-            if !interest.contains(IoInterest::AIO) && !interest.contains(IoInterest::LIO) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "AIO interest is empty",
-                ));
-            }
-            let _guard = context.handle.enter();
-            UnixIo::Aio(Arc::new(context.handle.telekio_register_aio(
-                Arc::new(move |kqueue, token| {
-                    resource
-                        .configure_aio(kqueue.as_raw_fd(), token)
-                        .into_io_result()
-                }),
-                interest.contains(IoInterest::LIO),
-            )?))
-        }
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "expected a Unix I/O resource",
-            ));
-        }
-    };
-    Ok(Registration { io })
-}
-
-#[cfg(windows)]
-fn register_inner(
-    context: &HandleContext,
-    resource: IoResource,
-    interest: IoInterest,
-) -> io::Result<Registration> {
-    use std::os::windows::io::{BorrowedHandle, IntoRawHandle, RawHandle, RawSocket};
-
-    let io = match resource.kind() {
-        IoKind::Socket => {
-            let mut interest = interest;
-            interest |= IoInterest::ERROR;
-            let _guard = context.handle.enter();
-            WindowsIo::Socket(Arc::new(unsafe {
-                tokio::net::telekio::Socket::from_raw_socket(
-                    resource.raw() as RawSocket,
-                    host_interest(interest)?,
-                )?
-            }))
-        }
-        IoKind::Handle => {
-            let raw = resource.raw() as usize as RawHandle;
-            let handle = unsafe { BorrowedHandle::borrow_raw(raw) }.try_clone_to_owned()?;
-            let _guard = context.handle.enter();
-            WindowsIo::Pipe(Arc::new(unsafe {
-                tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(
-                    handle.into_raw_handle(),
-                )?
-            }))
-        }
-        IoKind::Fd | IoKind::Aio => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "expected a Windows socket or handle",
-            ));
-        }
-    };
-    Ok(Registration {
-        io,
-        connect: Mutex::new(None),
-    })
-}
-
-#[cfg(not(any(unix, windows)))]
-fn register_inner(_: &HandleContext, _: IoResource, _: IoInterest) -> io::Result<Registration> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "this I/O resource is not supported on this platform",
-    ))
-}
-
 #[cfg(any(unix, windows))]
 fn host_interest(interest: IoInterest) -> io::Result<tokio::io::Interest> {
     let mut result = None;
@@ -443,7 +222,7 @@ fn add_interest(target: &mut Option<tokio::io::Interest>, interest: tokio::io::I
     *target = Some(target.map_or(interest, |current| current | interest));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 unsafe extern "C" fn poll_registration(
     data: *mut std::ffi::c_void,
     interest: IoInterest,
@@ -455,54 +234,31 @@ unsafe extern "C" fn poll_registration(
         let waker = unsafe { (*waker).clone_rust_waker() };
         let mut context = std::task::Context::from_waker(&waker);
         registration
-            .with(|registration| registration.io.poll_ready(&mut context, interest))
+            .with(|registration| registration.poll_ready(&mut context, interest))
             .map(ready_poll)
-            .unwrap_or_else(|error| {
-                io_poll_error(Poll::Ready, io::Error::other(error), IoReady::SHUTDOWN)
-            })
+            .unwrap_or_else(resource_error)
     })
 }
 
-#[cfg(windows)]
-unsafe extern "C" fn poll_registration(
-    data: *mut std::ffi::c_void,
-    interest: IoInterest,
-    waker: *const Waker,
-) -> IoPoll {
-    io_callback(|| {
+#[cfg(any(unix, windows))]
+unsafe extern "C" fn try_operate(data: *mut std::ffi::c_void, request: IoRequest) -> IoPoll {
+    registration_call(data, |registration| registration.try_operate(request))
+}
+
+#[cfg(any(unix, windows))]
+unsafe extern "C" fn try_ready(data: *mut std::ffi::c_void, interest: IoInterest) -> IoPoll {
+    registration_call(data, |registration| registration.try_ready(interest))
+}
+
+#[cfg(any(unix, windows))]
+unsafe extern "C" fn clear(data: *mut std::ffi::c_void, tick: u8, ready: IoReady) -> IoCallResult {
+    io_call(|| {
         let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
-        registration.update_waker(unsafe { &*waker });
-        registration
-            .with(|registration| poll_windows_registration(registration, interest, waker))
-            .unwrap_or_else(|error| {
-                io_poll_error(Poll::Ready, io::Error::other(error), IoReady::SHUTDOWN)
-            })
+        if let Ok(result) = registration.with(|registration| registration.clear(tick, ready)) {
+            result?;
+        }
+        Ok(())
     })
-}
-
-#[cfg(windows)]
-fn poll_windows_registration(
-    registration: &Registration,
-    interest: IoInterest,
-    waker: *const Waker,
-) -> IoPoll {
-    let waker = unsafe { (*waker).clone_rust_waker() };
-    let mut context = std::task::Context::from_waker(&waker);
-    let result = match host_interest(interest) {
-        Ok(interest) => registration.io.poll_telekio_ready(&mut context, interest),
-        Err(error) => std::task::Poll::Ready(Err(error)),
-    };
-    ready_poll(result)
-}
-
-#[cfg(not(any(unix, windows)))]
-#[expect(dead_code)]
-unsafe extern "C" fn poll_registration(
-    _: *mut std::ffi::c_void,
-    _: IoInterest,
-    _: *const Waker,
-) -> IoPoll {
-    io_poll(Poll::Ready, call_ok(), IoReady::SHUTDOWN)
 }
 
 #[cfg(any(unix, windows))]
@@ -510,8 +266,7 @@ unsafe extern "C" fn ready(data: *mut std::ffi::c_void, interest: IoInterest) ->
     match catch_unwind(AssertUnwindSafe(|| {
         let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
         let owner = Arc::clone(&registration.owner);
-        let future =
-            registration.with(|registration| operation_ready(registration.io.clone(), interest))?;
+        let future = registration.with(|registration| registration.ready(interest))?;
         let operation = HostResource::new(&owner, Operation { future })?;
         Ok::<_, String>(unsafe {
             telekio::IoOperation::from_raw(
@@ -539,15 +294,6 @@ unsafe extern "C" fn ready(data: *mut std::ffi::c_void, interest: IoInterest) ->
     }
 }
 
-#[cfg(not(any(unix, windows)))]
-#[expect(dead_code)]
-unsafe extern "C" fn ready(_: *mut std::ffi::c_void, _: IoInterest) -> IoOperationResult {
-    IoOperationResult {
-        call: CallResult::ok(),
-        operation: telekio::IoOperation::empty(),
-    }
-}
-
 #[cfg(any(unix, windows))]
 unsafe extern "C" fn poll_operation(data: *mut std::ffi::c_void, waker: *const Waker) -> IoPoll {
     io_callback(|| {
@@ -555,9 +301,7 @@ unsafe extern "C" fn poll_operation(data: *mut std::ffi::c_void, waker: *const W
         operation.update_waker(unsafe { &*waker });
         operation
             .with_mut(|operation| poll_completion(operation.future.as_mut(), waker))
-            .unwrap_or_else(|error| {
-                io_poll_error(Poll::Ready, io::Error::other(error), IoReady::SHUTDOWN)
-            })
+            .unwrap_or_else(resource_error)
     })
 }
 
@@ -568,14 +312,6 @@ fn poll_completion(
 ) -> IoPoll {
     let waker = unsafe { (*waker).clone_rust_waker() };
     let mut context = std::task::Context::from_waker(&waker);
-    completion_poll(future.poll(&mut context))
-}
-
-#[cfg(windows)]
-fn poll_completion_now(
-    future: Pin<&mut (dyn Future<Output = io::Result<HostReady>> + Send)>,
-) -> IoPoll {
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     completion_poll(future.poll(&mut context))
 }
 
@@ -590,157 +326,6 @@ fn completion_poll(result: std::task::Poll<io::Result<HostReady>>) -> IoPoll {
     }
 }
 
-#[cfg(windows)]
-fn operation_error(error: io::Error) -> OperationFuture {
-    Box::pin(async move { Err(error) })
-}
-
-#[cfg(unix)]
-fn operation_ready(io: UnixIo, interest: IoInterest) -> OperationFuture {
-    Box::pin(async move { io.ready(interest).await.map(host_ready) })
-}
-
-#[cfg(windows)]
-fn operation_ready(io: WindowsIo, interest: IoInterest) -> OperationFuture {
-    match host_interest(interest) {
-        Ok(interest) => Box::pin(async move { io.telekio_ready(interest).await.map(host_ready) }),
-        Err(error) => operation_error(error),
-    }
-}
-
-#[cfg(windows)]
-fn connect_operation(io: WindowsIo) -> OperationFuture {
-    match io {
-        WindowsIo::Pipe(pipe) => Box::pin(async move {
-            pipe.connect().await.map(|_| HostReady {
-                tick: 0,
-                ready: IoReady::empty(),
-            })
-        }),
-        WindowsIo::Socket(_) => operation_error(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "only a named-pipe server can connect",
-        )),
-    }
-}
-
-#[cfg(windows)]
-fn pipe_error(error: io::Error) -> IoPoll {
-    io_poll_error(Poll::Ready, error, IoReady::SHUTDOWN)
-}
-
-#[cfg(windows)]
-unsafe extern "C" fn try_operate(data: *mut std::ffi::c_void, request: IoRequest) -> IoPoll {
-    io_callback(|| {
-        let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
-        registration
-            .with(|registration| try_operate_inner(registration, request))
-            .unwrap_or_else(|error| {
-                io_poll_error(Poll::Ready, io::Error::other(error), IoReady::SHUTDOWN)
-            })
-    })
-}
-
-#[cfg(windows)]
-fn try_operate_inner(registration: &Registration, request: IoRequest) -> IoPoll {
-    let WindowsIo::Pipe(pipe) = &registration.io else {
-        return pipe_error(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "socket operation is guest-owned",
-        ));
-    };
-    if request.buffer().is_null() && request.buffer_len() != 0 {
-        return pipe_error(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "I/O buffer is null",
-        ));
-    }
-    match request.kind() {
-        IoOperationKind::Read => {
-            let buffer =
-                unsafe { std::slice::from_raw_parts_mut(request.buffer(), request.buffer_len()) };
-            match pipe.try_read(buffer) {
-                Ok(value) => io_poll_value(Poll::Ready, call_ok(), IoReady::empty(), value),
-                Err(error) => io_poll_error(Poll::Ready, error, IoReady::empty()),
-            }
-        }
-        IoOperationKind::Write => {
-            let buffer =
-                unsafe { std::slice::from_raw_parts(request.buffer(), request.buffer_len()) };
-            match pipe.try_write(buffer) {
-                Ok(value) => io_poll_value(Poll::Ready, call_ok(), IoReady::empty(), value),
-                Err(error) => io_poll_error(Poll::Ready, error, IoReady::empty()),
-            }
-        }
-        IoOperationKind::Disconnect => match pipe.disconnect() {
-            Ok(()) => io_poll(Poll::Ready, call_ok(), IoReady::empty()),
-            Err(error) => io_poll_error(Poll::Ready, error, IoReady::empty()),
-        },
-        IoOperationKind::Connect => {
-            let mut future = registration.connect.lock().unwrap();
-            if future.is_none() {
-                *future = Some(connect_operation(registration.io.clone()));
-            }
-            let result = poll_completion_now(future.as_mut().unwrap().as_mut());
-            if result.state != Poll::Pending {
-                *future = None;
-            }
-            result
-        }
-    }
-}
-
-#[cfg(unix)]
-unsafe extern "C" fn try_operate(_: *mut std::ffi::c_void, _: IoRequest) -> IoPoll {
-    io_poll_error(
-        Poll::Ready,
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Unix I/O operations are guest-owned",
-        ),
-        IoReady::empty(),
-    )
-}
-
-#[cfg(not(any(unix, windows)))]
-#[expect(dead_code)]
-unsafe extern "C" fn try_operate(_: *mut std::ffi::c_void, _: IoRequest) -> IoPoll {
-    io_poll(Poll::Ready, call_ok(), IoReady::SHUTDOWN)
-}
-
-#[cfg(unix)]
-unsafe extern "C" fn try_ready(data: *mut std::ffi::c_void, interest: IoInterest) -> IoPoll {
-    io_callback(|| {
-        let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
-        registration
-            .with(|registration| ready_poll(registration.io.try_ready(interest)))
-            .unwrap_or_else(|error| {
-                io_poll_error(Poll::Ready, io::Error::other(error), IoReady::SHUTDOWN)
-            })
-    })
-}
-
-#[cfg(windows)]
-unsafe extern "C" fn try_ready(data: *mut std::ffi::c_void, interest: IoInterest) -> IoPoll {
-    io_callback(|| {
-        let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
-        registration
-            .with(|registration| match host_interest(interest) {
-                Ok(interest) => ready_now(host_ready(registration.io.try_telekio_ready(interest))),
-                Err(error) => io_poll_error(Poll::Ready, error, IoReady::empty()),
-            })
-            .unwrap_or_else(|error| {
-                io_poll_error(Poll::Ready, io::Error::other(error), IoReady::SHUTDOWN)
-            })
-    })
-}
-
-#[cfg(not(any(unix, windows)))]
-#[expect(dead_code)]
-unsafe extern "C" fn try_ready(_: *mut std::ffi::c_void, _: IoInterest) -> IoPoll {
-    io_poll(Poll::Ready, call_ok(), IoReady::SHUTDOWN)
-}
-
 #[cfg(any(unix, windows))]
 fn ready_now(ready: HostReady) -> IoPoll {
     if ready.ready.bits() == 0 {
@@ -750,52 +335,10 @@ fn ready_now(ready: HostReady) -> IoPoll {
     }
 }
 
-#[cfg(unix)]
-unsafe extern "C" fn clear(data: *mut std::ffi::c_void, tick: u8, ready: IoReady) -> IoCallResult {
-    io_call(|| {
-        let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
-        let _ = registration.with(|registration| {
-            registration.io.clear_ready(tick, tokio_ready(ready));
-        });
-        Ok(())
-    })
-}
-
-#[cfg(windows)]
-unsafe extern "C" fn clear(data: *mut std::ffi::c_void, tick: u8, ready: IoReady) -> IoCallResult {
-    io_call(|| {
-        let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
-        if let Ok(result) = registration.with(|registration| {
-            registration
-                .io
-                .clear_telekio_ready(tick, tokio_ready(ready))
-        }) {
-            result?;
-        }
-        Ok(())
-    })
-}
-
-#[cfg(not(any(unix, windows)))]
-#[expect(dead_code)]
-unsafe extern "C" fn clear(_: *mut std::ffi::c_void, _: u8, _: IoReady) -> IoCallResult {
-    IoCallResult {
-        call: CallResult::ok(),
-        error: IoError::none(),
-    }
-}
-
-#[cfg(any(unix, windows))]
 unsafe extern "C" fn release_registration(data: *mut std::ffi::c_void) -> CallResult {
     super::host_callback(|| {
         unsafe { &*data.cast::<HostResource<Registration>>() }.release();
     })
-}
-
-#[cfg(not(any(unix, windows)))]
-#[expect(dead_code)]
-unsafe extern "C" fn release_registration(_: *mut std::ffi::c_void) -> CallResult {
-    CallResult::ok()
 }
 
 #[cfg(any(unix, windows))]
@@ -908,6 +451,21 @@ fn io_poll_error(state: Poll, error: io::Error, ready: IoReady) -> IoPoll {
         tick: 0,
         value: 0,
     }
+}
+
+#[cfg(any(unix, windows))]
+fn registration_call(
+    data: *mut std::ffi::c_void,
+    call: impl FnOnce(&Registration) -> IoPoll,
+) -> IoPoll {
+    io_callback(|| {
+        let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
+        registration.with(call).unwrap_or_else(resource_error)
+    })
+}
+
+fn resource_error(error: String) -> IoPoll {
+    io_poll_error(Poll::Ready, io::Error::other(error), IoReady::SHUTDOWN)
 }
 
 fn io_callback(call: impl FnOnce() -> IoPoll) -> IoPoll {
