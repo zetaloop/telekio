@@ -2,6 +2,7 @@
 mod host_io;
 #[path = "signal.rs"]
 mod host_signal;
+mod location;
 mod task;
 
 use std::{
@@ -22,7 +23,8 @@ use telekio::{
     AttachResult, Blocking, BuildResult, CallResult, Callback, ClockSample, DurationParts, Flavor,
     GuestCall, InstantOffset, Metric, MetricResult, NameResult, OperationPoll, OwnedBytes, Poll,
     RawAttachment, RawHandle, RawRuntime, RuntimeApi, RuntimeConfig, Shutdown, Status,
-    StringCallback, TaskIdResult, Timer, TimerResult, Waker, WorkerCallback,
+    StringCallback, TaskCallback, TaskEvent, TaskIdResult, Timer, TimerResult, Waker,
+    WorkerCallback,
 };
 
 pub struct Runtime {
@@ -99,7 +101,6 @@ struct HandleRecord {
 }
 
 struct TaskRecord {
-    task_id: u64,
     handle: Option<tokio::task::AbortHandle>,
 }
 
@@ -150,10 +151,13 @@ struct TimeTimer {
 }
 
 struct CallbackOwner(Callback);
+struct TaskCallbackOwner(TaskCallback);
 struct StringCallbackOwner(StringCallback);
 
 unsafe impl Send for CallbackOwner {}
 unsafe impl Sync for CallbackOwner {}
+unsafe impl Send for TaskCallbackOwner {}
+unsafe impl Sync for TaskCallbackOwner {}
 unsafe impl Send for StringCallbackOwner {}
 unsafe impl Sync for StringCallbackOwner {}
 
@@ -180,6 +184,7 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     spawn: task::spawn,
     spawn_local: task::spawn_local,
     spawn_blocking: task::spawn_blocking,
+    task_panicked: task::panicked,
     block_in_place,
     build,
     clock,
@@ -472,21 +477,20 @@ impl OwnerState {
         Ok(())
     }
 
-    fn reserve_task(&self, task_id: u64) -> Result<u64, String> {
+    fn reserve_task(&self, id: u64) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         if !state.accepting {
             return Err("Tokio owner is shutting down".to_owned());
         }
-        let id = state.next_id;
-        state.next_id += 1;
-        state.tasks.insert(
-            id,
-            TaskRecord {
-                task_id,
-                handle: None,
-            },
-        );
-        Ok(id)
+        match state.tasks.entry(id) {
+            std::collections::hash_map::Entry::Vacant(task) => {
+                task.insert(TaskRecord { handle: None });
+                Ok(())
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                Err(format!("Tokio task {id} is already registered"))
+            }
+        }
     }
 
     fn register_task(&self, id: u64, handle: tokio::task::AbortHandle) {
@@ -499,17 +503,15 @@ impl OwnerState {
         }
     }
 
-    fn abort_task(&self, task_id: u64) {
-        let handles = self
+    fn abort_task(&self, id: u64) {
+        let handle = self
             .state
             .lock()
             .unwrap()
             .tasks
-            .values()
-            .filter(|task| task.task_id == task_id)
-            .filter_map(|task| task.handle.clone())
-            .collect::<Vec<_>>();
-        for handle in handles {
+            .get(&id)
+            .and_then(|task| task.handle.clone());
+        if let Some(handle) = handle {
             handle.abort();
         }
     }
@@ -821,6 +823,14 @@ impl CallbackOwner {
 impl WorkerCallbackOwner {
     fn call(&self, worker: usize) -> CallResult {
         self.0.call(worker)
+    }
+}
+
+impl TaskCallbackOwner {
+    fn call(&self, event: TaskEvent, id: u64) {
+        self.0
+            .call(event, id)
+            .resume("Tokio task callback panicked");
     }
 }
 
@@ -1531,6 +1541,7 @@ fn build_runtime(
     let before_stop = Arc::new(CallbackOwner(config.before_stop));
     let before_park = Arc::new(CallbackOwner(config.before_park));
     let after_unpark = Arc::new(CallbackOwner(config.after_unpark));
+    let task_callback = Arc::new(TaskCallbackOwner(config.task_callback));
     let mut builder = match config.flavor {
         Flavor::CurrentThread | Flavor::Local => tokio::runtime::Builder::new_current_thread(),
         Flavor::MultiThread => tokio::runtime::Builder::new_multi_thread(),
@@ -1575,6 +1586,7 @@ fn build_runtime(
     if config.alternative_timer != 0 {
         builder.telekio_enable_alt_timer();
     }
+    builder.telekio_unhandled_panic(config.unhandled_panic != 0);
     builder.telekio_poll_histogram(
         config.poll_histogram.kind,
         config.poll_histogram.a,
@@ -1603,6 +1615,23 @@ fn build_runtime(
     }
     if after_unpark.is_some() {
         builder.on_thread_unpark(move || after_unpark.call());
+    }
+    if task_callback.0.is_some() {
+        let callback = Arc::clone(&task_callback);
+        builder.on_task_spawn(move |meta| {
+            callback.call(TaskEvent::Spawn, meta.id().telekio_value());
+        });
+        let callback = Arc::clone(&task_callback);
+        builder.on_before_task_poll(move |meta| {
+            callback.call(TaskEvent::PollStart, meta.id().telekio_value());
+        });
+        let callback = Arc::clone(&task_callback);
+        builder.on_after_task_poll(move |meta| {
+            callback.call(TaskEvent::PollStop, meta.id().telekio_value());
+        });
+        builder.on_task_terminate(move |meta| {
+            task_callback.call(TaskEvent::Terminate, meta.id().telekio_value());
+        });
     }
 
     match config.flavor {

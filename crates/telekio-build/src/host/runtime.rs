@@ -9,8 +9,12 @@ pub fn next_task_id() -> u64 {
 }
 
 #[cfg(feature = "rt")]
-pub fn with_task_id<R>(id: u64, call: impl FnOnce() -> R) -> R {
-    super::task::Id::with_telekio(id, call)
+pub fn with_task<R>(
+    id: u64,
+    location: &'static std::panic::Location<'static>,
+    call: impl FnOnce() -> R,
+) -> R {
+    super::task::Id::with_telekio(id, location, call)
 }
 
 #[cfg(feature = "rt")]

@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::{TaskMeta, task::telekio::{Host, HostSchedule, Registry}};
+use crate::runtime::task::telekio::{Host, HostSchedule, Registry};
 use std::num::NonZeroU64;
 
 impl CurrentThread {
@@ -35,18 +35,6 @@ impl Handle {
             .collect();
         crate::runtime::Dump::new(tasks)
     }
-
-}
-
-#[cfg(tokio_unstable)]
-pub(super) fn unhandled_panic<'a, F>(
-    handle: &'a Arc<Handle>,
-    _: F,
-) -> impl FnOnce(Option<&scheduler::Context>) + 'a {
-    move |_| {
-        handle.shared.owned.close_and_shutdown_all(0);
-        handle.telekio.host().unhandled_panic();
-    }
 }
 
 impl HostSchedule for Arc<Handle> {
@@ -54,17 +42,11 @@ impl HostSchedule for Arc<Handle> {
         &self.telekio
     }
 
-    fn run(&self, _meta: &TaskMeta<'_>, call: impl FnOnce()) -> u64 {
+    fn run(&self, call: impl FnOnce()) -> u64 {
         let run = || {
             #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
             self.telekio.host().record_worker();
-            task::telekio::measure_poll(|| {
-                #[cfg(tokio_unstable)]
-                self.task_hooks.poll_start_callback(_meta);
-                call();
-                #[cfg(tokio_unstable)]
-                self.task_hooks.poll_stop_callback(_meta);
-            })
+            task::telekio::measure_poll(call)
         };
         let current = context::with_current(|handle| match handle {
             scheduler::Handle::CurrentThread(handle) => Arc::ptr_eq(handle, self),
@@ -84,9 +66,5 @@ impl HostSchedule for Arc<Handle> {
         let handle = scheduler::Handle::CurrentThread(Arc::clone(self));
         let _guard = context::try_set_current(&handle);
         call()
-    }
-
-    fn spawn(&self, meta: &TaskMeta<'_>) {
-        self.task_hooks.spawn(meta);
     }
 }

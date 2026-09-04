@@ -2,8 +2,14 @@ use super::{
     AbortHandle, Notified, OwnedTasks, Schedule, SpawnLocation, Task, TaskHarnessScheduleHooks,
     UnownedTask,
 };
-use crate::{future::Future as TaskFuture, runtime::{TaskMeta, task}};
+use crate::{
+    future::Future as TaskFuture,
+    runtime::{TaskHooks, TaskMeta, task},
+};
+#[cfg(any(tokio_unstable, feature = "taskdump"))]
+use std::task::Poll;
 use std::{
+    collections::HashMap,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Mutex, OnceLock, Weak,
@@ -14,14 +20,11 @@ use std::{
 };
 #[cfg(tokio_unstable)]
 use std::{future::Future, pin::Pin, task::Context};
-#[cfg(any(tokio_unstable, feature = "taskdump"))]
-use std::task::Poll;
 
 pub(crate) trait HostSchedule: Schedule + Clone + Send + Sync + 'static {
     fn registry(&self) -> &Registry<Self>;
-    fn run(&self, meta: &TaskMeta<'_>, call: impl FnOnce()) -> u64;
+    fn run(&self, call: impl FnOnce()) -> u64;
     fn enter<R>(&self, call: impl FnOnce() -> R) -> R;
-    fn spawn(&self, meta: &TaskMeta<'_>);
 }
 
 pub(crate) struct Host {
@@ -32,10 +35,7 @@ pub(crate) struct Host {
         expect(dead_code)
     )]
     io_enabled: bool,
-    #[cfg(tokio_unstable)]
-    panicked: AtomicBool,
-    #[cfg(tokio_unstable)]
-    roots: Mutex<Vec<std::sync::Weak<RootState>>>,
+    task_hooks: Arc<HostTaskHooks>,
     #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
     workers: Arc<Workers>,
     #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
@@ -45,6 +45,18 @@ pub(crate) struct Host {
 #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
 struct Workers {
     threads: Mutex<Vec<Option<std::thread::ThreadId>>>,
+}
+
+pub(crate) struct HostTaskHooks {
+    hooks: TaskHooks,
+    tasks: Mutex<HashMap<task::Id, TaskHookState>>,
+    active: bool,
+}
+
+struct TaskHookState {
+    location: SpawnLocation,
+    polling: bool,
+    terminated: bool,
 }
 
 pub(crate) struct Registry<S: HostSchedule> {
@@ -58,7 +70,6 @@ pub(crate) struct Registry<S: HostSchedule> {
 
 #[derive(Clone)]
 struct TaskSchedule<S: HostSchedule> {
-    schedule: S,
     runner: Weak<Runner<S>>,
 }
 
@@ -74,16 +85,21 @@ struct Runner<S: HostSchedule> {
     abort: OnceLock<AbortHandle>,
     complete: AtomicBool,
     id: task::Id,
-    spawned_at: SpawnLocation,
     #[cfg(feature = "taskdump")]
     task: OnceLock<Task<TaskSchedule<S>>>,
     #[cfg(feature = "taskdump")]
     trace: Mutex<Option<Arc<TraceRequest>>>,
 }
 
+#[derive(Clone)]
+struct BlockingSchedule<S: HostSchedule> {
+    runner: Weak<BlockingRunner<S>>,
+}
+
 struct BlockingRunner<S: HostSchedule> {
     schedule: S,
-    task: Option<UnownedTask<S>>,
+    task: Mutex<Option<UnownedTask<BlockingSchedule<S>>>>,
+    id: task::Id,
 }
 
 struct HostCall {
@@ -93,18 +109,132 @@ struct HostCall {
 
 thread_local! {
     static HOST_CALLS: std::cell::Cell<(usize, u64)> = const { std::cell::Cell::new((0, 0)) };
+    static SPAWN_LOCATION: std::cell::Cell<Option<::telekio::SourceLocation>> = const { std::cell::Cell::new(None) };
 }
 
-#[cfg(tokio_unstable)]
-struct RootState {
-    waker: Mutex<Option<Waker>>,
+impl SpawnLocation {
+    #[track_caller]
+    pub(crate) fn capture() -> Self {
+        SPAWN_LOCATION.set(Some(::telekio::SourceLocation::caller()));
+        Self::capture_local()
+    }
+
+    pub(crate) fn take_telekio() -> ::telekio::SourceLocation {
+        SPAWN_LOCATION
+            .take()
+            .expect("Tokio spawn location is missing")
+    }
+}
+
+impl HostTaskHooks {
+    #[cfg(not(test))]
+    pub(crate) fn empty() -> Arc<Self> {
+        Self::new(TaskHooks {
+            task_spawn_callback: None,
+            task_terminate_callback: None,
+            #[cfg(tokio_unstable)]
+            before_poll_callback: None,
+            #[cfg(tokio_unstable)]
+            after_poll_callback: None,
+        })
+    }
+
+    pub(crate) fn new(hooks: TaskHooks) -> Arc<Self> {
+        let active = Self::hooks_active(&hooks);
+        Arc::new(Self {
+            hooks,
+            tasks: Mutex::new(HashMap::new()),
+            active,
+        })
+    }
+
+    fn hooks_active(hooks: &TaskHooks) -> bool {
+        hooks.task_spawn_callback.is_some() || hooks.task_terminate_callback.is_some() || {
+            #[cfg(tokio_unstable)]
+            {
+                hooks.before_poll_callback.is_some() || hooks.after_poll_callback.is_some()
+            }
+            #[cfg(not(tokio_unstable))]
+            {
+                false
+            }
+        }
+    }
+
+    pub(crate) fn callback(self: &Arc<Self>) -> ::telekio::TaskCallback {
+        if !self.active {
+            return ::telekio::TaskCallback::none();
+        }
+        let hooks = Arc::clone(self);
+        ::telekio::TaskCallback::from_arc(Arc::new(move |event, id| hooks.call(event, id)))
+    }
+
+    fn register(&self, id: task::Id, location: SpawnLocation) {
+        if !self.active {
+            return;
+        }
+        let previous = self.tasks.lock().unwrap().insert(
+            id,
+            TaskHookState {
+                location,
+                polling: false,
+                terminated: false,
+            },
+        );
+        assert!(previous.is_none(), "Tokio task hook was registered twice");
+    }
+
+    fn remove(&self, id: task::Id) {
+        if self.active {
+            self.tasks.lock().unwrap().remove(&id);
+        }
+    }
+
+    fn call(&self, event: ::telekio::TaskEvent, id: u64) {
+        let id = task::Id::from_telekio(id);
+        let mut tasks = self.tasks.lock().unwrap();
+        let state = tasks
+            .get_mut(&id)
+            .expect("Tokio task hook received an unknown task");
+        let spawned_at = state.location;
+        match event {
+            ::telekio::TaskEvent::PollStart => state.polling = true,
+            ::telekio::TaskEvent::PollStop => state.polling = false,
+            ::telekio::TaskEvent::Terminate => state.terminated = true,
+            ::telekio::TaskEvent::Spawn => {}
+        }
+        if state.terminated && !state.polling {
+            tasks.remove(&id);
+        }
+        drop(tasks);
+        let meta = TaskMeta {
+            id,
+            spawned_at,
+            _phantom: Default::default(),
+        };
+        match event {
+            ::telekio::TaskEvent::Spawn => self.hooks.spawn(&meta),
+            ::telekio::TaskEvent::PollStart => {
+                #[cfg(tokio_unstable)]
+                self.hooks.poll_start_callback(&meta);
+            }
+            ::telekio::TaskEvent::PollStop => {
+                #[cfg(tokio_unstable)]
+                self.hooks.poll_stop_callback(&meta);
+            }
+            ::telekio::TaskEvent::Terminate => {
+                if let Some(callback) = &self.hooks.task_terminate_callback {
+                    callback(&meta);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(tokio_unstable)]
 struct Root<'a, F> {
     future: F,
     host: &'a Host,
-    state: Arc<RootState>,
 }
 
 #[cfg(feature = "taskdump")]
@@ -177,11 +307,7 @@ impl<F: Future> Future for Root<'_, F> {
         let this = unsafe { self.get_unchecked_mut() };
         #[cfg(target_has_atomic = "64")]
         this.host.record_worker();
-        *this.state.waker.lock().unwrap() = Some(context.waker().clone());
-        this.host.check_panic();
-        let result = unsafe { Pin::new_unchecked(&mut this.future) }.poll(context);
-        this.host.check_panic();
-        result
+        unsafe { Pin::new_unchecked(&mut this.future) }.poll(context)
     }
 }
 
@@ -207,15 +333,16 @@ impl Workers {
 }
 
 impl Host {
-    pub(crate) fn new(runtime: ::telekio::Runtime, io_enabled: bool) -> Arc<Self> {
+    pub(crate) fn new(
+        runtime: ::telekio::Runtime,
+        io_enabled: bool,
+        task_hooks: Arc<HostTaskHooks>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             handle: runtime.handle(),
             runtime: Some(runtime),
             io_enabled,
-            #[cfg(tokio_unstable)]
-            panicked: AtomicBool::new(false),
-            #[cfg(tokio_unstable)]
-            roots: Mutex::new(Vec::new()),
+            task_hooks,
             #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
             workers: Arc::new(Workers::new()),
             #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
@@ -229,10 +356,7 @@ impl Host {
             runtime: None,
             handle,
             io_enabled: true,
-            #[cfg(tokio_unstable)]
-            panicked: AtomicBool::new(false),
-            #[cfg(tokio_unstable)]
-            roots: Mutex::new(Vec::new()),
+            task_hooks: HostTaskHooks::empty(),
             #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
             workers: Arc::new(Workers::new()),
             #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
@@ -241,9 +365,12 @@ impl Host {
         host
     }
 
+    pub(crate) fn unhandled_panic(&self) {
+        host_call(|| self.handle.task_panicked()).resume("failed to apply Tokio panic policy");
+    }
+
     pub(crate) fn abort(&self, id: task::Id) {
-        host_call(|| self.handle.abort(id.as_u64()))
-            .resume("failed to abort Tokio task");
+        host_call(|| self.handle.abort(id.as_u64())).resume("failed to abort Tokio task");
     }
 
     pub(crate) fn defer(&self, waker: &::telekio::Waker) -> ::telekio::CallResult {
@@ -332,51 +459,8 @@ impl Host {
     }
 
     #[cfg(tokio_unstable)]
-    fn is_panicked(&self) -> bool {
-        self.panicked.load(Ordering::Acquire)
-    }
-
-    #[cfg(not(tokio_unstable))]
-    fn is_panicked(&self) -> bool {
-        false
-    }
-
-    #[cfg(tokio_unstable)]
-    pub(crate) fn unhandled_panic(&self) {
-        self.panicked.store(true, Ordering::Release);
-        let mut roots = self.roots.lock().unwrap();
-        roots.retain(|root| root.strong_count() != 0);
-        let wakers = roots
-            .iter()
-            .filter_map(std::sync::Weak::upgrade)
-            .filter_map(|root| root.waker.lock().unwrap().clone())
-            .collect::<Vec<_>>();
-        drop(roots);
-        for waker in wakers {
-            waker.wake();
-        }
-    }
-
-    #[cfg(tokio_unstable)]
-    fn check_panic(&self) {
-        if self.panicked.load(Ordering::Acquire) {
-            panic!(
-                "a spawned task panicked and the runtime is configured to shut down on unhandled panic"
-            );
-        }
-    }
-
-    #[cfg(tokio_unstable)]
     fn root<F: Future>(&self, future: F) -> Root<'_, F> {
-        let state = Arc::new(RootState {
-            waker: Mutex::new(None),
-        });
-        self.roots.lock().unwrap().push(Arc::downgrade(&state));
-        Root {
-            future,
-            host: self,
-            state,
-        }
+        Root { future, host: self }
     }
 
     #[cfg(feature = "rt-multi-thread")]
@@ -565,7 +649,7 @@ impl<S: HostSchedule> Registry<S> {
         self.host.get().expect("Tokio runtime is not initialized")
     }
 
-    fn start(&self, runner: Arc<Runner<S>>, local: bool) {
+    fn start(&self, runner: Arc<Runner<S>>, local: bool, location: ::telekio::SourceLocation) {
         #[cfg(feature = "taskdump")]
         self.runners.lock().unwrap().push(Arc::downgrade(&runner));
         let id = runner.id;
@@ -578,13 +662,14 @@ impl<S: HostSchedule> Registry<S> {
             )
         };
         let result = if local {
-            self.host().handle.spawn_local(task, id.as_u64())
+            self.host().handle.spawn_local(task, id.as_u64(), location)
         } else {
-            self.host().handle.spawn(task, id.as_u64())
+            self.host().handle.spawn(task, id.as_u64(), location)
         };
-        result
-            .into_io_result()
-            .unwrap_or_else(|error| panic!("failed to spawn Tokio task {id}: {error}"));
+        if let Err(error) = result.into_io_result() {
+            self.host().task_hooks.remove(id);
+            panic!("failed to spawn Tokio task {id}: {error}");
+        }
     }
 
     fn bind<T>(
@@ -594,23 +679,20 @@ impl<S: HostSchedule> Registry<S> {
         id: task::Id,
         spawned_at: SpawnLocation,
         local: bool,
+        location: ::telekio::SourceLocation,
     ) -> task::JoinHandle<T::Output>
     where
         T: TaskFuture + Send + 'static,
         T::Output: Send + 'static,
     {
-        let runner = Runner::new(schedule.clone(), id, spawned_at);
+        self.host().task_hooks.register(id, spawned_at);
+        let runner = Runner::new(schedule.clone(), id);
         let task_schedule = TaskSchedule {
-            schedule,
             runner: Arc::downgrade(&runner),
         };
         let (task, join) = task::unowned(future, task_schedule, id, spawned_at);
         runner.initialize(task, &join);
-        if self.host().is_panicked() {
-            runner.cancel();
-        } else {
-            self.start(runner, local);
-        }
+        self.start(runner, local, location);
         join
     }
 
@@ -620,23 +702,20 @@ impl<S: HostSchedule> Registry<S> {
         future: T,
         id: task::Id,
         spawned_at: SpawnLocation,
+        location: ::telekio::SourceLocation,
     ) -> task::JoinHandle<T::Output>
     where
         T: TaskFuture + 'static,
         T::Output: 'static,
     {
-        let runner = Runner::new(schedule.clone(), id, spawned_at);
+        self.host().task_hooks.register(id, spawned_at);
+        let runner = Runner::new(schedule.clone(), id);
         let task_schedule = TaskSchedule {
-            schedule,
             runner: Arc::downgrade(&runner),
         };
         let (task, join) = unsafe { unowned_local(future, task_schedule, id, spawned_at) };
         runner.initialize(task, &join);
-        if self.host().is_panicked() {
-            runner.cancel();
-        } else {
-            self.start(runner, true);
-        }
+        self.start(runner, true, location);
         join
     }
 
@@ -708,6 +787,7 @@ impl<S: HostSchedule> Registry<S> {
         function: F,
         id: task::Id,
         spawned_at: task::SpawnLocation,
+        location: ::telekio::SourceLocation,
     ) -> task::JoinHandle<R>
     where
         F: FnOnce() -> R + Send + 'static,
@@ -719,23 +799,35 @@ impl<S: HostSchedule> Registry<S> {
             crate::util::trace::SpawnMeta::new_unnamed(size),
             id.as_u64(),
         );
-        let runner_schedule = schedule.clone();
-        let (task, join) = task::unowned(future, schedule, id, spawned_at);
-        let runner = Box::new(BlockingRunner {
-            schedule: runner_schedule,
-            task: Some(task),
+        let runner = Arc::new(BlockingRunner {
+            schedule,
+            task: Mutex::new(None),
+            id,
         });
+        let task_schedule = BlockingSchedule {
+            runner: Arc::downgrade(&runner),
+        };
+        let (task, join) = task::unowned(future, task_schedule, id, spawned_at);
+        *runner.task.lock().unwrap() = Some(task);
+        self.host().task_hooks.register(id, spawned_at);
         let task = unsafe {
             ::telekio::BlockingTask::from_raw(
-                Box::into_raw(runner).cast(),
+                Arc::into_raw(runner).cast_mut().cast(),
                 run_blocking::<S>,
                 cancel_blocking::<S>,
                 release_blocking::<S>,
             )
         };
-        host_call(|| self.host().handle.spawn_blocking(task, id.as_u64()))
-            .into_io_result()
-            .unwrap_or_else(|error| panic!("failed to spawn blocking Tokio task {id}: {error}"));
+        if let Err(error) = host_call(|| {
+            self.host()
+                .handle
+                .spawn_blocking(task, id.as_u64(), location)
+        })
+        .into_io_result()
+        {
+            self.host().task_hooks.remove(id);
+            panic!("failed to spawn blocking Tokio task {id}: {error}");
+        }
         join
     }
 }
@@ -757,6 +849,7 @@ impl crate::runtime::TaskHooks {
 }
 
 impl<S: HostSchedule> OwnedTasks<S> {
+    #[track_caller]
     pub(crate) fn bind_host<T>(
         &self,
         future: T,
@@ -768,18 +861,18 @@ impl<S: HostSchedule> OwnedTasks<S> {
         T: TaskFuture + Send + 'static,
         T::Output: Send + 'static,
     {
-        let meta = TaskMeta {
+        let join = schedule.registry().bind(
+            schedule.clone(),
+            future,
             id,
             spawned_at,
-            _phantom: Default::default(),
-        };
-        schedule.spawn(&meta);
-        let join = schedule
-            .registry()
-            .bind(schedule.clone(), future, id, spawned_at, false);
+            false,
+            SpawnLocation::take_telekio(),
+        );
         (join, None)
     }
 
+    #[track_caller]
     pub(crate) unsafe fn bind_local_host<T>(
         &self,
         future: T,
@@ -791,18 +884,44 @@ impl<S: HostSchedule> OwnedTasks<S> {
         T: TaskFuture + 'static,
         T::Output: 'static,
     {
-        let meta = TaskMeta {
-            id,
-            spawned_at,
-            _phantom: Default::default(),
-        };
-        schedule.spawn(&meta);
         let join = unsafe {
-            schedule
-                .registry()
-                .bind_local(schedule.clone(), future, id, spawned_at)
+            schedule.registry().bind_local(
+                schedule.clone(),
+                future,
+                id,
+                spawned_at,
+                SpawnLocation::take_telekio(),
+            )
         };
         (join, None)
+    }
+}
+
+impl<S: HostSchedule> Schedule for BlockingSchedule<S> {
+    fn release(&self, _: &Task<Self>) -> Option<Task<Self>> {
+        None
+    }
+
+    fn schedule(&self, task: Notified<Self>) {
+        let cancelled = task.cancelled();
+        drop(task);
+        if cancelled {
+            if let Some(runner) = self.runner.upgrade() {
+                runner.schedule.registry().host().abort(runner.id);
+            }
+        }
+    }
+
+    fn hooks(&self) -> TaskHarnessScheduleHooks {
+        TaskHarnessScheduleHooks {
+            task_terminate_callback: None,
+        }
+    }
+
+    fn unhandled_panic(&self) {
+        if let Some(runner) = self.runner.upgrade() {
+            runner.schedule.registry().host().unhandled_panic();
+        }
     }
 }
 
@@ -825,7 +944,9 @@ impl<S: HostSchedule> Schedule for TaskSchedule<S> {
     }
 
     fn hooks(&self) -> TaskHarnessScheduleHooks {
-        self.schedule.hooks()
+        TaskHarnessScheduleHooks {
+            task_terminate_callback: None,
+        }
     }
 
     fn yield_now(&self, task: Notified<Self>) {
@@ -833,7 +954,9 @@ impl<S: HostSchedule> Schedule for TaskSchedule<S> {
     }
 
     fn unhandled_panic(&self) {
-        self.schedule.unhandled_panic();
+        if let Some(runner) = self.runner.upgrade() {
+            runner.schedule.registry().host().unhandled_panic();
+        }
     }
 }
 
@@ -869,7 +992,7 @@ fn trace_task<S>(task: &UnownedTask<S>) -> Task<S> {
 }
 
 impl<S: HostSchedule> Runner<S> {
-    fn new(schedule: S, id: task::Id, spawned_at: SpawnLocation) -> Arc<Self> {
+    fn new(schedule: S, id: task::Id) -> Arc<Self> {
         Arc::new(Self {
             schedule,
             runnable: Mutex::new(None),
@@ -877,7 +1000,6 @@ impl<S: HostSchedule> Runner<S> {
             abort: OnceLock::new(),
             complete: AtomicBool::new(false),
             id,
-            spawned_at,
             #[cfg(feature = "taskdump")]
             task: OnceLock::new(),
             #[cfg(feature = "taskdump")]
@@ -912,12 +1034,7 @@ impl<S: HostSchedule> Runner<S> {
     }
 
     fn run(&self, runnable: Runnable<S>) -> u64 {
-        let meta = TaskMeta {
-            id: self.id,
-            spawned_at: self.spawned_at,
-            _phantom: Default::default(),
-        };
-        self.schedule.run(&meta, || match runnable {
+        self.schedule.run(|| match runnable {
             Runnable::Initial(task) => task.run(),
             Runnable::Notified(task) => task.run_host(),
         })
@@ -1043,15 +1160,36 @@ unsafe extern "C" fn release_runner<S: HostSchedule>(
     callback(|| drop(unsafe { Arc::from_raw(data.cast::<Runner<S>>()) }))
 }
 
+impl<S: HostSchedule> BlockingRunner<S> {
+    fn run(&self) {
+        let schedule = self.schedule.clone();
+        schedule.enter(|| {
+            self.task
+                .lock()
+                .unwrap()
+                .take()
+                .expect("blocking task ran twice")
+                .run();
+        });
+    }
+
+    fn cancel(&self) {
+        let schedule = self.schedule.clone();
+        schedule.enter(|| {
+            if let Some(task) = self.task.lock().unwrap().take() {
+                task.shutdown();
+            }
+        });
+    }
+}
+
 unsafe extern "C" fn run_blocking<S: HostSchedule>(
     data: *mut std::ffi::c_void,
     execution: *mut ::telekio::ExecutionState,
 ) -> ::telekio::CallResult {
     callback(|| unsafe {
         ::telekio::with_execution_state(execution, || {
-            let runner = &mut *data.cast::<BlockingRunner<S>>();
-            let schedule = runner.schedule.clone();
-            schedule.enter(|| runner.task.take().expect("blocking task ran twice").run());
+            (&*data.cast::<BlockingRunner<S>>()).run();
         });
     })
 }
@@ -1062,13 +1200,7 @@ unsafe extern "C" fn cancel_blocking<S: HostSchedule>(
 ) -> ::telekio::CallResult {
     callback(|| unsafe {
         ::telekio::with_execution_state(execution, || {
-            let runner = &mut *data.cast::<BlockingRunner<S>>();
-            let schedule = runner.schedule.clone();
-            schedule.enter(|| {
-                if let Some(task) = runner.task.take() {
-                    task.shutdown();
-                }
-            });
+            (&*data.cast::<BlockingRunner<S>>()).cancel();
         });
     })
 }
@@ -1076,7 +1208,7 @@ unsafe extern "C" fn cancel_blocking<S: HostSchedule>(
 unsafe extern "C" fn release_blocking<S: HostSchedule>(
     data: *mut std::ffi::c_void,
 ) -> ::telekio::CallResult {
-    callback(|| drop(unsafe { Box::from_raw(data.cast::<BlockingRunner<S>>()) }))
+    callback(|| drop(unsafe { Arc::from_raw(data.cast::<BlockingRunner<S>>()) }))
 }
 
 fn callback(call: impl FnOnce()) -> ::telekio::CallResult {

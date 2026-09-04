@@ -11,7 +11,7 @@ use std::{
     fmt,
     future::Future as RustFuture,
     mem::MaybeUninit,
-    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    panic::{AssertUnwindSafe, Location, catch_unwind, resume_unwind},
     pin::Pin,
     slice,
     sync::Mutex,
@@ -66,6 +66,18 @@ pub struct ExecutionState {
     pub rng_active: u8,
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct SourceLocation {
+    file: *const u8,
+    len: usize,
+    line: u32,
+    column: u32,
+}
+
+unsafe impl Send for SourceLocation {}
+unsafe impl Sync for SourceLocation {}
+
 pub struct Handle {
     pub(crate) raw: RawHandle,
 }
@@ -91,9 +103,11 @@ pub struct RuntimeApi {
     pub detach: unsafe extern "C" fn(*const c_void) -> CallResult,
     pub task_id: unsafe extern "C" fn(*const c_void) -> TaskIdResult,
     pub abort: unsafe extern "C" fn(*const c_void, u64) -> CallResult,
-    pub spawn: unsafe extern "C" fn(*const c_void, Task, u64) -> CallResult,
-    pub spawn_local: unsafe extern "C" fn(*const c_void, Task, u64) -> CallResult,
-    pub spawn_blocking: unsafe extern "C" fn(*const c_void, BlockingTask, u64) -> CallResult,
+    pub spawn: unsafe extern "C" fn(*const c_void, Task, u64, SourceLocation) -> CallResult,
+    pub spawn_local: unsafe extern "C" fn(*const c_void, Task, u64, SourceLocation) -> CallResult,
+    pub spawn_blocking:
+        unsafe extern "C" fn(*const c_void, BlockingTask, u64, SourceLocation) -> CallResult,
+    pub task_panicked: unsafe extern "C" fn(*const c_void) -> CallResult,
     pub block_in_place: unsafe extern "C" fn(*const c_void, Blocking) -> CallResult,
     pub build: unsafe extern "C" fn(*const c_void, RuntimeConfig) -> BuildResult,
     pub clock: unsafe extern "C" fn(*const c_void) -> ClockResult,
@@ -332,6 +346,43 @@ impl GuestCall {
     #[doc(hidden)]
     pub unsafe fn invoke(self) -> CallResult {
         unsafe { (self.call)(self.data) }
+    }
+}
+
+impl SourceLocation {
+    #[track_caller]
+    #[doc(hidden)]
+    pub fn caller() -> Self {
+        Self::from_location(Location::caller())
+    }
+
+    #[doc(hidden)]
+    pub fn from_location(location: &'static Location<'static>) -> Self {
+        let file = location.file();
+        Self {
+            file: file.as_ptr(),
+            len: file.len(),
+            line: location.line(),
+            column: location.column(),
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The artifact defining this descriptor must remain loaded.
+    #[doc(hidden)]
+    pub unsafe fn file(&self) -> &str {
+        unsafe { str::from_utf8_unchecked(slice::from_raw_parts(self.file, self.len)) }
+    }
+
+    #[doc(hidden)]
+    pub const fn line(&self) -> u32 {
+        self.line
+    }
+
+    #[doc(hidden)]
+    pub const fn column(&self) -> u32 {
+        self.column
     }
 }
 
@@ -689,18 +740,28 @@ impl Handle {
         unsafe { ((*self.raw.api).abort)(self.raw.context, id) }
     }
 
-    pub fn spawn(&self, task: Task, id: u64) -> CallResult {
-        unsafe { ((*self.raw.api).spawn)(self.raw.context, task, id) }
+    pub fn spawn(&self, task: Task, id: u64, location: SourceLocation) -> CallResult {
+        unsafe { ((*self.raw.api).spawn)(self.raw.context, task, id, location) }
     }
 
     #[doc(hidden)]
-    pub fn spawn_local(&self, task: Task, id: u64) -> CallResult {
-        unsafe { ((*self.raw.api).spawn_local)(self.raw.context, task, id) }
+    pub fn spawn_local(&self, task: Task, id: u64, location: SourceLocation) -> CallResult {
+        unsafe { ((*self.raw.api).spawn_local)(self.raw.context, task, id, location) }
     }
 
     #[doc(hidden)]
-    pub fn spawn_blocking(&self, task: BlockingTask, id: u64) -> CallResult {
-        unsafe { ((*self.raw.api).spawn_blocking)(self.raw.context, task, id) }
+    pub fn spawn_blocking(
+        &self,
+        task: BlockingTask,
+        id: u64,
+        location: SourceLocation,
+    ) -> CallResult {
+        unsafe { ((*self.raw.api).spawn_blocking)(self.raw.context, task, id, location) }
+    }
+
+    #[doc(hidden)]
+    pub fn task_panicked(&self) -> CallResult {
+        unsafe { ((*self.raw.api).task_panicked)(self.raw.context) }
     }
 
     #[doc(hidden)]

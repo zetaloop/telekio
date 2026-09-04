@@ -1,9 +1,9 @@
 use super::*;
 use crate::runtime::task;
 use crate::runtime::task::telekio::Host;
+use std::sync::Arc;
 #[cfg(target_has_atomic = "64")]
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 #[cfg(target_has_atomic = "64")]
 pub(crate) struct HostWorkerMetrics {
@@ -213,6 +213,7 @@ impl Handle {
         self.host().metric(metric, 0)
     }
 
+    #[track_caller]
     pub(crate) fn spawn_host_blocking<F, R>(&self, function: F) -> task::JoinHandle<R>
     where
         F: FnOnce() -> R + Send + 'static,
@@ -220,17 +221,18 @@ impl Handle {
     {
         let id = task::Id::next();
         let spawned_at = task::SpawnLocation::capture();
+        let location = task::SpawnLocation::take_telekio();
         match self {
             Handle::CurrentThread(handle) => {
                 handle
                     .telekio
-                    .spawn_blocking(handle.clone(), function, id, spawned_at)
+                    .spawn_blocking(handle.clone(), function, id, spawned_at, location)
             }
             #[cfg(feature = "rt-multi-thread")]
             Handle::MultiThread(handle) => {
                 handle
                     .telekio
-                    .spawn_blocking(handle.clone(), function, id, spawned_at)
+                    .spawn_blocking(handle.clone(), function, id, spawned_at, location)
             }
         }
     }

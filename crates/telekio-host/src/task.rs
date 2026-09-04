@@ -10,7 +10,8 @@ use std::{
 };
 
 use telekio::{
-    BlockingTask, CallResult, ExecutionState, Future, OwnedBytes, Poll, Status, Task, Waker,
+    BlockingTask, CallResult, ExecutionState, Future, OwnedBytes, Poll, SourceLocation, Status,
+    Task, Waker,
 };
 
 use super::{
@@ -87,22 +88,36 @@ pub(super) unsafe extern "C" fn abort(context: *const c_void, id: u64) -> CallRe
     }
 }
 
-pub(super) unsafe extern "C" fn spawn(context: *const c_void, task: Task, id: u64) -> CallResult {
+pub(super) unsafe extern "C" fn panicked(context: *const c_void) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     match catch_unwind(AssertUnwindSafe(|| {
+        context.handle.telekio_unhandled_panic();
+    })) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => host_panic(&*payload),
+    }
+}
+
+pub(super) unsafe extern "C" fn spawn(
+    context: *const c_void,
+    task: Task,
+    id: u64,
+    location: SourceLocation,
+) -> CallResult {
+    let context = unsafe { &*context.cast::<HandleContext>() };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let location = super::location::intern(location);
         let task = GuestTask::new(task);
-        let tracking_id = context.owner.reserve_task(id)?;
+        context.owner.reserve_task(id)?;
         let task = TrackedTask {
             task,
             cleanup: TaskCleanup {
                 owner: Arc::clone(&context.owner),
-                id: tracking_id,
+                id,
             },
         };
-        let handle = context.handle.telekio_spawn(task, id);
-        context
-            .owner
-            .register_task(tracking_id, handle.abort_handle());
+        let handle = context.handle.telekio_spawn(task, id, location);
+        context.owner.register_task(id, handle.abort_handle());
         drop(handle);
         Ok::<_, String>(())
     })) {
@@ -116,27 +131,27 @@ pub(super) unsafe extern "C" fn spawn_local(
     context: *const c_void,
     task: Task,
     id: u64,
+    location: SourceLocation,
 ) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     let spawned = catch_unwind(AssertUnwindSafe(|| {
+        let location = super::location::intern(location);
         let task = GuestTask::new(task);
-        let tracking_id = context.owner.reserve_task(id)?;
+        context.owner.reserve_task(id)?;
         let task = TrackedTask {
             task,
             cleanup: TaskCleanup {
                 owner: Arc::clone(&context.owner),
-                id: tracking_id,
+                id,
             },
         };
         let local = context
             .local
             .as_ref()
             .ok_or_else(|| "spawn_local requires a LocalRuntime".to_owned())?;
-        let handle =
-            local.with(|runtime| unsafe { runtime.handle().telekio_spawn_local(task, id) })?;
-        context
-            .owner
-            .register_task(tracking_id, handle.abort_handle());
+        let handle = local
+            .with(|runtime| unsafe { runtime.handle().telekio_spawn_local(task, id, location) })?;
+        context.owner.register_task(id, handle.abort_handle());
         drop(handle);
         Ok::<_, String>(())
     }));
@@ -151,24 +166,24 @@ pub(super) unsafe extern "C" fn spawn_blocking(
     context: *const c_void,
     task: BlockingTask,
     id: u64,
+    location: SourceLocation,
 ) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     let spawned = catch_unwind(AssertUnwindSafe(|| {
+        let location = super::location::intern(location);
         let task = GuestBlockingTask::new(task);
-        let tracking_id = context.owner.reserve_task(id)?;
+        context.owner.reserve_task(id)?;
         let task = TrackedBlockingTask {
             task,
             cleanup: TaskCleanup {
                 owner: Arc::clone(&context.owner),
-                id: tracking_id,
+                id,
             },
         };
         let handle = context
             .handle
-            .telekio_spawn_blocking(move || task.run(), id);
-        context
-            .owner
-            .register_task(tracking_id, handle.abort_handle());
+            .telekio_spawn_blocking(move || task.run(), id, location);
+        context.owner.register_task(id, handle.abort_handle());
         drop(handle);
         Ok::<_, String>(())
     }));

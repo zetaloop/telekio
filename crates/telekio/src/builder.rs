@@ -23,6 +23,15 @@ pub enum Shutdown {
     Timeout,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum TaskEvent {
+    Spawn,
+    PollStart,
+    PollStop,
+    Terminate,
+}
+
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Bytes {
@@ -52,6 +61,16 @@ pub struct WorkerCallback {
 
 unsafe impl Send for WorkerCallback {}
 unsafe impl Sync for WorkerCallback {}
+
+#[repr(C)]
+pub struct TaskCallback {
+    data: *const c_void,
+    call: unsafe extern "C" fn(*const c_void, TaskEvent, u64) -> CallResult,
+    release: unsafe extern "C" fn(*const c_void) -> CallResult,
+}
+
+unsafe impl Send for TaskCallback {}
+unsafe impl Sync for TaskCallback {}
 
 #[repr(C)]
 pub struct StringCallback {
@@ -87,6 +106,7 @@ pub struct RuntimeConfig {
     pub before_stop: Callback,
     pub before_park: Callback,
     pub after_unpark: Callback,
+    pub task_callback: TaskCallback,
     pub keep_alive_secs: u64,
     pub keep_alive_nanos: u32,
     pub has_keep_alive: u8,
@@ -99,6 +119,7 @@ pub struct RuntimeConfig {
     pub disable_lifo_slot: u8,
     pub eager_driver_handoff: u8,
     pub alternative_timer: u8,
+    pub unhandled_panic: u8,
     pub poll_histogram: HistogramConfig,
     pub schedule_histogram: HistogramConfig,
 }
@@ -243,6 +264,39 @@ impl Drop for WorkerCallback {
     }
 }
 
+impl TaskCallback {
+    pub fn none() -> Self {
+        Self {
+            data: std::ptr::null(),
+            call: call_no_task_callback,
+            release: release_none,
+        }
+    }
+
+    pub fn from_arc(callback: Arc<dyn Fn(TaskEvent, u64) + Send + Sync>) -> Self {
+        Self {
+            data: Box::into_raw(Box::new(callback)).cast(),
+            call: call_task_callback,
+            release: release_task_callback,
+        }
+    }
+
+    pub fn is_some(&self) -> bool {
+        !self.data.is_null()
+    }
+
+    #[doc(hidden)]
+    pub fn call(&self, event: TaskEvent, id: u64) -> CallResult {
+        unsafe { (self.call)(self.data, event, id) }
+    }
+}
+
+impl Drop for TaskCallback {
+    fn drop(&mut self) {
+        unsafe { (self.release)(self.data) }.resume("failed to release Tokio task callback");
+    }
+}
+
 impl StringCallback {
     pub fn from_arc(callback: Arc<dyn Fn() -> String + Send + Sync>) -> Self {
         Self {
@@ -283,6 +337,36 @@ unsafe extern "C" fn call_callback(data: *const c_void) -> CallResult {
 unsafe extern "C" fn release_callback(data: *const c_void) -> CallResult {
     match catch_unwind(AssertUnwindSafe(|| {
         drop(unsafe { Box::from_raw(data.cast_mut().cast::<Arc<dyn Fn() + Send + Sync>>()) });
+    })) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => CallResult::panicked(&*payload),
+    }
+}
+
+unsafe extern "C" fn call_no_task_callback(_: *const c_void, _: TaskEvent, _: u64) -> CallResult {
+    CallResult::ok()
+}
+
+unsafe extern "C" fn call_task_callback(
+    data: *const c_void,
+    event: TaskEvent,
+    id: u64,
+) -> CallResult {
+    let callback = unsafe { &*data.cast::<Arc<dyn Fn(TaskEvent, u64) + Send + Sync>>() };
+    match catch_unwind(AssertUnwindSafe(|| callback(event, id))) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => CallResult::panicked(&*payload),
+    }
+}
+
+unsafe extern "C" fn release_task_callback(data: *const c_void) -> CallResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        drop(unsafe {
+            Box::from_raw(
+                data.cast_mut()
+                    .cast::<Arc<dyn Fn(TaskEvent, u64) + Send + Sync>>(),
+            )
+        });
     })) {
         Ok(()) => CallResult::ok(),
         Err(payload) => CallResult::panicked(&*payload),

@@ -1,10 +1,22 @@
 use super::{Builder, TimerFlavor};
-use crate::{runtime::HistogramBuilder, util::{RngSeedGenerator, rand::RngSeed}};
+use crate::{
+    runtime::{HistogramBuilder, UnhandledPanic},
+    util::{RngSeedGenerator, rand::RngSeed},
+};
 
 impl Builder {
     #[doc(hidden)]
     pub fn telekio_rng_seed(&mut self, one: u32, two: u32) {
         self.seed_generator = RngSeedGenerator::new(RngSeed::from_telekio(one, two));
+    }
+
+    #[doc(hidden)]
+    pub fn telekio_unhandled_panic(&mut self, shutdown: bool) {
+        self.unhandled_panic = if shutdown {
+            UnhandledPanic::ShutdownRuntime
+        } else {
+            UnhandledPanic::Ignore
+        };
     }
 
     #[doc(hidden)]

@@ -94,6 +94,7 @@ fn patch_task_id(path: &Path) -> Result<(), Box<dyn Error>> {
 
 fn patch_task(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
+        edit::rename_method(source, "SpawnLocation", "capture", "capture_local")?;
         mount_with(source, Some("pub(crate)"), "telekio", "task.rs")
     })
 }
@@ -218,17 +219,6 @@ fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
                 name: "spawned_tasks_count",
             },
             "#[expect(dead_code)]",
-        )?;
-        edit::delegate_closure(
-            source,
-            edit::Scope::Method {
-                owner: "Arc<Handle>",
-                name: "unhandled_panic",
-            },
-            edit::Call::Function("context::with_scheduler"),
-            0,
-            "telekio::unhandled_panic",
-            &["self"],
         )?;
         edit::rename_method(source, "Handle", "owned_id", "owned_id_inner")?;
         edit::rename_method(source, "Handle", "dump", "dump_local")?;
@@ -406,6 +396,14 @@ fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
 
 fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
+        edit::add_attr(
+            source,
+            edit::AttrTarget::Method {
+                owner: "Handle",
+                name: "spawn",
+            },
+            "#[track_caller]",
+        )?;
         for name in ["num_workers", "num_alive_tasks", "spawned_tasks_count"] {
             edit::add_attr(
                 source,

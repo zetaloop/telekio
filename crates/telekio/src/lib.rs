@@ -6,7 +6,7 @@ mod time;
 
 pub use builder::{
     BuildResult, Bytes, Callback, Flavor, HistogramConfig, RuntimeConfig, Shutdown, StringCallback,
-    WorkerCallback,
+    TaskCallback, TaskEvent, WorkerCallback,
 };
 pub use io::{
     IO_DRIVER_DISABLED_ERROR, IoCallResult, IoDriverRegistration, IoDriverResult, IoError, IoEvent,
@@ -17,7 +17,8 @@ pub use runtime::telekio_guest_attach;
 pub use runtime::{
     AttachResult, Blocking, BlockingTask, BoolResult, CallResult, ClockResult, ExecutionState,
     Future, GuestCall, Handle, Metric, MetricResult, NameResult, OwnedBytes, Poll, RawAttachment,
-    RawHandle, RawRuntime, Runtime, RuntimeApi, Status, Task, TaskIdResult, TaskPoll, Waker,
+    RawHandle, RawRuntime, Runtime, RuntimeApi, SourceLocation, Status, Task, TaskIdResult,
+    TaskPoll, Waker,
 };
 #[doc(hidden)]
 pub use runtime::{

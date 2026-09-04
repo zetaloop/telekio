@@ -1,10 +1,18 @@
 use super::*;
-use crate::runtime::{scheduler, task::telekio::Host};
+use crate::runtime::{
+    scheduler,
+    task::telekio::{Host, HostTaskHooks},
+};
 use std::sync::Arc;
 
 impl Runtime {
-    pub(crate) fn install_host(&self, runtime: ::telekio::Runtime, io_enabled: bool) {
-        self.install(Host::new(runtime, io_enabled));
+    pub(crate) fn install_host(
+        &self,
+        runtime: ::telekio::Runtime,
+        io_enabled: bool,
+        task_hooks: Arc<HostTaskHooks>,
+    ) {
+        self.install(Host::new(runtime, io_enabled, task_hooks));
     }
 
     #[cfg(not(test))]

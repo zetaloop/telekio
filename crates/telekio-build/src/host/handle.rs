@@ -91,32 +91,59 @@ impl Drop for TelekioIo {
 }
 
 impl Handle {
-    pub fn telekio_spawn<F>(&self, future: F, id: u64) -> JoinHandle<F::Output>
+    pub fn telekio_unhandled_panic(&self) {
+        match &self.inner {
+            scheduler::Handle::CurrentThread(handle) => {
+                runtime::task::Schedule::unhandled_panic(handle)
+            }
+            #[cfg(feature = "rt-multi-thread")]
+            scheduler::Handle::MultiThread(handle) => {
+                runtime::task::Schedule::unhandled_panic(handle)
+            }
+        }
+    }
+
+    pub fn telekio_spawn<F>(
+        &self,
+        future: F,
+        id: u64,
+        location: &'static std::panic::Location<'static>,
+    ) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        runtime::telekio::with_task_id(id, || self.spawn(future))
+        runtime::telekio::with_task(id, location, || self.spawn(future))
     }
 
-    pub fn telekio_spawn_blocking<F, R>(&self, function: F, id: u64) -> JoinHandle<R>
+    pub fn telekio_spawn_blocking<F, R>(
+        &self,
+        function: F,
+        id: u64,
+        location: &'static std::panic::Location<'static>,
+    ) -> JoinHandle<R>
     where
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
-        runtime::telekio::with_task_id(id, || self.spawn_blocking(function))
+        runtime::telekio::with_task(id, location, || self.spawn_blocking(function))
     }
 
     /// # Safety
     ///
     /// The future and output must remain on the LocalRuntime's owning thread.
-    pub unsafe fn telekio_spawn_local<F>(&self, future: F, id: u64) -> JoinHandle<F::Output>
+    pub unsafe fn telekio_spawn_local<F>(
+        &self,
+        future: F,
+        id: u64,
+        location: &'static std::panic::Location<'static>,
+    ) -> JoinHandle<F::Output>
     where
         F: Future + 'static,
         F::Output: 'static,
     {
         let size = std::mem::size_of::<F>();
-        runtime::telekio::with_task_id(id, || unsafe {
+        runtime::telekio::with_task(id, location, || unsafe {
             self.spawn_local_named(future, SpawnMeta::new_unnamed(size))
         })
     }

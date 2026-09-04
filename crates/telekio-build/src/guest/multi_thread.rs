@@ -1,6 +1,5 @@
 use super::*;
 use crate::runtime::context;
-use crate::runtime::TaskMeta;
 use crate::runtime::task::{
     self,
     telekio::{Host, HostSchedule, Registry},
@@ -40,17 +39,11 @@ impl HostSchedule for Arc<Handle> {
         &self.telekio
     }
 
-    fn run(&self, _meta: &TaskMeta<'_>, call: impl FnOnce()) -> u64 {
+    fn run(&self, call: impl FnOnce()) -> u64 {
         let run = || {
             #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
             self.telekio.host().record_worker();
-            task::telekio::measure_poll(|| {
-                #[cfg(tokio_unstable)]
-                self.task_hooks.poll_start_callback(_meta);
-                call();
-                #[cfg(tokio_unstable)]
-                self.task_hooks.poll_stop_callback(_meta);
-            })
+            task::telekio::measure_poll(call)
         };
         let current = context::with_current(|handle| match handle {
             scheduler::Handle::CurrentThread(_) => false,
@@ -71,9 +64,6 @@ impl HostSchedule for Arc<Handle> {
         call()
     }
 
-    fn spawn(&self, meta: &TaskMeta<'_>) {
-        self.task_hooks.spawn(meta);
-    }
 }
 
 pub(super) fn host_worker<F>(worker: F)

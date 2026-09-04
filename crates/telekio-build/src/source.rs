@@ -157,6 +157,11 @@ fn mount_host_modules(source: &Path) -> Result<(), Box<dyn Error>> {
     edit::mount_module(&mut contents, None, "telekio", &helper)?;
     fs::write(target, contents)?;
 
+    let target = source.join("src/runtime/task/mod.rs");
+    let mut contents = fs::read_to_string(&target)?;
+    edit::rename_method(&mut contents, "SpawnLocation", "capture", "capture_local")?;
+    fs::write(target, contents)?;
+
     let target = source.join("src/runtime/context.rs");
     let mut contents = fs::read_to_string(&target)?;
     for (function, call, helper) in [
