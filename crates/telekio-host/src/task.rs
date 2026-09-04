@@ -14,10 +14,9 @@ use telekio::{
     Task, Waker,
 };
 
-use super::{
-    Activity, HandleContext, OwnerContext, OwnerState, RuntimeKind, RuntimeOwner, TaskCleanup,
-    host_panic, result,
-};
+use super::owner::{Activity, OwnerContext, OwnerState, TaskCleanup};
+use super::runtime::{HandleContext, RuntimeKind, RuntimeOwner};
+use super::{host_panic, result};
 
 pub(super) unsafe extern "C" fn runtime_block_on(owner: *mut c_void, future: Future) -> CallResult {
     let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<Status, String> {

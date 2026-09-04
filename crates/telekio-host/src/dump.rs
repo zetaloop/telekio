@@ -5,7 +5,7 @@ use std::{
 
 use telekio::{CallResult, DumpOperation, DumpResult};
 
-use super::HandleContext;
+use super::runtime::HandleContext;
 
 pub(super) unsafe extern "C" fn start(context: *const c_void) -> DumpResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
@@ -45,7 +45,7 @@ mod imp {
     };
     use telekio::{OperationPoll, OwnedBytes, Poll, Status, Waker};
 
-    use crate::HostResource;
+    use crate::owner::HostResource;
 
     struct Dump {
         future: Pin<Box<dyn Future<Output = Vec<u8>> + Send>>,

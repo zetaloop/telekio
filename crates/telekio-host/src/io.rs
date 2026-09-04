@@ -17,8 +17,8 @@ use telekio::{
 use telekio::IoKind;
 
 #[cfg(target_os = "linux")]
-use super::{CallbackOwner, host_callback};
-use super::{HandleContext, HostResource};
+use super::{host_callback, runtime::CallbackOwner};
+use super::{owner::HostResource, runtime::HandleContext};
 
 #[cfg(unix)]
 #[path = "io/unix.rs"]

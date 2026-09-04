@@ -13,7 +13,7 @@ use telekio::{
     Waker,
 };
 
-use super::{HandleContext, HostResource};
+use super::{owner::HostResource, runtime::HandleContext};
 
 trait Receiver: Send {
     fn poll_recv(&mut self, context: &mut Context<'_>) -> RustPoll<()>;
