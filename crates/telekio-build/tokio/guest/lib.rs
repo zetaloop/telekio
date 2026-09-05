@@ -1,9 +1,4 @@
 #[unsafe(no_mangle)]
-pub(super) extern "C-unwind" fn telekio_default_handle() -> ::telekio::RawHandle {
-    ::telekio::RawHandle::empty()
-}
-
-#[unsafe(no_mangle)]
 pub(super) unsafe extern "C" fn telekio_guest_context(
     raw: ::telekio::RawHandle,
 ) -> ::telekio::AttachResult {

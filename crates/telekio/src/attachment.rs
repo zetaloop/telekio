@@ -4,7 +4,7 @@ use std::{
     sync::Mutex,
 };
 
-use crate::{CallResult, ExecutionState, Handle, RawHandle, Status, with_execution_state};
+use crate::{CallResult, ExecutionState, Handle, Status, with_execution_state};
 
 static ATTACHED: Mutex<Option<Handle>> = Mutex::new(None);
 
@@ -107,31 +107,6 @@ pub fn install_handle(handle: Handle) -> Result<(), Handle> {
     }
 }
 
-#[cfg(feature = "guest")]
-unsafe extern "C" {
-    fn telekio_guest_context(raw: RawHandle) -> AttachResult;
-}
-
-/// # Safety
-///
-/// `raw` must be one owned host handle reference returned by its host API.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn telekio_guest_attach(raw: RawHandle) -> AttachResult {
-    #[cfg(feature = "guest")]
-    {
-        unsafe { telekio_guest_context(raw) }
-    }
-    #[cfg(not(feature = "guest"))]
-    {
-        drop(unsafe { Handle::from_abi(raw) });
-        crate::require_package("This package");
-        AttachResult {
-            call: CallResult::error("Telekio guest is not enabled"),
-            attachment: RawAttachment::empty(),
-        }
-    }
-}
-
 /// # Safety
 ///
 /// The guest execution context must have been released, and the attached host
@@ -160,23 +135,8 @@ pub unsafe fn detach_attached() -> CallResult {
 
 #[doc(hidden)]
 pub fn attached() -> Handle {
-    if let Some(handle) = ATTACHED.lock().unwrap().as_ref() {
-        return handle.clone();
-    }
-    #[cfg(feature = "guest")]
-    {
-        unsafe extern "C-unwind" {
-            fn telekio_default_handle() -> RawHandle;
-        }
-        let raw = unsafe { telekio_default_handle() };
-        if !raw.is_empty() {
-            let handle = unsafe { Handle::from_abi(raw) };
-            if install_handle(handle).is_ok() {
-                return ATTACHED.lock().unwrap().as_ref().unwrap().clone();
-            }
-        }
-    }
-    panic!("Telekio runtime is not attached")
+    let handle = ATTACHED.lock().unwrap().clone();
+    handle.expect("Telekio runtime is not attached")
 }
 
 unsafe extern "C" fn enter_empty(

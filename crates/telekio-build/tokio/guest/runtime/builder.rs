@@ -13,12 +13,6 @@ struct AttachedContext {
     flavor: ::telekio::Flavor,
 }
 
-#[cfg(not(test))]
-#[unsafe(no_mangle)]
-pub(super) extern "C-unwind" fn telekio_default_handle() -> ::telekio::RawHandle {
-    ::telekio::RawHandle::empty()
-}
-
 impl Builder {
     pub(super) fn build_hosted_current_thread(&mut self) -> io::Result<Runtime> {
         let (host, task_hooks) = self.build_host(false)?;

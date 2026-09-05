@@ -9,7 +9,7 @@ pub use abi::{
     BoolResult, Bytes, CallResult, Callback, OperationPoll, OwnedBytes, Poll, RuntimeApi, Status,
     StringCallback, Waker,
 };
-pub use attachment::{AttachResult, GuestCall, RawAttachment, telekio_guest_attach};
+pub use attachment::{AttachResult, GuestCall, RawAttachment};
 #[doc(hidden)]
 pub use attachment::{attached, detach_attached, install_handle};
 pub use io::{
@@ -50,12 +50,32 @@ macro_rules! require {
     };
 }
 
+#[cfg(feature = "guest")]
 #[macro_export]
 macro_rules! plugin {
     () => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn telekio_attach(raw: $crate::RawHandle) -> $crate::AttachResult {
-            unsafe { $crate::telekio_guest_attach(raw) }
+            unsafe extern "C" {
+                fn telekio_guest_context(raw: $crate::RawHandle) -> $crate::AttachResult;
+            }
+            unsafe { telekio_guest_context(raw) }
+        }
+    };
+}
+
+#[cfg(not(feature = "guest"))]
+#[macro_export]
+macro_rules! plugin {
+    () => {
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn telekio_attach(raw: $crate::RawHandle) -> $crate::AttachResult {
+            ::core::mem::drop(unsafe { $crate::Handle::from_abi(raw) });
+            $crate::require_package("This package");
+            $crate::AttachResult {
+                call: $crate::CallResult::error("Telekio guest is not enabled"),
+                attachment: $crate::RawAttachment::empty(),
+            }
         }
     };
 }
