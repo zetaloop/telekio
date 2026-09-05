@@ -16,18 +16,19 @@ use telekio::{
 #[cfg(any(unix, windows))]
 use telekio::IoKind;
 
+use super::HandleContext;
+use crate::owner::HostResource;
 #[cfg(target_os = "linux")]
-use super::{host_callback, runtime::CallbackOwner};
-use super::{owner::HostResource, runtime::HandleContext};
+use crate::{callback::CallbackOwner, host_callback};
 
 #[cfg(unix)]
-#[path = "io/unix.rs"]
+#[path = "unix.rs"]
 mod imp;
 #[cfg(windows)]
-#[path = "io/windows.rs"]
+#[path = "windows.rs"]
 mod imp;
 #[cfg(not(any(unix, windows)))]
-#[path = "io/other.rs"]
+#[path = "other.rs"]
 mod imp;
 
 use imp::{Registration, register_inner};
@@ -93,7 +94,7 @@ pub(super) unsafe extern "C" fn register(
             registration: IoRegistration::empty(),
         },
         Err(payload) => IoResult {
-            call: super::host_panic(&*payload),
+            call: crate::host_panic(&*payload),
             error: IoError::none(),
             registration: IoRegistration::empty(),
         },
@@ -157,7 +158,7 @@ pub(super) unsafe extern "C" fn register_driver(
             registration: IoDriverRegistration::empty(),
         },
         Err(payload) => IoDriverResult {
-            call: super::host_panic(&*payload),
+            call: crate::host_panic(&*payload),
             error: IoError::none(),
             registration: IoDriverRegistration::empty(),
         },
@@ -183,7 +184,7 @@ pub(super) unsafe extern "C" fn register_driver(
             }
         }
         Err(payload) => IoDriverResult {
-            call: super::host_panic(&*payload),
+            call: crate::host_panic(&*payload),
             error: IoError::none(),
             registration: IoDriverRegistration::empty(),
         },
@@ -288,7 +289,7 @@ unsafe extern "C" fn ready(data: *mut std::ffi::c_void, interest: IoInterest) ->
             operation: telekio::IoOperation::empty(),
         },
         Err(payload) => IoOperationResult {
-            call: super::host_panic(&*payload),
+            call: crate::host_panic(&*payload),
             operation: telekio::IoOperation::empty(),
         },
     }
@@ -473,7 +474,7 @@ fn io_callback(call: impl FnOnce() -> IoPoll) -> IoPoll {
         Ok(result) => result,
         Err(payload) => io_poll(
             Poll::Panicked,
-            super::host_panic(&*payload),
+            crate::host_panic(&*payload),
             IoReady::empty(),
         ),
     }
@@ -490,7 +491,7 @@ fn io_call(call: impl FnOnce() -> io::Result<()>) -> IoCallResult {
             call: call_error(error),
         },
         Err(payload) => IoCallResult {
-            call: super::host_panic(&*payload),
+            call: crate::host_panic(&*payload),
             error: IoError::none(),
         },
     }

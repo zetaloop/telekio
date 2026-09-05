@@ -12,8 +12,9 @@ use telekio::{
     Timer, TimerResult, Waker,
 };
 
-use super::{host_callback, host_panic, result};
-use super::{owner::HostResource, runtime::HandleContext};
+use super::HandleContext;
+use crate::owner::HostResource;
+use crate::{host_callback, host_panic, result};
 
 static CLOCK_ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
 

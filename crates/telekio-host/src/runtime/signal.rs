@@ -13,7 +13,8 @@ use telekio::{
     Waker,
 };
 
-use super::{owner::HostResource, runtime::HandleContext};
+use super::HandleContext;
+use crate::owner::HostResource;
 
 trait Receiver: Send {
     fn poll_recv(&mut self, context: &mut Context<'_>) -> RustPoll<()>;
@@ -81,7 +82,7 @@ pub(super) unsafe extern "C" fn signal(
             signal: telekio::Signal::empty(),
         },
         Err(payload) => SignalResult {
-            call: super::host_panic(&*payload),
+            call: crate::host_panic(&*payload),
             error: IoError::none(),
             signal: telekio::Signal::empty(),
         },
@@ -158,13 +159,13 @@ unsafe extern "C" fn poll(data: *mut c_void, waker: *const Waker) -> OperationPo
         Ok(result) => result,
         Err(payload) => OperationPoll {
             state: Poll::Panicked,
-            call: super::host_panic(&*payload),
+            call: crate::host_panic(&*payload),
         },
     }
 }
 
 unsafe extern "C" fn release(data: *mut c_void) -> CallResult {
-    super::host_callback(|| unsafe { &*data.cast::<HostResource<Signal>>() }.release())
+    crate::host_callback(|| unsafe { &*data.cast::<HostResource<Signal>>() }.release())
 }
 
 fn call_ok() -> CallResult {

@@ -1,11 +1,14 @@
 use std::{
     ffi::c_void,
     panic::{AssertUnwindSafe, catch_unwind},
+    sync::Arc,
 };
 
-use telekio::{Metric, MetricResult, OwnedBytes, Status};
+use telekio::{CallResult, Flavor, Metric, MetricResult, OwnedBytes, Status, WorkerCallback};
 
-use super::{host_panic, result, runtime::HandleContext};
+use crate::{host_panic, result};
+
+use super::HandleContext;
 
 pub(super) unsafe extern "C" fn metric(
     context: *const c_void,
@@ -263,5 +266,55 @@ pub(super) unsafe extern "C" fn metric(
             call: host_panic(&*payload),
             value: 0,
         },
+    }
+}
+
+pub(super) struct WorkerObserver {
+    handle: tokio::runtime::Handle,
+    id: Option<u64>,
+}
+
+impl Drop for WorkerObserver {
+    fn drop(&mut self) {
+        self.handle.telekio_remove_worker_observer(self.id);
+    }
+}
+
+pub(super) unsafe extern "C" fn observe_workers(
+    context: *const c_void,
+    callback: WorkerCallback,
+) -> CallResult {
+    match catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let context = unsafe { &*context.cast::<HandleContext>() };
+        let _activity = context.owner.activity()?;
+        let mut observer = context.worker_observer.lock().unwrap();
+        if observer.is_some() {
+            return Err("Tokio worker observer is already installed".to_owned());
+        }
+        if !matches!(context.flavor, Flavor::MultiThread) {
+            drop(callback);
+            return Ok(());
+        }
+        let callback = Arc::new(callback);
+        let owner = Arc::clone(&context.owner);
+        let id = context
+            .handle
+            .telekio_add_worker_observer(Arc::new(move |worker| {
+                let Some(_activity) = owner.callback(std::task::Waker::noop().clone()) else {
+                    return;
+                };
+                callback
+                    .call(worker)
+                    .resume("failed to record Tokio worker thread");
+            }));
+        *observer = Some(WorkerObserver {
+            handle: context.handle.clone(),
+            id,
+        });
+        Ok(())
+    })) {
+        Ok(Ok(())) => CallResult::ok(),
+        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
+        Err(payload) => host_panic(&*payload),
     }
 }

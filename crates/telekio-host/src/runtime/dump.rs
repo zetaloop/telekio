@@ -5,7 +5,9 @@ use std::{
 
 use telekio::{CallResult, DumpOperation, DumpResult};
 
-use super::runtime::HandleContext;
+use crate::host_panic;
+
+use super::HandleContext;
 
 pub(super) unsafe extern "C" fn start(context: *const c_void) -> DumpResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
@@ -19,7 +21,7 @@ pub(super) unsafe extern "C" fn start(context: *const c_void) -> DumpResult {
             dump: DumpOperation::empty(),
         },
         Err(payload) => DumpResult {
-            call: super::host_panic(&*payload),
+            call: crate::host_panic(&*payload),
             dump: DumpOperation::empty(),
         },
     }
@@ -114,5 +116,18 @@ mod imp {
 
     pub(super) fn create(_: &HandleContext) -> Result<DumpOperation, String> {
         Err("Tokio runtime dumps are unavailable on this platform".to_owned())
+    }
+}
+
+pub(super) unsafe extern "C" fn trace_leaf(
+    _: *const c_void,
+    root: *const c_void,
+    leaf: *const c_void,
+) -> CallResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        tokio::runtime::telekio::trace_leaf(root, leaf);
+    })) {
+        Ok(()) => CallResult::ok(),
+        Err(payload) => host_panic(&*payload),
     }
 }
