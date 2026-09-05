@@ -46,7 +46,9 @@ impl Timer {
             if let Some(timer) = &mut self.timer {
                 timer.reset(deadline);
             } else {
-                self.timer = Some(self.handle.host().timer(deadline));
+                self.timer = Some(::telekio::Timer::from_result(
+                    self.handle.connection().handle.timer(deadline),
+                ));
             }
         }
         #[cfg(not(feature = "rt"))]

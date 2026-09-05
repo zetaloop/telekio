@@ -21,7 +21,8 @@ impl Handle {
         }));
         let result = crate::runtime::Handle::current()
             .inner
-            .host()
+            .connection()
+            .handle
             .register_io_driver(unsafe { ::telekio::IoResource::fd(fd) }, callback);
         self.telekio_uring
             .install(::telekio::IoDriverRegistration::from_result(result)?)

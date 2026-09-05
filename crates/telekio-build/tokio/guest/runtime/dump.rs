@@ -4,6 +4,21 @@ use std::{
     hash::{Hash, Hasher},
 };
 
+pub(crate) async fn dump<F>(handle: &crate::runtime::Handle, original: F) -> Dump
+where
+    F: std::future::Future<Output = Dump>,
+{
+    let _ = original;
+    let ::telekio::DumpResult { call, mut dump } = handle.inner.connection().handle.dump();
+    call.resume("failed to start Tokio runtime dump");
+    let bytes = std::future::poll_fn(|context| {
+        let waker = unsafe { ::telekio::Waker::from_ref(context.waker()) };
+        dump.poll(&waker)
+    })
+    .await;
+    decode(&bytes)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ForeignFrame {
     pub(crate) ip: usize,

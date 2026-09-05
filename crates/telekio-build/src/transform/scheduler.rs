@@ -11,7 +11,7 @@ pub(super) fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             &[edit::Field {
                 visibility: Some("pub(crate)"),
                 name: "telekio",
-                ty: "task::telekio::Registry<Arc<Handle>>",
+                ty: "std::sync::OnceLock<Arc<crate::runtime::handle::telekio::Connection>>",
             }],
         )?;
         edit::append_record_fields(
@@ -23,10 +23,9 @@ pub(super) fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             "Handle",
             &[edit::FieldInit {
                 name: "telekio",
-                value: "task::telekio::Registry::new()",
+                value: "std::sync::OnceLock::new()",
             }],
         )?;
-        edit::rename_method(source, "CurrentThread", "block_on", "drive")?;
         for (method, bind) in [("spawn", "bind"), ("spawn_local", "bind_local")] {
             edit::redirect_call(
                 source,
@@ -50,7 +49,7 @@ pub(super) fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
         for target in [
             edit::AttrTarget::Method {
                 owner: "CurrentThread",
-                name: "drive",
+                name: "block_on",
             },
             edit::AttrTarget::Struct("Core"),
             edit::AttrTarget::Impl {
@@ -132,7 +131,7 @@ pub(super) fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             &[edit::Field {
                 visibility: Some("pub(crate)"),
                 name: "telekio",
-                ty: "task::telekio::Registry<Arc<Handle>>",
+                ty: "std::sync::OnceLock<Arc<crate::runtime::handle::telekio::Connection>>",
             }],
         )?;
         Ok(())
@@ -144,7 +143,7 @@ pub(super) fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             "Handle",
             &[edit::FieldInit {
                 name: "telekio",
-                value: "task::telekio::Registry::new()",
+                value: "std::sync::OnceLock::new()",
             }],
         )?;
         edit::redirect_call(
@@ -230,12 +229,11 @@ pub(super) fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
         Ok(())
     })?;
     patch(&path.join("mod.rs"), |source| {
-        edit::rename_method(source, "MultiThread", "block_on", "drive")?;
         edit::add_attr(
             source,
             edit::AttrTarget::Method {
                 owner: "MultiThread",
-                name: "drive",
+                name: "block_on",
             },
             "#[expect(dead_code)]",
         )?;
@@ -292,7 +290,12 @@ pub(super) fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
             },
             "#[cfg_attr(target_has_atomic = \"64\", expect(dead_code))]",
         )?;
-        mount(source, None, "telekio", "guest/runtime/scheduler/mod.rs")?;
+        mount(
+            source,
+            Some("pub(crate)"),
+            "telekio",
+            "guest/runtime/scheduler/mod.rs",
+        )?;
         edit::add_attr(
             source,
             edit::AttrTarget::Module("telekio"),

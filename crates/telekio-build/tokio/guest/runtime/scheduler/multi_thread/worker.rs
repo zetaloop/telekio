@@ -10,12 +10,12 @@ pub(super) fn exit_host_runtime<F, R>(function: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let host = scheduler::Handle::current().host().clone();
+    let connection = scheduler::Handle::current().connection().clone();
     let mut state = BlockingState {
         function: Some(function),
         result: None,
     };
-    let call = host.block_in_place(unsafe {
+    let call = connection.handle.block_in_place(unsafe {
         ::telekio::Blocking::from_raw((&raw mut state).cast(), run::<F, R>)
     });
     context::telekio::restore();

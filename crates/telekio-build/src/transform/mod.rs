@@ -17,6 +17,14 @@ pub(crate) fn guest(generated: &Path) -> Result<(), Box<dyn Error>> {
     patch_guest_root(&generated.join("src/lib.rs"))?;
     task::patch_task_id(&generated.join("src/runtime/task/id.rs"))?;
     task::patch_task(&generated.join("src/runtime/task/mod.rs"))?;
+    patch(&generated.join("src/runtime/task_hooks.rs"), |source| {
+        mount(
+            source,
+            Some("pub(crate)"),
+            "telekio",
+            "guest/runtime/task_hooks.rs",
+        )
+    })?;
     task::patch_task_trace(&generated.join("src/runtime/task/trace/mod.rs"))?;
     task::patch_task_trace_tree(&generated.join("src/runtime/task/trace/tree.rs"))?;
     task::patch_dump(&generated.join("src/runtime/dump.rs"))?;
@@ -31,6 +39,14 @@ pub(crate) fn guest(generated: &Path) -> Result<(), Box<dyn Error>> {
     runtime::patch_runtime(&generated.join("src/runtime/runtime.rs"))?;
     runtime::patch_local_runtime(&generated.join("src/runtime/local_runtime/runtime.rs"))?;
     runtime::patch_blocking(&generated.join("src/runtime/blocking/pool.rs"))?;
+    patch(&generated.join("src/runtime/metrics/mod.rs"), |source| {
+        mount(
+            source,
+            Some("pub(crate)"),
+            "telekio",
+            "guest/runtime/metrics/mod.rs",
+        )
+    })?;
     metrics::patch_histogram(&generated.join("src/runtime/metrics/histogram.rs"))?;
     metrics::patch_worker_metrics(&generated.join("src/runtime/metrics/worker.rs"))?;
     metrics::patch_runtime_metrics(&generated.join("src/runtime/metrics/runtime.rs"))?;
@@ -119,11 +135,6 @@ pub(crate) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
 
 fn patch_guest_root(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        edit::retarget_use(
-            source,
-            "trace_leaf",
-            "crate::runtime::task::trace::telekio::trace_leaf",
-        )?;
         mount(source, None, "telekio_context", "guest/lib.rs")?;
         edit::add_attr(
             source,

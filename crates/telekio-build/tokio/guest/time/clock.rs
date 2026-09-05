@@ -10,7 +10,12 @@ where
     move |clock| {
         guest(clock)?;
         #[cfg(feature = "rt")]
-        Handle::current().host().pause();
+        Handle::current()
+            .connection()
+            .handle
+            .pause()
+            .into_io_result()
+            .unwrap();
         Ok(())
     }
 }
@@ -22,7 +27,12 @@ where
     move |clock| {
         guest(clock)?;
         #[cfg(feature = "rt")]
-        Handle::current().host().resume();
+        Handle::current()
+            .connection()
+            .handle
+            .resume()
+            .into_io_result()
+            .unwrap();
         Ok(())
     }
 }
@@ -39,7 +49,12 @@ where
     move |clock| {
         guest(clock)?;
         #[cfg(feature = "rt")]
-        Handle::current().host().advance(duration);
+        Handle::current()
+            .connection()
+            .handle
+            .advance(duration)
+            .into_io_result()
+            .unwrap();
         Ok(())
     }
 }
@@ -51,7 +66,9 @@ where
     move |clock| {
         #[cfg(feature = "rt")]
         if clock.is_some() {
-            return Ok(Instant::from_std(Handle::current().host().now()));
+            return Ok(Instant::from_std(
+                Handle::current().connection().handle.now(),
+            ));
         }
         guest(clock)
     }

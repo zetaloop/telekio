@@ -1,19 +1,35 @@
 use super::*;
-#[cfg(feature = "test-util")]
-use crate::runtime::task::telekio::Host;
-#[cfg(feature = "test-util")]
 use std::sync::Arc;
 
-cfg_taskdump! {
-    pub(super) async fn dump<F>(
-        handle: &Handle,
-        original: F,
-    ) -> crate::runtime::Dump
-    where
-        F: std::future::Future<Output = crate::runtime::Dump>,
-    {
-        let _ = original;
-        handle.inner.host().dump().await
+#[cfg(all(tokio_unstable, target_has_atomic = "64"))]
+use crate::runtime::metrics::telekio::Workers;
+use crate::runtime::task_hooks::telekio::Hooks;
+
+pub(crate) struct Connection {
+    pub(crate) handle: ::telekio::Handle,
+    #[cfg_attr(
+        not(any(feature = "signal", all(unix, feature = "process"))),
+        expect(dead_code)
+    )]
+    pub(crate) io_enabled: bool,
+    pub(crate) task_hooks: Arc<Hooks>,
+    #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
+    pub(crate) workers: Arc<Workers>,
+}
+
+impl Connection {
+    pub(crate) fn new(
+        handle: ::telekio::Handle,
+        io_enabled: bool,
+        task_hooks: Arc<Hooks>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            handle,
+            io_enabled,
+            task_hooks,
+            #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
+            workers: Arc::new(Workers::new()),
+        })
     }
 }
 
@@ -26,14 +42,14 @@ cfg_taskdump! {
 
 impl Handle {
     #[cfg(feature = "test-util")]
-    pub(crate) fn host(&self) -> &Arc<Host> {
-        self.inner.host()
+    pub(crate) fn connection(&self) -> &Arc<Connection> {
+        self.inner.connection()
     }
 
     /// Returns the flavor of the current runtime.
     pub fn runtime_flavor(&self) -> RuntimeFlavor {
         let _ = self.runtime_flavor_inner();
-        match self.inner.host().flavor() {
+        match self.inner.connection().handle.flavor() {
             ::telekio::Flavor::CurrentThread | ::telekio::Flavor::Local => {
                 RuntimeFlavor::CurrentThread
             }

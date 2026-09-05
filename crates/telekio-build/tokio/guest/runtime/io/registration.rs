@@ -16,7 +16,8 @@ impl Registration {
         #[cfg(feature = "rt")]
         {
             let telekio = handle
-                .host()
+                .connection()
+                .handle
                 .register_io(io.telekio_resource(), telekio_interest(interest))?;
             let shared = Arc::new(ScheduledIo::default());
             shared.install(telekio);

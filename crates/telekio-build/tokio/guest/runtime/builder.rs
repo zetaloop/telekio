@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::{task::telekio::HostTaskHooks, TaskHooks};
+use crate::runtime::{task_hooks::telekio::Hooks, TaskHooks};
 use std::sync::Arc;
 #[cfg(not(test))]
 use std::{
@@ -68,7 +68,7 @@ impl Builder {
         result
     }
 
-    fn build_host(&self, local: bool) -> io::Result<(::telekio::Runtime, Arc<HostTaskHooks>)> {
+    fn build_host(&self, local: bool) -> io::Result<(::telekio::Runtime, Arc<Hooks>)> {
         let flavor = if local {
             ::telekio::Flavor::Local
         } else {
@@ -80,7 +80,7 @@ impl Builder {
         };
         let keep_alive = self.keep_alive.unwrap_or_default();
         let (rng_one, rng_two) = self.seed_generator.telekio_parts();
-        let task_hooks = HostTaskHooks::new(TaskHooks {
+        let task_hooks = Hooks::new(TaskHooks {
             task_spawn_callback: self.before_spawn.clone(),
             task_terminate_callback: self.after_termination.clone(),
             #[cfg(tokio_unstable)]

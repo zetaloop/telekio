@@ -1,17 +1,25 @@
 use super::*;
 
-#[inline(never)]
-pub(crate) fn trace_leaf() -> Poll<()> {
+pub(super) fn trace_leaf<F, R>(capture: F) -> Option<R>
+where
+    F: for<'a> FnOnce(&'a mut dyn FnMut(&TraceMeta)) -> R,
+{
     let state = ::telekio::execution_state();
     if state.is_null() || unsafe { (*state).tracing } == 0 {
-        return super::trace_leaf();
+        return Context::try_with_current_trace_leaf_fn(capture);
     }
-    let root = Context::current_frame_addr().unwrap_or(std::ptr::null());
-    crate::runtime::scheduler::Handle::current()
-        .host()
-        .trace_leaf(root, trace_leaf as *const c_void)
+    Some(capture(&mut |meta| {
+        unsafe {
+            crate::runtime::scheduler::Handle::current()
+                .connection()
+                .handle
+                .trace_leaf(
+                    meta.root_addr.unwrap_or(std::ptr::null()),
+                    meta.trace_leaf_addr,
+                )
+        }
         .resume("failed to trace Tokio task");
-    Poll::Pending
+    }))
 }
 
 pub(crate) fn display_foreign<T>(

@@ -38,12 +38,40 @@ pub(super) fn patch_builder(path: &Path) -> Result<(), Box<dyn Error>> {
 
 pub(super) fn patch_runtime(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        mount(source, None, "telekio", "guest/runtime/runtime.rs")
+        for variant in ["Scheduler::CurrentThread", "Scheduler::MultiThread"] {
+            edit::delegate_call(
+                source,
+                edit::Scope::MethodArm {
+                    owner: "Runtime",
+                    name: "block_on_inner",
+                    variant,
+                },
+                edit::Call::Method("block_on"),
+                "telekio::block_on",
+                &["&self.blocking_pool"],
+            )?;
+        }
+        mount(
+            source,
+            Some("pub(crate)"),
+            "telekio",
+            "guest/runtime/runtime.rs",
+        )
     })
 }
 
 pub(super) fn patch_local_runtime(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
+        edit::delegate_call(
+            source,
+            edit::Scope::Method {
+                owner: "LocalRuntime",
+                name: "block_on_inner",
+            },
+            edit::Call::Method("block_on"),
+            "crate::runtime::runtime::telekio::block_on",
+            &["&self.blocking_pool"],
+        )?;
         mount(
             source,
             None,
@@ -61,7 +89,7 @@ pub(super) fn patch_blocking(path: &Path) -> Result<(), Box<dyn Error>> {
             &[edit::Field {
                 visibility: None,
                 name: "telekio",
-                ty: "std::sync::OnceLock<std::sync::Arc<crate::runtime::task::telekio::Host>>",
+                ty: "std::sync::OnceLock<::telekio::Runtime>",
             }],
         )?;
         edit::append_record_fields(
@@ -147,7 +175,7 @@ pub(super) fn patch_context(path: &Path) -> Result<(), Box<dyn Error>> {
                     owner: "Handle",
                     name: "dump",
                 },
-                "telekio::dump",
+                "crate::runtime::dump::telekio::dump",
                 &["self"],
             )?;
             edit::redirect_call(
@@ -169,7 +197,12 @@ pub(super) fn patch_context(path: &Path) -> Result<(), Box<dyn Error>> {
                 "block_on",
                 "block_on_host",
             )?;
-            mount(source, None, "telekio", "guest/runtime/handle.rs")
+            mount(
+                source,
+                Some("pub(crate)"),
+                "telekio",
+                "guest/runtime/handle.rs",
+            )
         },
     )
 }

@@ -87,9 +87,11 @@ where
     F: FnOnce(Option<&crate::runtime::scheduler::Context>) -> Option<usize>,
 {
     move |_| {
-        super::with_current(|handle| handle.host().worker_index())
-            .ok()
-            .flatten()
+        super::with_current(|handle| {
+            crate::runtime::metrics::telekio::worker_index(&handle.connection().handle)
+        })
+        .ok()
+        .flatten()
     }
 }
 
@@ -101,7 +103,7 @@ pub(crate) fn defer(waker: &std::task::Waker) {
     }
     match super::with_current(|handle| {
         let waker = unsafe { ::telekio::Waker::from_ref(waker) };
-        handle.host().defer(&waker)
+        handle.connection().handle.defer(&waker)
     }) {
         Ok(result) => result
             .into_io_result()

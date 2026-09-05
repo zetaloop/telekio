@@ -1,3 +1,7 @@
+mod call;
+
+pub use call::delegate_call;
+
 use std::{error::Error, path::Path};
 
 use ra_ap_syntax::{
@@ -656,9 +660,8 @@ fn delegate_closure_in(
     helper: &str,
     context: &[&str],
 ) -> Result<bool, Box<dyn Error>> {
-    let (editor, root) = open(source)?;
-    if let Some(scope) = scope.resolve(&root)? {
-        let Some(arguments) = call_arguments(&scope, call)? else {
+    edit_scope(source, scope, &|editor, scope| {
+        let Some(arguments) = call_arguments(scope, call)? else {
             return Ok(false);
         };
         let argument = arguments
@@ -675,44 +678,8 @@ fn delegate_closure_in(
         helper_arguments.push(ast::Expr::ClosureExpr(closure));
         let delegate = make::expr_call(expression(helper)?, make::arg_list(helper_arguments));
         editor.replace(argument.syntax(), delegate.syntax().clone());
-        commit(source, editor)?;
-        return Ok(true);
-    }
-
-    let mut replacements = Vec::new();
-    for source_tree in root.descendants().filter_map(ast::TokenTree::cast) {
-        let Some(inner_scope) = scope.inside(&source_tree) else {
-            continue;
-        };
-        let text = source_tree.syntax().text().to_string();
-        let Some(mut inner) = text
-            .strip_prefix('{')
-            .and_then(|text| text.strip_suffix('}'))
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        if parse(&inner).is_err()
-            || !delegate_closure_in(&mut inner, inner_scope, call, index, helper, context)?
-        {
-            continue;
-        }
-        let replacement = parse(&format!("replacement! {{ {inner} }}"))?
-            .syntax()
-            .descendants()
-            .find_map(ast::MacroCall::cast)
-            .and_then(|call| call.token_tree())
-            .ok_or("replacement macro has no token tree")?;
-        retain_outermost(&mut replacements, source_tree, replacement);
-    }
-    if replacements.is_empty() {
-        return Ok(false);
-    }
-    for (old, new) in replacements {
-        editor.replace(old.syntax(), new.syntax().clone());
-    }
-    commit(source, editor)?;
-    Ok(true)
+        Ok(true)
+    })
 }
 
 pub fn mount_module(
@@ -767,6 +734,15 @@ pub enum Scope<'a> {
         owner: &'a str,
         name: &'a str,
         call: Call<'a>,
+    },
+    FunctionArm {
+        name: &'a str,
+        variant: &'a str,
+    },
+    MethodArm {
+        owner: &'a str,
+        name: &'a str,
+        variant: &'a str,
     },
 }
 
@@ -887,9 +863,8 @@ fn redirect_call_in(
     from: &str,
     to: &str,
 ) -> Result<bool, Box<dyn Error>> {
-    let (editor, root) = open(source)?;
-    if let Some(scope) = scope.resolve(&root)? {
-        let calls = matching_calls(&scope, from).collect::<Vec<_>>();
+    edit_scope(source, scope, &|editor, scope| {
+        let calls = matching_calls(scope, from).collect::<Vec<_>>();
         let (callee, method) = match calls.as_slice() {
             [] => return Ok(false),
             [call] => call.clone(),
@@ -903,8 +878,22 @@ fn redirect_call_in(
         } else {
             editor.replace(callee, make::path_from_text(to).syntax().clone());
         }
-        commit(source, editor)?;
-        return Ok(true);
+        Ok(true)
+    })
+}
+
+fn edit_scope(
+    source: &mut String,
+    scope: Scope<'_>,
+    edit: &impl Fn(&SyntaxEditor, &SyntaxNode) -> Result<bool, Box<dyn Error>>,
+) -> Result<bool, Box<dyn Error>> {
+    let (editor, root) = open(source)?;
+    if let Some(scope) = scope.resolve(&root)? {
+        if edit(&editor, &scope)? {
+            commit(source, editor)?;
+            return Ok(true);
+        }
+        return Ok(false);
     }
 
     let mut replacements = Vec::new();
@@ -920,7 +909,7 @@ fn redirect_call_in(
         else {
             continue;
         };
-        if parse(&inner).is_err() || !redirect_call_in(&mut inner, inner_scope, from, to)? {
+        if parse(&inner).is_err() || !edit_scope(&mut inner, inner_scope, edit)? {
             continue;
         }
         let replacement = parse(&format!("replacement! {{ {inner} }}"))?
@@ -944,7 +933,7 @@ fn redirect_call_in(
 impl Scope<'_> {
     fn inside(self, tree: &ast::TokenTree) -> Option<Self> {
         match self {
-            Self::Function(_) => Some(self),
+            Self::Function(_) | Self::FunctionArm { .. } => Some(self),
             Self::Method { owner, name } => {
                 match tree.syntax().ancestors().find_map(ast::Impl::cast) {
                     Some(implementation)
@@ -958,6 +947,14 @@ impl Scope<'_> {
                     None => Some(self),
                 }
             }
+            Self::MethodArm {
+                owner,
+                name,
+                variant,
+            } => match (Self::Method { owner, name }).inside(tree)? {
+                Self::Function(_) => Some(Self::FunctionArm { name, variant }),
+                _ => Some(self),
+            },
             Self::FunctionArgument { .. } | Self::MethodArgument { .. } => None,
         }
     }
@@ -992,8 +989,45 @@ impl Scope<'_> {
                 };
                 closure_argument(&scope, call, &format!("{owner}::{name}"))
             }
+            Self::FunctionArm { name, variant } => {
+                let Some(scope) = (Self::Function(name)).resolve(root)? else {
+                    return Ok(None);
+                };
+                match_arm(&scope, variant)
+            }
+            Self::MethodArm {
+                owner,
+                name,
+                variant,
+            } => {
+                let Some(scope) = (Self::Method { owner, name }).resolve(root)? else {
+                    return Ok(None);
+                };
+                match_arm(&scope, variant)
+            }
         }
     }
+}
+
+fn match_arm(scope: &SyntaxNode, variant: &str) -> Result<Option<SyntaxNode>, Box<dyn Error>> {
+    let mut arms = scope_descendants(scope)
+        .filter_map(ast::MatchArm::cast)
+        .filter(|arm| {
+            let path = match arm.pat() {
+                Some(ast::Pat::TupleStructPat(pattern)) => pattern.path(),
+                Some(ast::Pat::RecordPat(pattern)) => pattern.path(),
+                Some(ast::Pat::PathPat(pattern)) => pattern.path(),
+                _ => None,
+            };
+            path.is_some_and(|path| path.syntax().text() == variant)
+        });
+    let Some(arm) = arms.next() else {
+        return Ok(None);
+    };
+    if arms.next().is_some() {
+        return Err(format!("more than one `{variant}` arm in selected scope").into());
+    }
+    Ok(arm.expr().map(|expression| expression.syntax().clone()))
 }
 
 fn closure_argument(

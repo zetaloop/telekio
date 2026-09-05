@@ -32,6 +32,12 @@ pub(super) fn patch_task(path: &Path) -> Result<(), Box<dyn Error>> {
 
 pub(super) fn patch_task_trace(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
+        edit::redirect_call(
+            source,
+            edit::Scope::Function("trace_leaf"),
+            "Context::try_with_current_trace_leaf_fn",
+            "telekio::trace_leaf",
+        )?;
         edit::add_attr(
             source,
             edit::AttrTarget::Method {

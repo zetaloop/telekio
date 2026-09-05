@@ -1,8 +1,5 @@
 use super::*;
-use crate::runtime::{
-    scheduler,
-    task::telekio::{Host, HostTaskHooks},
-};
+use crate::runtime::{handle::telekio::Connection, scheduler, task_hooks::telekio::Hooks};
 use std::sync::Arc;
 
 impl LocalRuntime {
@@ -10,14 +7,14 @@ impl LocalRuntime {
         &self,
         runtime: ::telekio::Runtime,
         io_enabled: bool,
-        task_hooks: Arc<HostTaskHooks>,
+        task_hooks: Arc<Hooks>,
     ) {
-        let host = Host::new(runtime, io_enabled, task_hooks);
+        let connection = Connection::new(runtime.handle(), io_enabled, task_hooks);
         match &self.handle.inner {
-            scheduler::Handle::CurrentThread(handle) => handle.install(host.clone()),
+            scheduler::Handle::CurrentThread(handle) => handle.install(connection),
             #[cfg(feature = "rt-multi-thread")]
             scheduler::Handle::MultiThread(_) => unreachable!("LocalRuntime uses CurrentThread"),
         }
-        self.blocking_pool.install(host);
+        self.blocking_pool.install(runtime);
     }
 }

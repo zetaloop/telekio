@@ -62,10 +62,23 @@ pub(crate) fn signal(
     kind: super::SignalKind,
     _: &crate::runtime::signal::Handle,
 ) -> std::io::Result<RxFuture> {
-    crate::runtime::scheduler::Handle::current()
-        .host()
-        .signal(::telekio::SignalRequest::unix(kind.as_raw_value()))
-        .map(RxFuture)
+    register(::telekio::SignalRequest::unix(kind.as_raw_value())).map(RxFuture)
+}
+
+#[cfg(all(
+    feature = "rt",
+    any(feature = "signal", all(unix, feature = "process"))
+))]
+#[cfg_attr(test, expect(dead_code))]
+#[track_caller]
+fn register(request: ::telekio::SignalRequest) -> std::io::Result<::telekio::Signal> {
+    let handle = crate::runtime::scheduler::Handle::current();
+    let connection = handle.connection();
+    assert!(
+        connection.io_enabled,
+        "there is no signal driver running, must be called from the context of Tokio runtime"
+    );
+    connection.handle.signal(request)
 }
 
 #[cfg(windows)]
@@ -80,9 +93,7 @@ macro_rules! console_signals {
             #[cfg(all(not(test), feature = "rt", feature = "signal"))]
             #[track_caller]
             pub(crate) fn $name() -> std::io::Result<RxFuture> {
-                crate::runtime::scheduler::Handle::current()
-                    .host()
-                    .signal(::telekio::SignalRequest::console(::telekio::SignalKind::$kind))
+                register(::telekio::SignalRequest::console(::telekio::SignalKind::$kind))
                     .map(RxFuture)
             }
         )+

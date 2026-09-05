@@ -3,11 +3,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::runtime::{task, TaskHooks, TaskMeta};
+use crate::runtime::{
+    task::{self, SpawnLocation},
+    TaskHooks, TaskMeta,
+};
 
-use super::super::SpawnLocation;
-
-pub(crate) struct HostTaskHooks {
+pub(crate) struct Hooks {
     hooks: TaskHooks,
     tasks: Mutex<HashMap<task::Id, TaskHookState>>,
     active: bool,
@@ -19,25 +20,11 @@ struct TaskHookState {
     terminated: bool,
 }
 
-thread_local! {
-    static SPAWN_LOCATION: std::cell::Cell<Option<::telekio::SourceLocation>> = const { std::cell::Cell::new(None) };
+impl TaskHooks {
+    pub(crate) fn spawn_host(&self, _: &TaskMeta<'_>) {}
 }
 
-impl SpawnLocation {
-    #[track_caller]
-    pub(crate) fn capture() -> Self {
-        SPAWN_LOCATION.set(Some(::telekio::SourceLocation::caller()));
-        Self::capture_local()
-    }
-
-    pub(crate) fn take_telekio() -> ::telekio::SourceLocation {
-        SPAWN_LOCATION
-            .take()
-            .expect("Tokio spawn location is missing")
-    }
-}
-
-impl HostTaskHooks {
+impl Hooks {
     #[cfg(not(test))]
     pub(crate) fn empty() -> Arc<Self> {
         Self::new(TaskHooks {
@@ -80,7 +67,7 @@ impl HostTaskHooks {
         ::telekio::TaskCallback::from_arc(Arc::new(move |event, id| hooks.call(event, id)))
     }
 
-    pub(super) fn register(&self, id: task::Id, location: SpawnLocation) {
+    pub(crate) fn register(&self, id: task::Id, location: SpawnLocation) {
         if !self.active {
             return;
         }
@@ -95,7 +82,7 @@ impl HostTaskHooks {
         assert!(previous.is_none(), "Tokio task hook was registered twice");
     }
 
-    pub(super) fn remove(&self, id: task::Id) {
+    pub(crate) fn remove(&self, id: task::Id) {
         if self.active {
             self.tasks.lock().unwrap().remove(&id);
         }

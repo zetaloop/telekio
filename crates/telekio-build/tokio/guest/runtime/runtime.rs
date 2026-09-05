@@ -1,23 +1,41 @@
 use super::*;
-use crate::runtime::{
-    scheduler,
-    task::telekio::{Host, HostTaskHooks},
-};
+use crate::runtime::{handle::telekio::Connection, scheduler, task_hooks::telekio::Hooks};
 use std::sync::Arc;
+
+#[track_caller]
+pub(crate) fn block_on<F: Future>(
+    pool: &BlockingPool,
+    _: &impl Sized,
+    handle: &scheduler::Handle,
+    future: F,
+) -> F::Output {
+    let allow_block_in_place = match handle {
+        scheduler::Handle::CurrentThread(_) => false,
+        #[cfg(feature = "rt-multi-thread")]
+        scheduler::Handle::MultiThread(_) => true,
+    };
+    crate::runtime::context::enter_runtime(handle, allow_block_in_place, |_| {
+        let future = crate::runtime::context::telekio::active(future);
+        #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
+        let future = crate::runtime::metrics::telekio::root(handle.connection(), future);
+        pool.runtime().block_on(future)
+    })
+}
 
 impl Runtime {
     pub(crate) fn install_host(
         &self,
         runtime: ::telekio::Runtime,
         io_enabled: bool,
-        task_hooks: Arc<HostTaskHooks>,
+        task_hooks: Arc<Hooks>,
     ) {
-        self.install(Host::new(runtime, io_enabled, task_hooks));
+        self.install(Connection::new(runtime.handle(), io_enabled, task_hooks));
+        self.blocking_pool.install(runtime);
     }
 
     #[cfg(not(test))]
     pub(crate) fn install_attached_host(&self, handle: ::telekio::Handle) {
-        self.install(Host::attached(handle));
+        self.install(Connection::new(handle, true, Hooks::empty()));
     }
 
     #[cfg(not(test))]
@@ -36,12 +54,11 @@ impl Runtime {
         )
     }
 
-    fn install(&self, host: Arc<Host>) {
+    fn install(&self, connection: Arc<Connection>) {
         match &self.handle.inner {
-            scheduler::Handle::CurrentThread(handle) => handle.install(host.clone()),
+            scheduler::Handle::CurrentThread(handle) => handle.install(connection),
             #[cfg(feature = "rt-multi-thread")]
-            scheduler::Handle::MultiThread(handle) => handle.install(host.clone()),
+            scheduler::Handle::MultiThread(handle) => handle.install(connection),
         }
-        self.blocking_pool.install(host);
     }
 }

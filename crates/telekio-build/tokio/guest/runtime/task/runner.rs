@@ -7,16 +7,13 @@ use std::{
     task::Waker,
 };
 
-use crate::{
-    future::Future as TaskFuture,
-    runtime::{task, TaskMeta},
-};
+use crate::{future::Future as TaskFuture, runtime::task};
 
 use super::super::{
     AbortHandle, Notified, OwnedTasks, Schedule, SpawnLocation, Task, TaskHarnessScheduleHooks,
     UnownedTask,
 };
-use super::{Host, HostSchedule, Registry};
+use crate::runtime::scheduler::telekio::HostSchedule;
 
 #[derive(Clone)]
 struct TaskSchedule<S: HostSchedule> {
@@ -51,141 +48,129 @@ struct BlockingRunner<S: HostSchedule> {
     id: task::Id,
 }
 
-impl<S: HostSchedule> Registry<S> {
-    pub(crate) fn new() -> Self {
-        Self {
-            host: OnceLock::new(),
-            marker: std::marker::PhantomData,
-        }
-    }
-
-    pub(crate) fn install(&self, host: Arc<Host>) {
-        assert!(
-            self.host.set(host).is_ok(),
-            "Tokio runtime was initialized twice"
-        );
-    }
-
-    pub(crate) fn host(&self) -> &Arc<Host> {
-        self.host.get().expect("Tokio runtime is not initialized")
-    }
-
-    fn start(&self, runner: Arc<Runner<S>>, local: bool, location: ::telekio::SourceLocation) {
-        let id = runner.id;
-        let task = unsafe {
-            ::telekio::Task::from_raw(
-                Arc::into_raw(runner).cast_mut().cast(),
-                poll_runner::<S>,
-                cancel_runner::<S>,
-                release_runner::<S>,
-            )
-        };
-        let result = if local {
-            self.host().handle.spawn_local(task, id.as_u64(), location)
-        } else {
-            self.host().handle.spawn(task, id.as_u64(), location)
-        };
-        if let Err(error) = result.into_io_result() {
-            self.host().task_hooks.remove(id);
-            panic!("failed to spawn Tokio task {id}: {error}");
-        }
-    }
-
-    fn bind<T>(
-        &self,
-        schedule: S,
-        future: T,
-        id: task::Id,
-        spawned_at: SpawnLocation,
-        local: bool,
-        location: ::telekio::SourceLocation,
-    ) -> task::JoinHandle<T::Output>
-    where
-        T: TaskFuture + Send + 'static,
-        T::Output: Send + 'static,
-    {
-        self.host().task_hooks.register(id, spawned_at);
-        let runner = Runner::new(schedule.clone(), id);
-        let task_schedule = TaskSchedule {
-            runner: Arc::downgrade(&runner),
-        };
-        let (task, join) = task::unowned(future, task_schedule, id, spawned_at);
-        runner.initialize(task, &join);
-        self.start(runner, local, location);
-        join
-    }
-
-    unsafe fn bind_local<T>(
-        &self,
-        schedule: S,
-        future: T,
-        id: task::Id,
-        spawned_at: SpawnLocation,
-        location: ::telekio::SourceLocation,
-    ) -> task::JoinHandle<T::Output>
-    where
-        T: TaskFuture + 'static,
-        T::Output: 'static,
-    {
-        self.host().task_hooks.register(id, spawned_at);
-        let runner = Runner::new(schedule.clone(), id);
-        let task_schedule = TaskSchedule {
-            runner: Arc::downgrade(&runner),
-        };
-        let (task, join) = unsafe { unowned_local(future, task_schedule, id, spawned_at) };
-        runner.initialize(task, &join);
-        self.start(runner, true, location);
-        join
-    }
-
-    pub(crate) fn spawn_blocking<F, R>(
-        &self,
-        schedule: S,
-        function: F,
-        id: task::Id,
-        spawned_at: task::SpawnLocation,
-        location: ::telekio::SourceLocation,
-    ) -> task::JoinHandle<R>
-    where
-        F: FnOnce() -> R + Send + 'static,
-        R: Send + 'static,
-    {
-        let size = std::mem::size_of::<F>();
-        let future = crate::util::trace::blocking_task::<F, _>(
-            crate::runtime::blocking::BlockingTask::new(function),
-            crate::util::trace::SpawnMeta::new_unnamed(size),
-            id.as_u64(),
-        );
-        let runner = Arc::new(BlockingRunner {
-            schedule,
-            task: Mutex::new(None),
-            id,
-        });
-        let task_schedule = BlockingSchedule {
-            runner: Arc::downgrade(&runner),
-        };
-        let (task, join) = task::unowned(future, task_schedule, id, spawned_at);
-        *runner.task.lock().unwrap() = Some(task);
-        self.host().task_hooks.register(id, spawned_at);
-        let task = unsafe {
-            ::telekio::BlockingTask::from_raw(
-                Arc::into_raw(runner).cast_mut().cast(),
-                run_blocking::<S>,
-                cancel_blocking::<S>,
-                release_blocking::<S>,
-            )
-        };
-        if let Err(error) = self
-            .host()
+fn start<S: HostSchedule>(
+    schedule: &S,
+    runner: Arc<Runner<S>>,
+    local: bool,
+    location: ::telekio::SourceLocation,
+) {
+    let id = runner.id;
+    let task = unsafe {
+        ::telekio::Task::from_raw(
+            Arc::into_raw(runner).cast_mut().cast(),
+            poll_runner::<S>,
+            cancel_runner::<S>,
+            release_runner::<S>,
+        )
+    };
+    let result = if local {
+        schedule
+            .connection()
             .handle
-            .spawn_blocking(task, id.as_u64(), location)
-            .into_io_result()
-        {
-            self.host().task_hooks.remove(id);
-            panic!("failed to spawn blocking Tokio task {id}: {error}");
-        }
-        join
+            .spawn_local(task, id.as_u64(), location)
+    } else {
+        schedule
+            .connection()
+            .handle
+            .spawn(task, id.as_u64(), location)
+    };
+    if let Err(error) = result.into_io_result() {
+        schedule.connection().task_hooks.remove(id);
+        panic!("failed to spawn Tokio task {id}: {error}");
     }
+}
+
+fn bind<S: HostSchedule, T>(
+    schedule: &S,
+    future: T,
+    id: task::Id,
+    spawned_at: SpawnLocation,
+    local: bool,
+    location: ::telekio::SourceLocation,
+) -> task::JoinHandle<T::Output>
+where
+    T: TaskFuture + Send + 'static,
+    T::Output: Send + 'static,
+{
+    schedule.connection().task_hooks.register(id, spawned_at);
+    let runner = Runner::new(schedule.clone(), id);
+    let task_schedule = TaskSchedule {
+        runner: Arc::downgrade(&runner),
+    };
+    let (task, join) = task::unowned(future, task_schedule, id, spawned_at);
+    runner.initialize(task, &join);
+    start(schedule, runner, local, location);
+    join
+}
+
+unsafe fn bind_local<S: HostSchedule, T>(
+    schedule: &S,
+    future: T,
+    id: task::Id,
+    spawned_at: SpawnLocation,
+    location: ::telekio::SourceLocation,
+) -> task::JoinHandle<T::Output>
+where
+    T: TaskFuture + 'static,
+    T::Output: 'static,
+{
+    schedule.connection().task_hooks.register(id, spawned_at);
+    let runner = Runner::new(schedule.clone(), id);
+    let task_schedule = TaskSchedule {
+        runner: Arc::downgrade(&runner),
+    };
+    let (task, join) = unsafe { unowned_local(future, task_schedule, id, spawned_at) };
+    runner.initialize(task, &join);
+    start(schedule, runner, true, location);
+    join
+}
+
+pub(crate) fn spawn_blocking<S: HostSchedule, F, R>(
+    schedule: &S,
+    function: F,
+    id: task::Id,
+    spawned_at: task::SpawnLocation,
+    location: ::telekio::SourceLocation,
+) -> task::JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let size = std::mem::size_of::<F>();
+    let future = crate::util::trace::blocking_task::<F, _>(
+        crate::runtime::blocking::BlockingTask::new(function),
+        crate::util::trace::SpawnMeta::new_unnamed(size),
+        id.as_u64(),
+    );
+    let runner = Arc::new(BlockingRunner {
+        schedule: schedule.clone(),
+        task: Mutex::new(None),
+        id,
+    });
+    let task_schedule = BlockingSchedule {
+        runner: Arc::downgrade(&runner),
+    };
+    let (task, join) = task::unowned(future, task_schedule, id, spawned_at);
+    *runner.task.lock().unwrap() = Some(task);
+    schedule.connection().task_hooks.register(id, spawned_at);
+    let task = unsafe {
+        ::telekio::BlockingTask::from_raw(
+            Arc::into_raw(runner).cast_mut().cast(),
+            run_blocking::<S>,
+            cancel_blocking::<S>,
+            release_blocking::<S>,
+        )
+    };
+    if let Err(error) = schedule
+        .connection()
+        .handle
+        .spawn_blocking(task, id.as_u64(), location)
+        .into_io_result()
+    {
+        schedule.connection().task_hooks.remove(id);
+        panic!("failed to spawn blocking Tokio task {id}: {error}");
+    }
+    join
 }
 
 impl<S: Schedule> Notified<S> {
@@ -198,10 +183,6 @@ impl<S: Schedule> Notified<S> {
         std::mem::forget(self);
         raw.poll();
     }
-}
-
-impl crate::runtime::TaskHooks {
-    pub(crate) fn spawn_host(&self, _: &TaskMeta<'_>) {}
 }
 
 impl<S: HostSchedule> OwnedTasks<S> {
@@ -217,8 +198,8 @@ impl<S: HostSchedule> OwnedTasks<S> {
         T: TaskFuture + Send + 'static,
         T::Output: Send + 'static,
     {
-        let join = schedule.registry().bind(
-            schedule.clone(),
+        let join = bind(
+            &schedule,
             future,
             id,
             spawned_at,
@@ -241,8 +222,8 @@ impl<S: HostSchedule> OwnedTasks<S> {
         T::Output: 'static,
     {
         let join = unsafe {
-            schedule.registry().bind_local(
-                schedule.clone(),
+            bind_local(
+                &schedule,
                 future,
                 id,
                 spawned_at,
@@ -263,7 +244,12 @@ impl<S: HostSchedule> Schedule for BlockingSchedule<S> {
         drop(task);
         if cancelled {
             if let Some(runner) = self.runner.upgrade() {
-                runner.schedule.registry().host().abort(runner.id);
+                runner
+                    .schedule
+                    .connection()
+                    .handle
+                    .abort(runner.id.as_u64())
+                    .resume("failed to abort Tokio task");
             }
         }
     }
@@ -276,7 +262,12 @@ impl<S: HostSchedule> Schedule for BlockingSchedule<S> {
 
     fn unhandled_panic(&self) {
         if let Some(runner) = self.runner.upgrade() {
-            runner.schedule.registry().host().unhandled_panic();
+            runner
+                .schedule
+                .connection()
+                .handle
+                .task_panicked()
+                .resume("failed to apply Tokio panic policy");
         }
     }
 }
@@ -294,7 +285,12 @@ impl<S: HostSchedule> Schedule for TaskSchedule<S> {
         if let Some(runner) = self.runner.upgrade() {
             runner.schedule(Runnable::Notified(task));
             if cancelled {
-                runner.schedule.registry().host().abort(runner.id);
+                runner
+                    .schedule
+                    .connection()
+                    .handle
+                    .abort(runner.id.as_u64())
+                    .resume("failed to abort Tokio task");
             }
         }
     }
@@ -311,7 +307,12 @@ impl<S: HostSchedule> Schedule for TaskSchedule<S> {
 
     fn unhandled_panic(&self) {
         if let Some(runner) = self.runner.upgrade() {
-            runner.schedule.registry().host().unhandled_panic();
+            runner
+                .schedule
+                .connection()
+                .handle
+                .task_panicked()
+                .resume("failed to apply Tokio panic policy");
         }
     }
 }
@@ -413,8 +414,8 @@ impl<S: HostSchedule> Runner<S> {
                 super::super::waker::waker_ref::<TaskSchedule<S>>(task.raw.header_ptr_ref());
             let waker = unsafe { ::telekio::Waker::from_ref(&waker) };
             self.schedule
-                .registry()
-                .host()
+                .connection()
+                .handle
                 .defer(&waker)
                 .resume("failed to resume traced Tokio task");
         }
