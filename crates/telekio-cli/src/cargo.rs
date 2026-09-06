@@ -1,4 +1,5 @@
 use std::{
+    env,
     error::Error,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
@@ -68,17 +69,7 @@ pub(super) fn expand_alias(
     if operation(&expanded).is_none_or(builtin) {
         return Ok(expanded);
     }
-    let output = Command::new(cargo)
-        .args(global_options(arguments))
-        .args(["--color", "never", "--list"])
-        .output()?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr)
-            .trim()
-            .to_owned()
-            .into());
-    }
-    let aliases = String::from_utf8(output.stdout)?;
+    let configuration = config(cargo, arguments, None)?;
     let mut visited = Vec::new();
     while let Some(index) = command_index(&expanded) {
         let Some(name) = expanded[index].to_str() else {
@@ -87,22 +78,85 @@ pub(super) fn expand_alias(
         if builtin(name) {
             break;
         }
-        let Some(target) = aliases.lines().find_map(|line| {
-            let (alias, target) = line.split_once(" alias: ")?;
-            (alias.trim() == name).then_some(target)
-        }) else {
+        let default = match name {
+            "b" => Some("build"),
+            "c" => Some("check"),
+            "d" => Some("doc"),
+            "r" => Some("run"),
+            "t" => Some("test"),
+            "rm" => Some("remove"),
+            _ => None,
+        };
+        // Cargo merges environment values when querying a leaf key.
+        let environment = env::var_os(format!(
+            "CARGO_ALIAS_{}",
+            name.to_ascii_uppercase().replace(['-', '.'], "_")
+        ))
+        .map(|_| config(cargo, arguments, Some(&format!("alias.{name}"))))
+        .transpose()?;
+        let Some(alias) = environment
+            .or_else(|| {
+                name.split('.')
+                    .try_fold(&configuration["alias"], |value, key| value.get(key))
+                    .cloned()
+            })
+            .or_else(|| default.map(|command| serde_json::Value::String(command.to_owned())))
+        else {
             break;
         };
+        let target = match alias {
+            serde_json::Value::String(value) => {
+                value.split_whitespace().map(str::to_owned).collect()
+            }
+            value => serde_json::from_value::<Vec<String>>(value)?,
+        };
+        let first = target.first().ok_or("Cargo alias has no command")?;
         if visited.iter().any(|alias| alias == name) {
             return Err("Cargo alias expansion is recursive".into());
         }
         visited.push(name.to_owned());
-        if target.starts_with('!') {
+        if first.starts_with('!') {
             return Err("Cargo shell aliases cannot determine a Telekio artifact role; use the direct Cargo command".into());
         }
-        expanded.splice(index..=index, target.split_whitespace().map(OsString::from));
+        expanded.splice(index..=index, target.into_iter().map(OsString::from));
     }
     Ok(expanded)
+}
+
+fn config(
+    cargo: &OsStr,
+    arguments: &[OsString],
+    key: Option<&str>,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    let mut command = Command::new(cargo);
+    // Cargo expands aliases before applying command-line configuration.
+    let mut options = global_options(arguments).into_iter();
+    while let Some(option) = options.next() {
+        if option == "--config" {
+            options.next();
+        } else if !option.to_string_lossy().starts_with("--config=") {
+            command.arg(option);
+        }
+    }
+    command.env("RUSTC_BOOTSTRAP", "1").args([
+        "-Z",
+        "unstable-options",
+        "config",
+        "get",
+        "--format",
+        "json-value",
+    ]);
+    if let Some(key) = key {
+        command.arg(key);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .to_owned()
+            .into());
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
 }
 
 pub(super) fn metadata(
