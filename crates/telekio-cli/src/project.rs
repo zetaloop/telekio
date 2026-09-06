@@ -152,23 +152,25 @@ fn patch_selected(
             .ok_or("Telekio config has no parent")?
             .join("tokio/Cargo.toml"),
     )?;
-    let mut selected_patch = false;
-    for package in packages.iter().filter(|package| {
-        package["id"]
-            .as_str()
-            .is_some_and(|id| reachable.contains(&id))
-            && package["name"].as_str() == Some("tokio")
-    }) {
+    let mut patched = false;
+    for package in packages
+        .iter()
+        .filter(|package| package["name"].as_str() == Some("tokio"))
+    {
         let path = package["manifest_path"]
             .as_str()
             .and_then(|path| fs::canonicalize(path).ok());
         if path.as_ref() == Some(&expected) {
-            selected_patch = true;
-        } else if crates_io(package) || generated_patch(package) {
+            patched = true;
+        } else if package["id"]
+            .as_str()
+            .is_some_and(|id| reachable.contains(&id))
+            && (crates_io(package) || generated_patch(package))
+        {
             return Err("generated Tokio patch was not selected; run `telekio cargo update -p tokio`, or `cargo update -p tokio` after `telekio init`, then adjust incompatible Tokio version requirements".into());
         }
     }
-    Ok(selected_patch)
+    Ok(patched)
 }
 
 fn selected_packages<'a>(
@@ -180,13 +182,16 @@ fn selected_packages<'a>(
     let workspace =
         cargo::has_option(arguments, "--workspace") || cargo::has_option(arguments, "--all");
     let requested = cargo::option_values(arguments, &["-p", "--package"]);
-    let members = metadata[if workspace {
-        "workspace_members"
+    let workspace_members = metadata["workspace_members"]
+        .as_array()
+        .ok_or("Cargo metadata has no workspace members")?;
+    let members = if workspace {
+        workspace_members
     } else {
-        "workspace_default_members"
-    }]
-    .as_array()
-    .ok_or("Cargo metadata has no workspace members")?;
+        metadata["workspace_default_members"]
+            .as_array()
+            .ok_or("Cargo metadata has no default workspace members")?
+    };
     let member_ids = members
         .iter()
         .filter_map(serde_json::Value::as_str)
@@ -201,9 +206,7 @@ fn selected_packages<'a>(
     let requested_ids = packages
         .iter()
         .filter(|package| {
-            package["id"]
-                .as_str()
-                .is_some_and(|id| member_ids.contains(&id))
+            workspace_members.contains(&package["id"])
                 && package["name"]
                     .as_str()
                     .is_some_and(|name| names.contains(&name))
