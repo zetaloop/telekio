@@ -9,7 +9,7 @@ Telekio lets Rust plugins use their host's Tokio runtime. Plugins use ordinary `
 Install the Cargo wrapper:
 
 ```sh
-cargo install telekio-cli
+cargo binstall telekio-cli
 ```
 
 An application can keep its usual Tokio dependency and code:

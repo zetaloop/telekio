@@ -1,0 +1,130 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: What to do with the built artifacts
+        type: choice
+        options: [dryrun, draft]
+        default: dryrun
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    uses: ./.github/workflows/check.yml
+
+  build:
+    name: CLI (${{ matrix.target }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: i686-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: armv7-unknown-linux-gnueabihf
+            os: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    env:
+      RUSTFLAGS: ${{ contains(matrix.target, '-windows-') && '-C target-feature=+crt-static' || '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        run: rustup update --no-self-update stable
+      - uses: mlugg/setup-zig@v2
+        if: runner.os == 'Linux'
+        with:
+          cache-key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        if: runner.os == 'Linux'
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build and package
+        id: dist
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: telekio
+          target: ${{ matrix.target }}
+          build-tool: ${{ runner.os == 'Linux' && 'cargo-zigbuild' || 'cargo' }}
+          locked: true
+          dry-run: true
+          include: LICENSE,README.md
+      - name: Run CLI
+        if: matrix.target != 'armv7-unknown-linux-gnueabihf'
+        run: target/${{ matrix.target }}/release/telekio${{ runner.os == 'Windows' && '.exe' || '' }} --version
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.target }}
+          path: ${{ steps.dist.outputs.tar || steps.dist.outputs.zip }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-tags: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Release tag
+        id: tag
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag=$(git tag --points-at HEAD --list 'v*' | head -1)
+          fi
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "telekio-cli") | .version')
+          if [ -n "$tag" ] && [ "$tag" != "v$version" ]; then
+            echo "tag $tag does not match the CLI version $version" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Create draft release
+        if: steps.tag.outputs.tag != '' && (github.event_name == 'push' || inputs.mode == 'draft')
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: gh release create "$TAG" dist/* --verify-tag --draft --title "$TAG" --generate-notes
