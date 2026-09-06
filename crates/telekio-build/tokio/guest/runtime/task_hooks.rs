@@ -16,7 +16,8 @@ pub(crate) struct Hooks {
 
 struct TaskHookState {
     location: SpawnLocation,
-    polling: bool,
+    // Rescheduling can overlap one poll's start with the preceding poll's stop.
+    polls: usize,
     terminated: bool,
 }
 
@@ -75,7 +76,7 @@ impl Hooks {
             id,
             TaskHookState {
                 location,
-                polling: false,
+                polls: 0,
                 terminated: false,
             },
         );
@@ -93,15 +94,15 @@ impl Hooks {
         let mut tasks = self.tasks.lock().unwrap();
         let state = tasks
             .get_mut(&id)
-            .expect("Tokio task hook received an unknown task");
+            .unwrap_or_else(|| panic!("Tokio task hook {event:?} received unknown task {id:?}"));
         let spawned_at = state.location;
         match event {
-            ::telekio::TaskEvent::PollStart => state.polling = true,
-            ::telekio::TaskEvent::PollStop => state.polling = false,
+            ::telekio::TaskEvent::PollStart => state.polls += 1,
+            ::telekio::TaskEvent::PollStop => state.polls -= 1,
             ::telekio::TaskEvent::Terminate => state.terminated = true,
             ::telekio::TaskEvent::Spawn => {}
         }
-        if state.terminated && !state.polling {
+        if state.terminated && state.polls == 0 {
             tasks.remove(&id);
         }
         drop(tasks);
