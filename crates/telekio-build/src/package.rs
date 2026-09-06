@@ -70,14 +70,7 @@ pub fn prepare_tests() -> Result<PathBuf, Box<dyn Error>> {
 }
 
 pub fn prepare_guest() -> Result<PathBuf, Box<dyn Error>> {
-    let generated = prepare_tokio()?;
-    let native =
-        env::var_os("CARGO_CFG_UNIX").is_some() || env::var_os("CARGO_CFG_WINDOWS").is_some();
-    let generated = if native && env::var_os("CARGO_CFG_LOOM").is_none() {
-        prepare_guest_with(generated, package_dependency("telekio", true))?
-    } else {
-        generated
-    };
+    let generated = prepare_guest_with(prepare_tokio()?, package_dependency("telekio", true))?;
     let root = generated.join("src/lib.rs");
     fs::write(&root, include_source(&fs::read_to_string(&root)?)?)?;
     Ok(generated)
@@ -380,8 +373,12 @@ fn registry_dependency(guest: bool) -> Value {
 }
 
 fn prepare_guest_with(generated: PathBuf, telekio: Value) -> Result<PathBuf, Box<dyn Error>> {
-    patch_manifest(&generated.join("Cargo.toml"), telekio)?;
-    transform::guest(&generated)?;
+    let native =
+        env::var_os("CARGO_CFG_UNIX").is_some() || env::var_os("CARGO_CFG_WINDOWS").is_some();
+    if native && env::var_os("CARGO_CFG_LOOM").is_none() {
+        patch_manifest(&generated.join("Cargo.toml"), telekio)?;
+        transform::guest(&generated)?;
+    }
     Ok(generated)
 }
 
