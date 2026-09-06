@@ -33,6 +33,7 @@ pub(super) fn status(
             .iter()
             .position(|argument| argument == "--")
             .unwrap_or(arguments.len());
+        // Cargo extensions receive configuration after the subcommand.
         let mut cargo = Vec::new();
         let mut configs = Vec::new();
         let mut index = 0;
@@ -59,44 +60,49 @@ pub(super) fn status(
     Ok(command.args(arguments).status()?)
 }
 
-pub(super) fn offline(arguments: &[OsString]) -> bool {
-    arguments
-        .iter()
-        .any(|argument| matches!(argument.to_str(), Some("--offline" | "--frozen")))
-}
-
 pub(super) fn expand_alias(
     cargo: &OsStr,
     arguments: &[OsString],
 ) -> Result<Vec<OsString>, Box<dyn Error>> {
     let mut expanded = arguments.to_vec();
-    for _ in 0..16 {
-        if operation(&expanded).is_some() {
-            return Ok(expanded);
-        }
-        let output = Command::new(cargo)
-            .args(global_options(&expanded))
-            .args(["--color", "never", "--list"])
-            .output()?;
-        if !output.status.success() {
-            return Ok(expanded);
-        }
-        let aliases = String::from_utf8(output.stdout)?;
-        let Some((index, target)) = expanded.iter().enumerate().find_map(|(index, argument)| {
-            let name = argument.to_str()?;
-            aliases.lines().find_map(|line| {
-                let (alias, target) = line.split_once(" alias: ")?;
-                (alias.trim() == name).then_some((index, target))
-            })
-        }) else {
-            return Ok(expanded);
+    if operation(&expanded).is_none_or(builtin) {
+        return Ok(expanded);
+    }
+    let output = Command::new(cargo)
+        .args(global_options(arguments))
+        .args(["--color", "never", "--list"])
+        .output()?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .to_owned()
+            .into());
+    }
+    let aliases = String::from_utf8(output.stdout)?;
+    let mut visited = Vec::new();
+    while let Some(index) = command_index(&expanded) {
+        let Some(name) = expanded[index].to_str() else {
+            break;
         };
+        if builtin(name) {
+            break;
+        }
+        let Some(target) = aliases.lines().find_map(|line| {
+            let (alias, target) = line.split_once(" alias: ")?;
+            (alias.trim() == name).then_some(target)
+        }) else {
+            break;
+        };
+        if visited.iter().any(|alias| alias == name) {
+            return Err("Cargo alias expansion is recursive".into());
+        }
+        visited.push(name.to_owned());
         if target.starts_with('!') {
             return Err("Cargo shell aliases cannot determine a Telekio artifact role; use the direct Cargo command".into());
         }
         expanded.splice(index..=index, target.split_whitespace().map(OsString::from));
     }
-    Err("Cargo alias expansion is recursive".into())
+    Ok(expanded)
 }
 
 pub(super) fn metadata(
@@ -140,16 +146,19 @@ pub(super) fn manifest(
     command
         .args(global_options(arguments))
         .args(["locate-project", "--message-format", "plain"]);
-    if let Some(path) = option(arguments, "--manifest-path") {
+    if let Some(path) = option(arguments, &["--manifest-path", "-m"]) {
         command.arg("--manifest-path").arg(path);
-    } else if let Some(path) = option(arguments, "--path") {
+    } else if let Some(path) = option(arguments, &["--path"]) {
         command
             .arg("--manifest-path")
             .arg(Path::new(path).join("Cargo.toml"));
     }
     let output = command.output()?;
     if !output.status.success() {
-        return Ok(None);
+        return Err(String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .to_owned()
+            .into());
     }
     let path = String::from_utf8(output.stdout)?;
     Ok(Some(PathBuf::from(path.trim())))
@@ -177,10 +186,7 @@ fn metadata_options(arguments: &[OsString]) -> Vec<OsString> {
         }
         if argument.starts_with("--features=")
             || (argument.starts_with("-F") && argument.len() > "-F".len())
-            || matches!(
-                argument,
-                "--all-features" | "--no-default-features" | "--locked" | "--frozen" | "--offline"
-            )
+            || matches!(argument, "--all-features" | "--no-default-features")
         {
             options.push(arguments[index].clone());
         } else if let Some(target) = argument.strip_prefix("--target=") {
@@ -204,14 +210,16 @@ fn global_options(arguments: &[OsString]) -> Vec<&OsStr> {
             index += 1;
             continue;
         }
-        if argument == "--config" || argument == "-C" {
+        if matches!(argument, "--config" | "-C" | "-Z") {
             if let Some(value) = arguments.get(index + 1) {
                 options.extend([arguments[index].as_os_str(), value.as_os_str()]);
             }
             index += 2;
             continue;
         }
-        if argument.starts_with("--config=") || argument.starts_with("-C=") {
+        if argument.starts_with("--config=")
+            || (argument.starts_with("-C") || argument.starts_with("-Z")) && argument.len() > 2
+        {
             options.push(arguments[index].as_os_str());
             index += 1;
             continue;
@@ -222,65 +230,79 @@ fn global_options(arguments: &[OsString]) -> Vec<&OsStr> {
 }
 
 pub(super) fn operation(arguments: &[OsString]) -> Option<&str> {
-    const COMMANDS: &[&str] = &[
-        "add",
-        "bench",
-        "build",
-        "check",
-        "clean",
-        "clippy",
-        "doc",
-        "fetch",
-        "fix",
-        "fmt",
-        "generate-lockfile",
-        "help",
-        "info",
-        "init",
-        "install",
-        "locate-project",
-        "login",
-        "logout",
-        "metadata",
-        "new",
-        "owner",
-        "package",
-        "publish",
-        "remove",
-        "report",
-        "run",
-        "rustc",
-        "rustdoc",
-        "search",
-        "test",
-        "tree",
-        "uninstall",
-        "update",
-        "vendor",
-        "yank",
-    ];
-    arguments
-        .iter()
-        .take_while(|argument| *argument != "--")
-        .filter_map(|argument| argument.to_str())
-        .find(|argument| COMMANDS.contains(argument))
+    arguments.get(command_index(arguments)?)?.to_str()
 }
 
-pub(super) fn kind(operation: &str) -> Kind {
-    match operation {
+fn command_index(arguments: &[OsString]) -> Option<usize> {
+    let mut arguments = arguments.iter().enumerate();
+    while let Some((index, argument)) = arguments.next() {
+        let argument = argument.to_str()?;
+        if argument == "--" {
+            break;
+        }
+        if matches!(argument, "--config" | "--color" | "--explain" | "-C" | "-Z") {
+            arguments.next();
+        } else if !argument.starts_with('-') && !(index == 0 && argument.starts_with('+')) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn builtin(operation: &str) -> bool {
+    kind(operation).is_some() && !matches!(operation, "clippy" | "fmt")
+}
+
+pub(super) fn kind(operation: &str) -> Option<Kind> {
+    Some(match operation {
         "bench" | "build" | "check" | "clippy" | "doc" | "fix" | "package" | "publish" | "test"
         | "tree" => Kind::Packages,
         "fetch" | "generate-lockfile" | "update" => Kind::Workspace,
         "add" | "install" | "remove" | "run" | "rustc" | "rustdoc" => Kind::Single,
         "metadata" | "vendor" => Kind::Output,
-        "clean" | "fmt" | "help" | "info" | "init" | "locate-project" | "login" | "logout"
-        | "new" | "owner" | "report" | "search" | "uninstall" | "yank" => Kind::Plain,
-        _ => Kind::Output,
+        "clean" | "config" | "fmt" | "help" | "info" | "init" | "locate-project" | "login"
+        | "logout" | "new" | "owner" | "report" | "search" | "uninstall" | "yank" => Kind::Plain,
+        _ => return None,
+    })
+}
+
+pub(super) fn selected_packages(
+    cargo: &OsStr,
+    arguments: &[OsString],
+    manifest: &Path,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut command = Command::new(cargo);
+    command
+        .args(global_options(arguments))
+        .args([
+            "tree", "--depth", "0", "--prefix", "none", "--color", "never",
+        ])
+        .arg("--manifest-path")
+        .arg(manifest);
+    if has_option(arguments, "--workspace") || has_option(arguments, "--all") {
+        command.arg("--workspace");
     }
+    for package in option_values(arguments, &["--package", "-p"]) {
+        command.arg("--package").arg(package);
+    }
+    for package in option_values(arguments, &["--exclude"]) {
+        command.arg("--exclude").arg(package);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .to_owned()
+            .into());
+    }
+    Ok(String::from_utf8(output.stdout)?
+        .lines()
+        .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
+        .collect())
 }
 
 pub(super) fn package_selects_workspace(operation: &str) -> bool {
-    operation != "install" && matches!(kind(operation), Kind::Packages | Kind::Single)
+    operation != "install" && matches!(kind(operation), Some(Kind::Packages | Kind::Single))
 }
 
 pub(super) fn package_arguments(arguments: &[OsString], packages: &[String]) -> Vec<OsString> {
@@ -328,8 +350,12 @@ pub(super) fn option_values<'a>(arguments: &'a [OsString], names: &[&str]) -> Ve
                 if let Some(value) = arguments.get(index + 1) {
                     values.push(value.as_os_str());
                 }
-            } else if *name == "-p" && argument.starts_with("-p") && argument.len() > "-p".len() {
-                values.push(OsStr::new(&argument["-p".len()..]));
+            } else if name.len() == 2 && argument.starts_with(name) && argument.len() > name.len() {
+                values.push(OsStr::new(
+                    argument[name.len()..]
+                        .strip_prefix('=')
+                        .unwrap_or(&argument[name.len()..]),
+                ));
             } else if let Some(value) = argument.strip_prefix(&format!("{name}=")) {
                 values.push(OsStr::new(value));
             }
@@ -349,6 +375,6 @@ pub(super) fn has_option(arguments: &[OsString], name: &str) -> bool {
         })
 }
 
-fn option<'a>(arguments: &'a [OsString], name: &str) -> Option<&'a OsStr> {
-    option_values(arguments, &[name]).into_iter().next()
+fn option<'a>(arguments: &'a [OsString], names: &[&str]) -> Option<&'a OsStr> {
+    option_values(arguments, names).into_iter().next()
 }

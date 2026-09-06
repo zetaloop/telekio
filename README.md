@@ -45,6 +45,8 @@ telekio cargo clippy
 
 The wrapper applies a Cargo patch to Tokio, including transitive dependencies. The generated implementation forwards runtime operations to the host through a C ABI.
 
+The wrapper prepares `Cargo.lock` before running the requested Cargo command and keeps the resulting lockfile.
+
 For a persistent source-project patch:
 
 ```sh

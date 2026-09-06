@@ -41,9 +41,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         if command == "init" {
             let mut workspace = arguments.clone();
             workspace.push(OsString::from("--workspace"));
-            let info = project::info(&cargo, &workspace, &manifest)?;
+            let metadata = cargo::metadata(&cargo, &workspace, &manifest, None, true)?;
+            let info = project::info(&cargo, &workspace, &manifest, &metadata)?;
             let role = info.role().ok_or("a persistent Tokio patch cannot represent both Telekio host and guest packages; use `telekio cargo` for this workspace")?;
-            project::init(&manifest, role, cargo::offline(&arguments))?;
+            project::init(&manifest, role, cargo::has_option(&arguments, "--offline"))?;
         } else {
             project::remove(&manifest)?;
         }
@@ -55,39 +56,38 @@ fn run() -> Result<(), Box<dyn Error>> {
     arguments.remove(0);
     let interpreted = cargo::expand_alias(&cargo, &arguments)?;
     let operation = cargo::operation(&interpreted);
-    if operation.is_some_and(|operation| cargo::kind(operation) == cargo::Kind::Plain) {
+    if operation.is_none_or(|operation| cargo::kind(operation) == Some(cargo::Kind::Plain))
+        || cargo::has_option(&arguments, "--help")
+        || cargo::has_option(&arguments, "-h")
+    {
         return exit(cargo::status(&cargo, &arguments, None)?);
     }
     let manifest = cargo::manifest(&cargo, &interpreted)?;
     let Some(manifest) = manifest else {
-        let config = prepare_config(Role::Host, false, cargo::offline(&interpreted))?;
-        return exit(cargo::status(&cargo, &interpreted, Some(&config))?);
+        let config = prepare_config(Role::Host, false)?;
+        return exit(cargo::status(&cargo, &arguments, Some(&config))?);
     };
-    let info = project::info(&cargo, &interpreted, &manifest)?;
+    let metadata = cargo::metadata(&cargo, &interpreted, &manifest, None, false)?;
+    if !project::uses_tokio(&metadata) {
+        return exit(cargo::status(&cargo, &arguments, None)?);
+    }
+    let info = project::info(&cargo, &interpreted, &manifest, &metadata)?;
     if let Some(role) = info.role() {
-        let config = prepare_config(
-            role,
-            role == Role::Guest && info.workspace_mixed,
-            cargo::offline(&interpreted),
-        )?;
-        let selected = project::verify_patch(
+        let config = prepare_config(role, role == Role::Guest && info.workspace_mixed)?;
+        project::verify_patch(
             &cargo,
             &interpreted,
             &manifest,
             &config,
             &info.package_names(),
         )?;
-        return if selected {
-            exit(cargo::status(&cargo, &interpreted, Some(&config))?)
-        } else {
-            exit(cargo::status(&cargo, &arguments, None)?)
-        };
+        return exit(cargo::status(&cargo, &arguments, Some(&config))?);
     }
 
     let operation = operation.ok_or(
         "this Cargo extension cannot determine mixed Telekio package selection; select one role",
     )?;
-    match cargo::kind(operation) {
+    match cargo::kind(operation).unwrap_or(cargo::Kind::Output) {
         cargo::Kind::Packages if info.workspace_selection => {
             let (host, guest) = info.groups();
             run_groups(&cargo, &interpreted, &manifest, host, guest, true)
@@ -130,9 +130,9 @@ fn run_groups(
         } else {
             arguments.to_vec()
         };
-        let config = prepare_config(role, true, cargo::offline(&arguments))?;
-        let selected = project::verify_patch(cargo, &arguments, manifest, &config, packages)?;
-        let status = cargo::status(cargo, &arguments, selected.then_some(config.as_path()))?;
+        let config = prepare_config(role, true)?;
+        project::verify_patch(cargo, &arguments, manifest, &config, packages)?;
+        let status = cargo::status(cargo, &arguments, Some(&config))?;
         if !status.success() {
             if !cargo::has_option(&arguments, "--keep-going")
                 && !cargo::has_option(&arguments, "--no-fail-fast")
@@ -149,7 +149,7 @@ fn run_groups(
     }
 }
 
-fn prepare_config(role: Role, mixed: bool, offline: bool) -> Result<PathBuf, Box<dyn Error>> {
+fn prepare_config(role: Role, mixed: bool) -> Result<PathBuf, Box<dyn Error>> {
     let cache = cache_directory()?.join(match (role, mixed) {
         (Role::Host, _) => "host/tokio",
         (Role::Guest, false) => "guest/tokio",
@@ -160,9 +160,9 @@ fn prepare_config(role: Role, mixed: bool, offline: bool) -> Result<PathBuf, Box
     let lock = File::create(cache_parent.join("lock"))?;
     lock.lock()?;
     if role == Role::Guest && mixed {
-        telekio_build::prepare_mixed_guest_patch(&cache, offline)?;
+        telekio_build::prepare_mixed_guest_patch(&cache, false)?;
     } else {
-        telekio_build::prepare_patch(&cache, role, offline)?;
+        telekio_build::prepare_patch(&cache, role, false)?;
     }
     let config = write_config(&cache)?;
     drop(lock);

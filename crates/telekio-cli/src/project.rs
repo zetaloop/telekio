@@ -39,29 +39,35 @@ impl ProjectInfo {
     }
 }
 
-pub(super) fn verify_patch(
-    cargo: &OsStr,
-    arguments: &[OsString],
-    manifest: &Path,
-    config: &Path,
-    packages: &[String],
-) -> Result<bool, Box<dyn Error>> {
-    if cargo::operation(arguments) == Some("update") {
-        return Ok(true);
-    }
-    patch_selected(cargo, arguments, manifest, config, packages)
+pub(super) fn uses_tokio(metadata: &serde_json::Value) -> bool {
+    metadata["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|package| {
+            (package["name"].as_str() == Some("tokio")
+                && (crates_io(package) || generated_patch(package)))
+                || package["dependencies"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|dependency| {
+                        dependency["name"].as_str() == Some("tokio") && crates_io(dependency)
+                    })
+        })
 }
 
 pub(super) fn info(
     cargo: &OsStr,
     arguments: &[OsString],
     manifest: &Path,
+    metadata: &serde_json::Value,
 ) -> Result<ProjectInfo, Box<dyn Error>> {
-    let metadata = cargo::metadata(cargo, arguments, manifest, None, true)?;
     let packages = metadata["packages"]
         .as_array()
         .ok_or("Cargo metadata has no packages")?;
-    let (selected, workspace_selection) = selected_packages(&metadata, arguments, packages)?;
+    let (selected, workspace_selection) =
+        selected_packages(cargo, arguments, manifest, metadata, packages)?;
     let mut host = Vec::new();
     let mut guest = Vec::new();
     for id in selected {
@@ -119,14 +125,17 @@ fn package_role(package: &serde_json::Value) -> Role {
     if guest { Role::Guest } else { Role::Host }
 }
 
-fn patch_selected(
+pub(super) fn verify_patch(
     cargo: &OsStr,
     arguments: &[OsString],
     manifest: &Path,
     config: &Path,
     selected: &[String],
-) -> Result<bool, Box<dyn Error>> {
+) -> Result<(), Box<dyn Error>> {
     let metadata = cargo::metadata(cargo, arguments, manifest, Some(config), false)?;
+    if cargo::operation(arguments) == Some("update") {
+        return Ok(());
+    }
     let packages = metadata["packages"]
         .as_array()
         .ok_or("Cargo metadata has no packages")?;
@@ -152,7 +161,6 @@ fn patch_selected(
             .ok_or("Telekio config has no parent")?
             .join("tokio/Cargo.toml"),
     )?;
-    let mut patched = false;
     for package in packages
         .iter()
         .filter(|package| package["name"].as_str() == Some("tokio"))
@@ -160,22 +168,23 @@ fn patch_selected(
         let path = package["manifest_path"]
             .as_str()
             .and_then(|path| fs::canonicalize(path).ok());
-        if path.as_ref() == Some(&expected) {
-            patched = true;
-        } else if package["id"]
-            .as_str()
-            .is_some_and(|id| reachable.contains(&id))
+        if path.as_ref() != Some(&expected)
+            && package["id"]
+                .as_str()
+                .is_some_and(|id| reachable.contains(&id))
             && (crates_io(package) || generated_patch(package))
         {
             return Err("generated Tokio patch was not selected; run `telekio cargo update -p tokio`, or `cargo update -p tokio` after `telekio init`, then adjust incompatible Tokio version requirements".into());
         }
     }
-    Ok(patched)
+    Ok(())
 }
 
 fn selected_packages<'a>(
-    metadata: &'a serde_json::Value,
+    cargo: &OsStr,
     arguments: &[OsString],
+    manifest: &Path,
+    metadata: &'a serde_json::Value,
     packages: &'a [serde_json::Value],
 ) -> Result<(Vec<&'a str>, bool), Box<dyn Error>> {
     let operation = cargo::operation(arguments);
@@ -192,42 +201,28 @@ fn selected_packages<'a>(
             .as_array()
             .ok_or("Cargo metadata has no default workspace members")?
     };
-    let member_ids = members
+    let mut selected = members
         .iter()
         .filter_map(serde_json::Value::as_str)
         .collect::<Vec<_>>();
-    let mut names = requested
-        .iter()
-        .filter_map(|value| value.to_str())
-        .map(|value| value.split_once('@').map_or(value, |(name, _)| name))
-        .collect::<Vec<_>>();
-    names.sort_unstable();
-    names.dedup();
-    let requested_ids = packages
-        .iter()
-        .filter(|package| {
-            workspace_members.contains(&package["id"])
-                && package["name"]
-                    .as_str()
-                    .is_some_and(|name| names.contains(&name))
-        })
-        .filter_map(|package| package["id"].as_str())
-        .collect::<Vec<_>>();
-    let selects_workspace = operation.is_some_and(cargo::package_selects_workspace)
-        && (requested.is_empty() || requested_ids.len() == names.len());
-    let mut selected = if workspace || requested.is_empty() || !selects_workspace {
-        member_ids
-    } else {
-        requested_ids
-    };
-    let excluded = cargo::option_values(arguments, &["--exclude"]);
-    selected.retain(|id| {
-        packages
+    let mut selects_workspace = operation.is_some_and(cargo::package_selects_workspace);
+    if selects_workspace && (!requested.is_empty() || cargo::has_option(arguments, "--exclude")) {
+        let names = cargo::selected_packages(cargo, arguments, manifest)?;
+        let ids = packages
             .iter()
-            .find(|package| package["id"].as_str() == Some(id))
-            .and_then(|package| package["name"].as_str())
-            .is_none_or(|name| !excluded.iter().any(|excluded| *excluded == name))
-    });
+            .filter(|package| {
+                workspace_members.contains(&package["id"])
+                    && package["name"]
+                        .as_str()
+                        .is_some_and(|name| names.iter().any(|selected| selected == name))
+            })
+            .filter_map(|package| package["id"].as_str())
+            .collect::<Vec<_>>();
+        selects_workspace = ids.len() == names.len();
+        if selects_workspace {
+            selected = ids;
+        }
+    }
     if selected.is_empty() {
         return Err("Cargo package selection matched no packages".into());
     }
