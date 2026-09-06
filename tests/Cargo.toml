@@ -1,0 +1,10 @@
+[workspace]
+members = ["features", "host", "plugin", "upstream"]
+default-members = ["upstream"]
+resolver = "3"
+
+[patch.crates-io]
+telekio = { path = "../crates/telekio" }
+telekio-build = { path = "../crates/telekio-build" }
+telekio-host = { path = "../crates/telekio-host" }
+telekio-tokio = { path = "../crates/telekio-tokio" }

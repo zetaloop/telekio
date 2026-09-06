@@ -44,11 +44,12 @@ Mounted source needs the separate rustfmt invocation because Cargo does not disc
 
 ### Behavior
 
-Use `telekio_build::prepare_tests()` from a temporary driver build script to generate the complete upstream Tokio test tree. This function preserves upstream tests and supplies their Telekio dependencies. With `suite` set to the returned directory:
+The `tests` workspace generates the complete upstream Tokio tree through `telekio_build::prepare_tests()`. Use cargo-nextest for test targets and Cargo for doctests:
 
 ```sh
-cargo test --manifest-path "$suite/Cargo.toml" --features full,test-util,telekio-test --tests --no-fail-fast
-cargo test --manifest-path "$suite/Cargo.toml" --features full,test-util,telekio-test --lib
+export CARGO_TARGET_DIR="$PWD/target"
+suite=$(cargo run --quiet --manifest-path tests/Cargo.toml -p upstream-tests)
+cargo nextest run --manifest-path "$suite/Cargo.toml" --config-file .config/nextest.toml --features full,test-util,telekio-test
 cargo test --manifest-path "$suite/Cargo.toml" --features full,test-util,telekio-test --doc
 ```
 
@@ -56,7 +57,9 @@ Unstable checks set both `RUSTFLAGS='--cfg tokio_unstable'` and `RUSTDOCFLAGS='-
 
 Run the complete upstream suite. Investigate failures with temporary reproductions and compare them against unmodified Tokio in the same environment.
 
-Also exercise independently built plugins: invocation, future polling, cancellation, detach, and unload. Reuse target directories. Test on available native systems and use cross-compilation for other Tokio targets. Taskdump checks enable `taskdump` in both the guest and host.
+The `plugin-host` executable in `tests` accepts the built `plugin` library path and exercises invocation, future polling, cancellation, detach, and unload. Build both roles with `cargo run -p telekio-cli -- cargo build --manifest-path tests/Cargo.toml --workspace`. The platform and cargo-hack feature matrices are in `.github/workflows/check.yml`.
+
+Reuse target directories. Test on available native systems and use cross-compilation for other Tokio targets. Taskdump checks enable `taskdump` in both the guest and host.
 
 ### Packaging
 
