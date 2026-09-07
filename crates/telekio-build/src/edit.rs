@@ -115,12 +115,7 @@ fn add_attr_in(
 
     let mut replacements = Vec::new();
     for source_tree in root.descendants().filter_map(ast::TokenTree::cast) {
-        let text = source_tree.syntax().text().to_string();
-        let Some(inner) = text
-            .strip_prefix('{')
-            .and_then(|text| text.strip_suffix('}'))
-            .map(str::to_owned)
-        else {
+        let Some(inner) = token_tree_source(&source_tree) else {
             continue;
         };
         let owner = source_tree
@@ -160,12 +155,7 @@ fn add_attr_in(
         } else {
             edited
         };
-        let replacement_tree = parse(&format!("replacement! {{ {inner} }}"))?
-            .syntax()
-            .descendants()
-            .find_map(ast::MacroCall::cast)
-            .and_then(|call| call.token_tree())
-            .ok_or("replacement macro has no token tree")?;
+        let replacement_tree = replace_token_tree(&source_tree, &inner)?;
         retain_outermost(&mut replacements, source_tree, replacement_tree);
     }
     if replacements.is_empty() {
@@ -438,11 +428,21 @@ fn retarget_use_in(source: &mut String, name: &str, path: &str) -> Result<bool, 
                 .find_map(ast::UseTreeList::cast)
                 .is_some() =>
         {
-            for element in use_tree_removal(tree) {
-                editor.delete(element);
+            let removal = use_tree_removal(tree);
+            if let [element] = removal.as_slice()
+                && let Some(item) = element.as_node().cloned().and_then(ast::Use::cast)
+            {
+                let tree = item.use_tree().ok_or("use item has no tree")?;
+                let replacement = make::use_tree(make::path_from_text(path), None, None, false);
+                editor.replace(tree.syntax(), replacement.syntax().clone());
+                commit(source, editor)?;
+            } else {
+                for element in removal {
+                    editor.delete(element);
+                }
+                commit(source, editor)?;
+                add_use(source, path)?;
             }
-            commit(source, editor)?;
-            add_use(source, path)?;
             return Ok(true);
         }
         [tree] => {
@@ -457,23 +457,13 @@ fn retarget_use_in(source: &mut String, name: &str, path: &str) -> Result<bool, 
 
     let mut replacements = Vec::new();
     for source_tree in root.descendants().filter_map(ast::TokenTree::cast) {
-        let text = source_tree.syntax().text().to_string();
-        let Some(mut inner) = text
-            .strip_prefix('{')
-            .and_then(|text| text.strip_suffix('}'))
-            .map(str::to_owned)
-        else {
+        let Some(mut inner) = token_tree_source(&source_tree) else {
             continue;
         };
         if parse(&inner).is_err() || !retarget_use_in(&mut inner, name, path)? {
             continue;
         }
-        let replacement = parse(&format!("replacement! {{ {inner} }}"))?
-            .syntax()
-            .descendants()
-            .find_map(ast::MacroCall::cast)
-            .and_then(|call| call.token_tree())
-            .ok_or("replacement macro has no token tree")?;
+        let replacement = replace_token_tree(&source_tree, &inner)?;
         retain_outermost(&mut replacements, source_tree, replacement);
     }
     if replacements.is_empty() {
@@ -901,23 +891,13 @@ fn edit_scope(
         let Some(inner_scope) = scope.inside(&source_tree) else {
             continue;
         };
-        let text = source_tree.syntax().text().to_string();
-        let Some(mut inner) = text
-            .strip_prefix('{')
-            .and_then(|text| text.strip_suffix('}'))
-            .map(str::to_owned)
-        else {
+        let Some(mut inner) = token_tree_source(&source_tree) else {
             continue;
         };
         if parse(&inner).is_err() || !edit_scope(&mut inner, inner_scope, edit)? {
             continue;
         }
-        let replacement = parse(&format!("replacement! {{ {inner} }}"))?
-            .syntax()
-            .descendants()
-            .find_map(ast::MacroCall::cast)
-            .and_then(|call| call.token_tree())
-            .ok_or("replacement macro has no token tree")?;
+        let replacement = replace_token_tree(&source_tree, &inner)?;
         retain_outermost(&mut replacements, source_tree, replacement);
     }
     if replacements.is_empty() {
@@ -1107,12 +1087,30 @@ fn immediate_token_trees(tree: &ast::TokenTree) -> impl Iterator<Item = ast::Tok
 }
 
 fn token_tree_source(tree: &ast::TokenTree) -> Option<String> {
-    tree.syntax()
-        .text()
-        .to_string()
-        .strip_prefix('{')
-        .and_then(|source| source.strip_suffix('}'))
-        .map(str::to_owned)
+    let text = tree.syntax().text().to_string();
+    match (text.chars().next()?, text.chars().next_back()?) {
+        ('{', '}') | ('(', ')') | ('[', ']') => Some(text[1..text.len() - 1].to_owned()),
+        _ => None,
+    }
+}
+
+fn replace_token_tree(
+    tree: &ast::TokenTree,
+    inner: &str,
+) -> Result<ast::TokenTree, Box<dyn Error>> {
+    let text = tree.syntax().text().to_string();
+    let end = if text.starts_with('{') { "" } else { ";" };
+    let source = format!(
+        "replacement!{}{inner}{}{end}",
+        &text[..1],
+        &text[text.len() - 1..]
+    );
+    parse(&source)?
+        .syntax()
+        .descendants()
+        .find_map(ast::MacroCall::cast)
+        .and_then(|call| call.token_tree())
+        .ok_or_else(|| "replacement macro has no token tree".into())
 }
 
 fn retain_outermost(
@@ -1156,6 +1154,17 @@ fn add_use(source: &mut String, path: &str) -> Result<(), Box<dyn Error>> {
 }
 
 fn use_tree_removal(tree: &ast::UseTree) -> Vec<SyntaxElement> {
+    if let Some(parent) = tree.syntax().parent() {
+        if let Some(item) = ast::Use::cast(parent.clone()) {
+            return vec![item.syntax().clone().into()];
+        }
+        if let Some(list) = ast::UseTreeList::cast(parent)
+            && list.use_trees().count() == 1
+            && let Some(parent) = list.syntax().parent().and_then(ast::UseTree::cast)
+        {
+            return use_tree_removal(&parent);
+        }
+    }
     let mut elements = vec![tree.syntax().clone().into()];
     let mut after = Vec::new();
     let mut cursor = tree.syntax().next_sibling_or_token();
