@@ -32,9 +32,12 @@ jobs:
         run: |
           rustup update --no-self-update stable
           rustup component add rustfmt clippy
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: actionlint
+      - name: Install actionlint
+        run: |
+          mkdir "$RUNNER_TEMP/actionlint"
+          curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash -o "$RUNNER_TEMP/download-actionlint.bash"
+          bash "$RUNNER_TEMP/download-actionlint.bash" latest "$RUNNER_TEMP/actionlint"
+          echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: |
