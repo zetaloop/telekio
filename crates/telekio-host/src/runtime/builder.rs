@@ -1,16 +1,20 @@
 use std::{io, panic::resume_unwind, sync::Arc, time::Duration};
 
-use telekio::{Flavor, RuntimeConfig, Status, StringCallback, TaskCallback, TaskEvent};
+use telekio::{Flavor, RuntimeConfig, Status, StringCallback};
+#[cfg(tokio_unstable)]
+use telekio::{TaskCallback, TaskEvent};
 
 use crate::owner::OwnerState;
 
 use super::{HandleContext, LocalSlot, RuntimeKind, handle::handle_context};
 use crate::callback::CallbackOwner;
 
+#[cfg(tokio_unstable)]
 struct TaskCallbackOwner(TaskCallback);
 
 struct StringCallbackOwner(StringCallback);
 
+#[cfg(tokio_unstable)]
 impl TaskCallbackOwner {
     fn call(&self, event: TaskEvent, meta: &tokio::runtime::TaskMeta<'_>) {
         self.0
@@ -35,11 +39,38 @@ pub(super) fn build_runtime(
     config: RuntimeConfig,
     owner: Arc<OwnerState>,
 ) -> io::Result<(RuntimeKind, Arc<HandleContext>, usize)> {
+    #[cfg(not(tokio_unstable))]
+    if config.disable_lifo_slot != 0
+        || config.eager_driver_handoff != 0
+        || config.alternative_timer != 0
+        || config.unhandled_panic != 0
+        || config.poll_histogram.kind != 0
+        || config.task_callback.is_some()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Tokio host requires tokio_unstable for the requested runtime options",
+        ));
+    }
+    #[cfg(not(all(
+        tokio_unstable,
+        feature = "schedule-latency",
+        any(unix, windows),
+        target_pointer_width = "64"
+    )))]
+    if config.schedule_histogram.kind != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Tokio host does not support schedule-latency histograms in this configuration",
+        ));
+    }
+
     let thread_name = Arc::new(StringCallbackOwner(config.thread_name));
     let after_start = Arc::new(CallbackOwner(config.after_start));
     let before_stop = Arc::new(CallbackOwner(config.before_stop));
     let before_park = Arc::new(CallbackOwner(config.before_park));
     let after_unpark = Arc::new(CallbackOwner(config.after_unpark));
+    #[cfg(tokio_unstable)]
     let task_callback = Arc::new(TaskCallbackOwner(config.task_callback));
     let mut builder = match config.flavor {
         Flavor::CurrentThread | Flavor::Local => tokio::runtime::Builder::new_current_thread(),
@@ -76,22 +107,31 @@ pub(super) fn build_runtime(
     #[cfg(any(unix, windows))]
     builder.max_io_events_per_tick(config.max_io_events_per_tick);
     builder.telekio_rng_seed(config.rng_one, config.rng_two);
-    if config.disable_lifo_slot != 0 {
-        builder.telekio_disable_lifo_slot();
+    #[cfg(tokio_unstable)]
+    {
+        if config.disable_lifo_slot != 0 {
+            builder.telekio_disable_lifo_slot();
+        }
+        if config.eager_driver_handoff != 0 {
+            builder.telekio_enable_eager_driver_handoff();
+        }
+        if config.alternative_timer != 0 {
+            builder.telekio_enable_alt_timer();
+        }
+        builder.telekio_unhandled_panic(config.unhandled_panic != 0);
+        builder.telekio_poll_histogram(
+            config.poll_histogram.kind,
+            config.poll_histogram.a,
+            config.poll_histogram.b,
+            config.poll_histogram.c,
+        );
     }
-    if config.eager_driver_handoff != 0 {
-        builder.telekio_enable_eager_driver_handoff();
-    }
-    if config.alternative_timer != 0 {
-        builder.telekio_enable_alt_timer();
-    }
-    builder.telekio_unhandled_panic(config.unhandled_panic != 0);
-    builder.telekio_poll_histogram(
-        config.poll_histogram.kind,
-        config.poll_histogram.a,
-        config.poll_histogram.b,
-        config.poll_histogram.c,
-    );
+    #[cfg(all(
+        tokio_unstable,
+        feature = "schedule-latency",
+        any(unix, windows),
+        target_pointer_width = "64"
+    ))]
     builder.telekio_schedule_histogram(
         config.schedule_histogram.kind,
         config.schedule_histogram.a,
@@ -115,6 +155,7 @@ pub(super) fn build_runtime(
     if after_unpark.is_some() {
         builder.on_thread_unpark(move || after_unpark.call());
     }
+    #[cfg(tokio_unstable)]
     if task_callback.0.is_some() {
         let callback = Arc::clone(&task_callback);
         builder.on_task_spawn(move |meta| {

@@ -28,6 +28,7 @@ pub(super) unsafe extern "C" fn start(context: *const c_void) -> DumpResult {
 }
 
 #[cfg(all(
+    tokio_unstable,
     feature = "taskdump",
     target_os = "linux",
     any(
@@ -102,6 +103,7 @@ mod imp {
 }
 
 #[cfg(not(all(
+    tokio_unstable,
     feature = "taskdump",
     target_os = "linux",
     any(

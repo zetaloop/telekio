@@ -13,6 +13,8 @@ use crate::{
     transform::{self, crate_preamble, include_source},
 };
 
+const HOST_FEATURES: &[&str] = &["schedule-latency", "taskdump"];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {
     Host,
@@ -31,11 +33,13 @@ pub fn prepare_tests() -> Result<PathBuf, Box<dyn Error>> {
         "telekio-test".to_owned(),
         Value::Array(vec![Value::String("dep:telekio-host".to_owned())]),
     );
-    features
-        .get_mut("taskdump")
-        .and_then(Value::as_array_mut)
-        .ok_or("Tokio manifest has no taskdump feature")?
-        .push(Value::String("telekio-host/taskdump".to_owned()));
+    for &feature in HOST_FEATURES {
+        features
+            .get_mut(feature)
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| format!("Tokio manifest has no {feature} feature"))?
+            .push(Value::String(format!("telekio-host/{feature}")));
+    }
     let mut host_dependency = package_dependency("telekio-host", false);
     host_dependency
         .as_table_mut()
@@ -140,31 +144,25 @@ fn patch_current(
         .and_then(|target| target.get("dependencies"))
         .and_then(Value::as_table)
         .is_some_and(|dependencies| dependencies.contains_key("telekio-host"));
-    let forwards_schedule_latency = features
-        .and_then(|features| features.get("schedule-latency"))
-        .and_then(Value::as_array)
-        .is_some_and(|feature| {
-            feature
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|feature| feature.starts_with("telekio-host"))
-        });
-    let forwards_taskdump = features
-        .and_then(|features| features.get("taskdump"))
-        .and_then(Value::as_array)
-        .is_some_and(|features| {
-            features
-                .iter()
-                .any(|feature| feature.as_str() == Some("telekio-host/taskdump"))
-        });
+    let host_features = HOST_FEATURES.iter().all(|feature| {
+        let forwarded = format!("telekio-host/{feature}");
+        features
+            .and_then(|features| features.get(*feature))
+            .and_then(Value::as_array)
+            .is_some_and(|features| {
+                features
+                    .iter()
+                    .any(|feature| feature.as_str() == Some(&forwarded))
+            })
+            == (dependency_role == Role::Host)
+    });
     Ok(version == Some(concat!("=", env!("CARGO_PKG_VERSION")))
         && rust_version == Some(env!("CARGO_PKG_RUST_VERSION"))
         && features.is_some_and(|features| features.contains_key("telekio-test"))
         && !dependencies.contains_key("telekio-host")
         && build.contains("rustc-cfg=telekio_host") == (source_role == Role::Host)
         && host == (dependency_role == Role::Host)
-        && forwards_taskdump == (dependency_role == Role::Host)
-        && !forwards_schedule_latency
+        && host_features
         && dependencies
             .values()
             .chain(
@@ -239,11 +237,13 @@ fn write_patch(
         .ok_or("Tokio manifest has no features")?;
     features.insert("telekio-test".to_owned(), Value::Array(Vec::new()));
     if dependency_role == Role::Host {
-        features
-            .get_mut("taskdump")
-            .and_then(Value::as_array_mut)
-            .ok_or("Tokio manifest has no taskdump feature")?
-            .push(Value::String("telekio-host/taskdump".to_owned()));
+        for &feature in HOST_FEATURES {
+            features
+                .get_mut(feature)
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| format!("Tokio manifest has no {feature} feature"))?
+                .push(Value::String(format!("telekio-host/{feature}")));
+        }
     }
 
     let dependencies = manifest

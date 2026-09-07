@@ -110,9 +110,14 @@ impl Handle {
     #[doc(hidden)]
     #[track_caller]
     pub fn metric_bucket(&self, metric: Metric, worker: usize, bucket: usize) -> u64 {
+        self.try_metric(metric, worker, bucket).unwrap()
+    }
+
+    #[doc(hidden)]
+    pub fn try_metric(&self, metric: Metric, worker: usize, bucket: usize) -> std::io::Result<u64> {
         let result = unsafe { ((*self.raw.api).metric)(self.raw.context, metric, worker, bucket) };
-        result.call.into_io_result().unwrap();
-        result.value
+        result.call.into_io_result()?;
+        Ok(result.value)
     }
 
     #[doc(hidden)]

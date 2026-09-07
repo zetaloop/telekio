@@ -31,7 +31,17 @@ pub(crate) fn worker_index(handle: &::telekio::Handle) -> Option<usize> {
 
 #[cfg(target_has_atomic = "64")]
 pub(crate) fn record_worker(connection: &Connection) {
-    if let Some(worker) = worker_index(&connection.handle) {
+    // Thread identities are collected when the host provides worker metrics.
+    let Ok(worker) = connection
+        .handle
+        .try_metric(::telekio::Metric::CurrentWorkerIndex, 0, 0)
+    else {
+        return;
+    };
+    if let Some(worker) = worker
+        .checked_sub(1)
+        .and_then(|worker| usize::try_from(worker).ok())
+    {
         connection.workers.store(worker);
     }
 }

@@ -305,19 +305,6 @@ pub(super) fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 pub(super) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
-    let target = source.join("src/runtime/scheduler/multi_thread/handle.rs");
-    let mut contents = fs::read_to_string(&target)?;
-    edit::append_fields(
-        &mut contents,
-        "Handle",
-        &[edit::Field {
-            visibility: Some("pub(crate)"),
-            name: "telekio",
-            ty: "super::worker::telekio::WorkerObservers",
-        }],
-    )?;
-    fs::write(target, contents)?;
-
     let target = source.join("src/runtime/scheduler/multi_thread/stats.rs");
     let mut contents = fs::read_to_string(&target)?;
     mount(
@@ -343,6 +330,23 @@ pub(super) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
         },
         "Instant::now",
         "telekio::finish_poll_batch",
+    )?;
+    fs::write(target, contents)?;
+
+    if std::env::var_os("CARGO_CFG_TOKIO_UNSTABLE").is_none() {
+        return Ok(());
+    }
+
+    let target = source.join("src/runtime/scheduler/multi_thread/handle.rs");
+    let mut contents = fs::read_to_string(&target)?;
+    edit::append_fields(
+        &mut contents,
+        "Handle",
+        &[edit::Field {
+            visibility: Some("pub(crate)"),
+            name: "telekio",
+            ty: "super::worker::telekio::WorkerObservers",
+        }],
     )?;
     fs::write(target, contents)?;
 

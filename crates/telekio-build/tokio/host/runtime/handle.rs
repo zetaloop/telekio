@@ -3,8 +3,10 @@ use super::*;
 use std::os::fd::BorrowedFd;
 #[cfg(target_os = "linux")]
 use std::os::fd::RawFd;
+#[cfg(any(tokio_unstable, target_os = "freebsd", target_os = "linux"))]
 use std::sync::Arc;
 
+#[cfg(tokio_unstable)]
 type Observer = Arc<dyn Fn(usize) + Send + Sync>;
 
 #[cfg(target_os = "freebsd")]
@@ -100,7 +102,7 @@ impl Handle {
         &self,
         future: F,
         id: u64,
-        location: &'static std::panic::Location<'static>,
+        location: Option<&'static std::panic::Location<'static>>,
     ) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
@@ -113,7 +115,7 @@ impl Handle {
         &self,
         function: F,
         id: u64,
-        location: &'static std::panic::Location<'static>,
+        location: Option<&'static std::panic::Location<'static>>,
     ) -> JoinHandle<R>
     where
         F: FnOnce() -> R + Send + 'static,
@@ -129,7 +131,7 @@ impl Handle {
         &self,
         future: F,
         id: u64,
-        location: &'static std::panic::Location<'static>,
+        location: Option<&'static std::panic::Location<'static>>,
     ) -> JoinHandle<F::Output>
     where
         F: Future + 'static,
@@ -179,6 +181,7 @@ impl Handle {
         crate::runtime::scheduler::multi_thread::telekio::record_poll(actual, guest);
     }
 
+    #[cfg(tokio_unstable)]
     #[doc(hidden)]
     pub fn telekio_add_worker_observer(&self, observer: Observer) -> Option<u64> {
         match &self.inner {
@@ -190,6 +193,7 @@ impl Handle {
         }
     }
 
+    #[cfg(tokio_unstable)]
     #[doc(hidden)]
     pub fn telekio_remove_worker_observer(&self, id: Option<u64>) {
         #[cfg(feature = "rt-multi-thread")]

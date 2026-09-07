@@ -37,9 +37,9 @@ pub(crate) struct HostWorkerMetrics {
     #[cfg(tokio_unstable)]
     pub(crate) overflow_count: HostMetric,
     #[cfg(tokio_unstable)]
-    pub(crate) poll_count_histogram: Option<HostHistogram>,
+    pub(crate) poll_count_histogram: HostHistogram,
     #[cfg(feature = "schedule-latency")]
-    pub(crate) schedule_latency_histogram: Option<HostHistogram>,
+    pub(crate) schedule_latency_histogram: HostHistogram,
 }
 
 #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
@@ -51,6 +51,7 @@ pub(crate) struct HostSchedulerMetrics {
 #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
 pub(crate) struct HostHistogram {
     connection: Arc<Connection>,
+    enabled: ::telekio::Metric,
     buckets: ::telekio::Metric,
     count: ::telekio::Metric,
     start: ::telekio::Metric,
@@ -74,6 +75,14 @@ impl HostMetric {
 
 #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
 impl HostHistogram {
+    pub(crate) fn is_some(&self) -> bool {
+        self.connection.handle.metric(self.enabled, 0) != 0
+    }
+
+    pub(crate) fn as_ref(&self) -> Option<&Self> {
+        self.is_some().then_some(self)
+    }
+
     pub(crate) fn num_buckets(&self) -> usize {
         self.connection.handle.metric(self.buckets, 0) as usize
     }
@@ -182,15 +191,14 @@ impl Handle {
             worker,
         };
         #[cfg(tokio_unstable)]
-        let histogram = |enabled, buckets, count, start, end| {
-            (self.connection().handle.metric(enabled, 0) != 0).then(|| HostHistogram {
-                connection: Arc::clone(self.connection()),
-                buckets,
-                count,
-                start,
-                end,
-                worker,
-            })
+        let histogram = |enabled, buckets, count, start, end| HostHistogram {
+            connection: Arc::clone(self.connection()),
+            enabled,
+            buckets,
+            count,
+            start,
+            end,
+            worker,
         };
         HostWorkerMetrics {
             #[cfg(tokio_unstable)]

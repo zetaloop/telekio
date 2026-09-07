@@ -23,7 +23,7 @@ impl Id {
 
     pub(crate) fn with_telekio<R>(
         value: u64,
-        location: &'static Location<'static>,
+        location: Option<&'static Location<'static>>,
         call: impl FnOnce() -> R,
     ) -> R {
         struct Reset {
@@ -40,7 +40,7 @@ impl Id {
 
         let reset = Reset {
             id: TASK_ID.replace(Some(Id::from_telekio(value))),
-            location: TASK_LOCATION.replace(Some(location)),
+            location: TASK_LOCATION.replace(location),
         };
         assert!(
             reset.id.is_none(),

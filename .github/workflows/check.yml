@@ -232,9 +232,17 @@ jobs:
         run: |
           "$CARGO_TARGET_DIR/debug/telekio${{ runner.os == 'Windows' && '.exe' || '' }}" cargo check-all --locked
       - name: Plugin lifecycle
-        timeout-minutes: 2
         run: |
-          "$CARGO_TARGET_DIR/debug/plugin-host${{ runner.os == 'Windows' && '.exe' || '' }}" "$CARGO_TARGET_DIR/debug/${{ matrix.library }}"
+          telekio="$CARGO_TARGET_DIR/debug/telekio${{ runner.os == 'Windows' && '.exe' || '' }}"
+          host="$CARGO_TARGET_DIR/debug/plugin-host${{ runner.os == 'Windows' && '.exe' || '' }}"
+          for host_flags in "" "--cfg tokio_unstable"; do
+            RUSTFLAGS="$host_flags" "$telekio" cargo build --manifest-path tests/Cargo.toml -p plugin-host --locked
+            for guest_flags in "" "--cfg tokio_unstable"; do
+              printf 'host: %s; guest: %s\n' "${host_flags:-stable}" "${guest_flags:-stable}"
+              RUSTFLAGS="$guest_flags" "$telekio" cargo build --manifest-path tests/Cargo.toml -p plugin --locked
+              "$host" "$CARGO_TARGET_DIR/debug/${{ matrix.library }}"
+            done
+          done
 
   cross:
     name: Cross-check (${{ matrix.target }})

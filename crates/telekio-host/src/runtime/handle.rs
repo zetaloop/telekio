@@ -1,7 +1,9 @@
+#[cfg(tokio_unstable)]
+use std::sync::Mutex;
 use std::{
     ffi::c_void,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use telekio::{CallResult, Flavor, Future, NameResult, OwnedBytes, RawHandle, Status};
@@ -9,10 +11,11 @@ use telekio::{CallResult, Flavor, Future, NameResult, OwnedBytes, RawHandle, Sta
 use crate::owner::OwnerState;
 use crate::{host_panic, result};
 
+#[cfg(tokio_unstable)]
+use super::metrics::WorkerObserver;
 use super::{
     LocalSlot, RUNTIME_API,
     context::{GuestFuture, block_on_result},
-    metrics::WorkerObserver,
 };
 
 pub(crate) struct HandleContext {
@@ -21,6 +24,7 @@ pub(crate) struct HandleContext {
     pub(super) flavor: Flavor,
     pub(super) local: Option<Arc<LocalSlot>>,
     pub(super) io_enabled: bool,
+    #[cfg(tokio_unstable)]
     pub(super) worker_observer: Mutex<Option<WorkerObserver>>,
 }
 
@@ -73,6 +77,7 @@ pub(super) fn handle_context(
         local,
         io_enabled,
         flavor,
+        #[cfg(tokio_unstable)]
         worker_observer: Mutex::new(None),
     })
 }

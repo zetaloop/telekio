@@ -1,8 +1,9 @@
-use super::{Builder, TimerFlavor};
-use crate::{
-    runtime::{HistogramBuilder, UnhandledPanic},
-    util::{rand::RngSeed, RngSeedGenerator},
-};
+use super::Builder;
+#[cfg(tokio_unstable)]
+use super::TimerFlavor;
+#[cfg(tokio_unstable)]
+use crate::runtime::{HistogramBuilder, UnhandledPanic};
+use crate::util::{rand::RngSeed, RngSeedGenerator};
 
 impl Builder {
     #[doc(hidden)]
@@ -10,6 +11,7 @@ impl Builder {
         self.seed_generator = RngSeedGenerator::new(RngSeed::from_telekio(one, two));
     }
 
+    #[cfg(tokio_unstable)]
     #[doc(hidden)]
     pub fn telekio_unhandled_panic(&mut self, shutdown: bool) {
         self.unhandled_panic = if shutdown {
@@ -19,22 +21,26 @@ impl Builder {
         };
     }
 
+    #[cfg(tokio_unstable)]
     #[doc(hidden)]
     pub fn telekio_disable_lifo_slot(&mut self) {
         self.disable_lifo_slot = true;
     }
 
+    #[cfg(tokio_unstable)]
     #[doc(hidden)]
     pub fn telekio_enable_eager_driver_handoff(&mut self) {
         self.enable_eager_driver_handoff = true;
     }
 
+    #[cfg(tokio_unstable)]
     #[doc(hidden)]
     pub fn telekio_enable_alt_timer(&mut self) {
         self.enable_time();
         self.timer_flavor = TimerFlavor::Alternative;
     }
 
+    #[cfg(tokio_unstable)]
     #[doc(hidden)]
     pub fn telekio_poll_histogram(&mut self, kind: u8, a: u64, b: u64, c: u64) {
         let histogram = HistogramBuilder::telekio_from_parts(kind, a, b, c);
@@ -44,6 +50,7 @@ impl Builder {
         }
     }
 
+    #[cfg(all(tokio_unstable, feature = "schedule-latency"))]
     #[doc(hidden)]
     pub fn telekio_schedule_histogram(&mut self, kind: u8, a: u64, b: u64, c: u64) {
         #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
