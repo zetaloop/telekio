@@ -194,6 +194,10 @@ jobs:
           echo "source=$source" >> "$GITHUB_OUTPUT"
       - name: Feature combinations
         run: cargo hack check --manifest-path "${{ steps.tokio.outputs.source }}/Cargo.toml" --lib --feature-powerset --depth 2 --exclude-features "${{ matrix.exclude }}" --keep-going
+      - name: Backend features
+        run: cargo hack check -p telekio-tokio --each-feature --exclude-features "${{ matrix.exclude }}" --keep-going
+      - name: Host features
+        run: cargo hack check -p telekio-host --feature-powerset --depth 2 --exclude-features "${{ matrix.exclude }}" --keep-going
 
   integration:
     name: Plugins and Cargo (${{ matrix.os }})

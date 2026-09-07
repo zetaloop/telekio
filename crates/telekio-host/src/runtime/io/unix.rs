@@ -11,8 +11,8 @@ impl AsRawFd for RawIo {
 
 #[derive(Clone)]
 enum UnixIo {
-    Fd(Arc<tokio::io::unix::AsyncFd<RawIo>>),
-    #[cfg(target_os = "freebsd")]
+    Fd(Arc<tokio::runtime::telekio::AsyncFd<RawIo>>),
+    #[cfg(all(target_os = "freebsd", feature = "net"))]
     Aio(Arc<tokio::runtime::telekio::TelekioAio>),
 }
 
@@ -35,12 +35,12 @@ pub(super) fn register_inner(
                 ));
             }
             let _guard = context.handle.enter();
-            UnixIo::Fd(Arc::new(tokio::io::unix::AsyncFd::with_interest(
+            UnixIo::Fd(Arc::new(tokio::runtime::telekio::AsyncFd::with_interest(
                 RawIo(raw),
                 host_interest(interest)?,
             )?))
         }
-        #[cfg(target_os = "freebsd")]
+        #[cfg(all(target_os = "freebsd", feature = "net"))]
         IoKind::Aio => {
             if !interest.contains(IoInterest::AIO) && !interest.contains(IoInterest::LIO) {
                 return Err(io::Error::new(
@@ -73,13 +73,13 @@ impl Registration {
         &self,
         context: &mut std::task::Context<'_>,
         interest: IoInterest,
-    ) -> std::task::Poll<io::Result<(u8, tokio::io::Ready, bool)>> {
+    ) -> std::task::Poll<io::Result<(u8, tokio::runtime::telekio::Ready, bool)>> {
         match &self.io {
             UnixIo::Fd(io) => match host_interest(interest) {
                 Ok(interest) => io.poll_telekio_ready(context, interest),
                 Err(error) => std::task::Poll::Ready(Err(error)),
             },
-            #[cfg(target_os = "freebsd")]
+            #[cfg(all(target_os = "freebsd", feature = "net"))]
             UnixIo::Aio(io) => io.poll_ready(context),
         }
     }
@@ -89,7 +89,7 @@ impl Registration {
         Box::pin(async move {
             match io {
                 UnixIo::Fd(io) => io.telekio_ready(host_interest(interest)?).await,
-                #[cfg(target_os = "freebsd")]
+                #[cfg(all(target_os = "freebsd", feature = "net"))]
                 UnixIo::Aio(io) => io.ready().await,
             }
             .map(host_ready)
@@ -113,7 +113,7 @@ impl Registration {
                 Ok(interest) => std::task::Poll::Ready(Ok(io.try_telekio_ready(interest))),
                 Err(error) => std::task::Poll::Ready(Err(error)),
             },
-            #[cfg(target_os = "freebsd")]
+            #[cfg(all(target_os = "freebsd", feature = "net"))]
             UnixIo::Aio(io) => io.try_ready(),
         })
     }
@@ -121,7 +121,7 @@ impl Registration {
     pub(super) fn clear(&self, tick: u8, ready: IoReady) -> io::Result<()> {
         match &self.io {
             UnixIo::Fd(io) => io.clear_telekio_ready(tick, tokio_ready(ready)),
-            #[cfg(target_os = "freebsd")]
+            #[cfg(all(target_os = "freebsd", feature = "net"))]
             UnixIo::Aio(io) => io.clear_ready(tick, tokio_ready(ready)),
         }
         Ok(())

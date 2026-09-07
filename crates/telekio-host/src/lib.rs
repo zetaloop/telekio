@@ -3,7 +3,7 @@ mod owner;
 mod runtime;
 
 pub use owner::{Attach, Attachment, Owner};
-#[cfg(unix)]
+#[cfg(all(unix, feature = "process"))]
 pub use runtime::reap_process;
 pub use runtime::{Runtime, build_root, next_task_id};
 

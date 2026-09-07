@@ -1,47 +1,43 @@
-use super::*;
+use std::{ffi::c_void, io};
 
-pub(super) struct Registration;
+use telekio::{
+    CallResult, Callback, IoDriverRegistration, IoDriverResult, IoError, IoInterest,
+    IoRegistration, IoResource, IoResult, Status,
+};
 
-pub(super) fn register_inner(
-    _: &HandleContext,
+pub(super) unsafe extern "C" fn register(
+    _: *const c_void,
     _: IoResource,
     _: IoInterest,
-) -> io::Result<Registration> {
-    Err(io::Error::new(
+) -> IoResult {
+    let error = io::Error::new(
         io::ErrorKind::Unsupported,
-        "this I/O resource is not supported on this platform",
-    ))
-}
-
-pub(super) unsafe extern "C" fn poll_registration(
-    _: *mut std::ffi::c_void,
-    _: IoInterest,
-    _: *const Waker,
-) -> IoPoll {
-    io_poll(Poll::Ready, call_ok(), IoReady::SHUTDOWN)
-}
-
-pub(super) unsafe extern "C" fn ready(
-    _: *mut std::ffi::c_void,
-    _: IoInterest,
-) -> IoOperationResult {
-    IoOperationResult {
-        call: CallResult::ok(),
-        operation: telekio::IoOperation::empty(),
+        "Tokio host I/O is unavailable in this configuration",
+    );
+    IoResult {
+        call: CallResult::error(&error.to_string()),
+        error: IoError::from_error(&error),
+        registration: IoRegistration::empty(),
     }
 }
 
-pub(super) unsafe extern "C" fn try_operate(_: *mut std::ffi::c_void, _: IoRequest) -> IoPoll {
-    io_poll(Poll::Ready, call_ok(), IoReady::SHUTDOWN)
-}
-
-pub(super) unsafe extern "C" fn try_ready(_: *mut std::ffi::c_void, _: IoInterest) -> IoPoll {
-    io_poll(Poll::Ready, call_ok(), IoReady::SHUTDOWN)
-}
-
-pub(super) unsafe extern "C" fn clear(_: *mut std::ffi::c_void, _: u8, _: IoReady) -> IoCallResult {
-    IoCallResult {
-        call: CallResult::ok(),
-        error: IoError::none(),
+pub(super) unsafe extern "C" fn register_driver(
+    _: *const c_void,
+    _: IoResource,
+    callback: Callback,
+) -> IoDriverResult {
+    let call = crate::host_callback(|| drop(callback));
+    let error = io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Tokio host I/O driver registration is unavailable in this configuration",
+    );
+    IoDriverResult {
+        call: if call.status == Status::Ok {
+            CallResult::error(&error.to_string())
+        } else {
+            call
+        },
+        error: IoError::from_error(&error),
+        registration: IoDriverRegistration::empty(),
     }
 }

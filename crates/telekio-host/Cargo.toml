@@ -9,16 +9,21 @@ readme.workspace = true
 description = "Host runtime backend for Telekio"
 
 [features]
+full = ["fs", "net", "process", "rt-multi-thread", "signal", "time"]
+fs = ["tokio/fs"]
+io-uring = ["tokio/io-uring"]
+net = ["tokio/net"]
+process = ["tokio/process"]
+rt-multi-thread = ["tokio/rt-multi-thread"]
+signal = ["tokio/signal"]
+time = ["tokio/time"]
+test-util = ["tokio/test-util", "time"]
 schedule-latency = ["tokio/schedule-latency"]
 taskdump = ["tokio/taskdump"]
 
 [dependencies]
 telekio = { version = "=0.1.0", path = "../telekio" }
-tokio = { version = "=0.1.0", path = "../telekio-tokio", package = "telekio-tokio", features = ["net", "rt", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
-
-[target."cfg(unix)".dependencies]
-libc = "0.2.168"
-tokio = { version = "=0.1.0", path = "../telekio-tokio", package = "telekio-tokio", features = ["process"] }
+tokio = { version = "=0.1.0", path = "../telekio-tokio", package = "telekio-tokio", features = ["rt", "sync"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }

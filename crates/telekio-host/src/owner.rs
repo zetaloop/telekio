@@ -239,6 +239,7 @@ impl OwnerState {
         true
     }
 
+    #[cfg(feature = "rt-multi-thread")]
     pub(super) fn wake_activities(&self) {
         let wakers = self
             .state
@@ -502,6 +503,17 @@ impl<T: Send + 'static> HostResource<T> {
         }
     }
 
+    #[cfg(any(
+        feature = "time",
+        feature = "net",
+        all(unix, any(feature = "process", feature = "signal")),
+        all(
+            tokio_unstable,
+            target_os = "linux",
+            feature = "fs",
+            feature = "io-uring"
+        )
+    ))]
     pub(super) fn with<R>(&self, call: impl FnOnce(&T) -> R) -> Result<R, String> {
         self.value
             .lock()

@@ -1,27 +1,27 @@
 use std::ffi::c_void;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "process"))]
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use telekio::CallResult;
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "process"))]
 use crate::host_panic;
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "process"))]
 #[doc(hidden)]
 pub fn reap_process(id: u32) {
     tokio::runtime::telekio::reap_process(id);
 }
 
 pub(super) unsafe extern "C" fn reap_process_abi(_: *const c_void, id: u32) -> CallResult {
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "process"))]
     return match catch_unwind(AssertUnwindSafe(|| reap_process(id))) {
         Ok(()) => CallResult::ok(),
         Err(payload) => host_panic(&*payload),
     };
-    #[cfg(not(unix))]
+    #[cfg(not(all(unix, feature = "process")))]
     {
         let _ = id;
-        CallResult::ok()
+        CallResult::error("Tokio host Unix process handling requires process")
     }
 }

@@ -7,5 +7,5 @@ publish = false
 [dependencies]
 libloading = "0.9.0"
 telekio = { version = "0.1.0", path = "../../crates/telekio" }
-telekio-host = { version = "0.1.0", path = "../../crates/telekio-host" }
+telekio-host = { version = "0.1.0", path = "../../crates/telekio-host", features = ["full"] }
 tokio = { version = "0.1.0", path = "../../crates/telekio-tokio", package = "telekio-tokio", features = ["full"] }

@@ -3,6 +3,34 @@ mod builder;
 mod context;
 mod dump;
 mod handle;
+#[cfg(all(
+    any(unix, windows),
+    any(
+        feature = "net",
+        all(unix, any(feature = "process", feature = "signal")),
+        all(
+            tokio_unstable,
+            target_os = "linux",
+            feature = "fs",
+            feature = "io-uring"
+        )
+    )
+))]
+mod io;
+#[cfg(not(all(
+    any(unix, windows),
+    any(
+        feature = "net",
+        all(unix, any(feature = "process", feature = "signal")),
+        all(
+            tokio_unstable,
+            target_os = "linux",
+            feature = "fs",
+            feature = "io-uring"
+        )
+    )
+)))]
+#[path = "io/other.rs"]
 mod io;
 mod location;
 mod metrics;
@@ -13,7 +41,7 @@ mod task;
 mod time;
 
 pub(crate) use handle::{HandleContext, raw_handle};
-#[cfg(unix)]
+#[cfg(all(unix, feature = "process"))]
 pub use process::reap_process;
 pub use task::next_task_id;
 
@@ -104,6 +132,7 @@ unsafe impl Send for LocalSlot {}
 unsafe impl Sync for LocalSlot {}
 
 impl Runtime {
+    #[cfg(feature = "rt-multi-thread")]
     pub fn new() -> std::io::Result<Self> {
         tokio::runtime::Runtime::new().map(Self::from_tokio)
     }

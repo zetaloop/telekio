@@ -39,6 +39,50 @@ pub(super) fn build_runtime(
     config: RuntimeConfig,
     owner: Arc<OwnerState>,
 ) -> io::Result<(RuntimeKind, Arc<HandleContext>, usize)> {
+    #[cfg(not(any(
+        feature = "net",
+        all(unix, any(feature = "process", feature = "signal")),
+        all(
+            tokio_unstable,
+            target_os = "linux",
+            feature = "fs",
+            feature = "io-uring"
+        )
+    )))]
+    if config.enable_io != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Tokio host I/O is unavailable in this configuration",
+        ));
+    }
+    #[cfg(not(feature = "time"))]
+    if config.enable_time != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Tokio host timers require time",
+        ));
+    }
+    #[cfg(not(feature = "test-util"))]
+    if config.start_paused != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Tokio host paused time requires test-util",
+        ));
+    }
+    #[cfg(not(feature = "rt-multi-thread"))]
+    if config.eager_driver_handoff != 0 || config.alternative_timer != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Tokio host threaded scheduling options require rt-multi-thread",
+        ));
+    }
+    #[cfg(not(feature = "time"))]
+    if config.alternative_timer != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Tokio host alternative timers require time",
+        ));
+    }
     #[cfg(not(tokio_unstable))]
     if config.disable_lifo_slot != 0
         || config.eager_driver_handoff != 0
@@ -74,16 +118,35 @@ pub(super) fn build_runtime(
     let task_callback = Arc::new(TaskCallbackOwner(config.task_callback));
     let mut builder = match config.flavor {
         Flavor::CurrentThread | Flavor::Local => tokio::runtime::Builder::new_current_thread(),
+        #[cfg(feature = "rt-multi-thread")]
         Flavor::MultiThread => tokio::runtime::Builder::new_multi_thread(),
+        #[cfg(not(feature = "rt-multi-thread"))]
+        Flavor::MultiThread => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Tokio host multi-thread runtimes require rt-multi-thread",
+            ));
+        }
     };
 
-    #[cfg(any(unix, windows))]
+    #[cfg(any(
+        feature = "net",
+        all(unix, any(feature = "process", feature = "signal")),
+        all(
+            tokio_unstable,
+            target_os = "linux",
+            feature = "fs",
+            feature = "io-uring"
+        )
+    ))]
     if config.enable_io != 0 {
         builder.enable_io();
     }
+    #[cfg(feature = "time")]
     if config.enable_time != 0 {
         builder.enable_time();
     }
+    #[cfg(feature = "test-util")]
     if config.start_paused != 0 {
         builder.start_paused(true);
     }
@@ -104,7 +167,16 @@ pub(super) fn build_runtime(
         builder.global_queue_interval(config.global_queue_interval);
     }
     builder.event_interval(config.event_interval);
-    #[cfg(any(unix, windows))]
+    #[cfg(any(
+        feature = "net",
+        all(unix, any(feature = "process", feature = "signal")),
+        all(
+            tokio_unstable,
+            target_os = "linux",
+            feature = "fs",
+            feature = "io-uring"
+        )
+    ))]
     builder.max_io_events_per_tick(config.max_io_events_per_tick);
     builder.telekio_rng_seed(config.rng_one, config.rng_two);
     #[cfg(tokio_unstable)]
@@ -112,9 +184,11 @@ pub(super) fn build_runtime(
         if config.disable_lifo_slot != 0 {
             builder.telekio_disable_lifo_slot();
         }
+        #[cfg(feature = "rt-multi-thread")]
         if config.eager_driver_handoff != 0 {
             builder.telekio_enable_eager_driver_handoff();
         }
+        #[cfg(all(feature = "time", feature = "rt-multi-thread"))]
         if config.alternative_timer != 0 {
             builder.telekio_enable_alt_timer();
         }

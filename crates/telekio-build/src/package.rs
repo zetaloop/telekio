@@ -13,7 +13,18 @@ use crate::{
     transform::{self, crate_preamble, include_source},
 };
 
-const HOST_FEATURES: &[&str] = &["schedule-latency", "taskdump"];
+const HOST_FEATURES: &[&str] = &[
+    "fs",
+    "io-uring",
+    "net",
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "time",
+    "test-util",
+    "schedule-latency",
+    "taskdump",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {

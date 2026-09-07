@@ -6,7 +6,10 @@ use std::{
     task::{Context, Poll as RustPoll},
 };
 
-#[cfg(any(unix, windows))]
+#[cfg(any(
+    all(unix, feature = "process"),
+    all(any(unix, windows), feature = "signal")
+))]
 use telekio::SignalKind;
 use telekio::{
     CallResult, IoError, OperationPoll, OwnedBytes, Poll, SignalRequest, SignalResult, Status,
@@ -24,14 +27,14 @@ struct Signal {
     receiver: Box<dyn Receiver>,
 }
 
-#[cfg(unix)]
-impl Receiver for tokio::signal::unix::Signal {
+#[cfg(all(unix, any(feature = "signal", feature = "process")))]
+impl Receiver for tokio::runtime::telekio::Signal {
     fn poll_recv(&mut self, context: &mut Context<'_>) -> RustPoll<()> {
         self.poll_recv(context).map(|_| ())
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "signal"))]
 macro_rules! windows_receivers {
     ($($receiver:ty),+ $(,)?) => {
         $(
@@ -44,7 +47,7 @@ macro_rules! windows_receivers {
     };
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "signal"))]
 windows_receivers!(
     tokio::signal::windows::CtrlC,
     tokio::signal::windows::CtrlBreak,
@@ -89,12 +92,14 @@ pub(super) unsafe extern "C" fn signal(
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, any(feature = "signal", feature = "process")))]
 fn create(context: &HandleContext, request: SignalRequest) -> io::Result<Box<dyn Receiver>> {
     let _guard = context.handle.enter();
     if request.kind == SignalKind::Unix {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(request.number))
-            .map(|receiver| Box::new(receiver) as Box<dyn Receiver>)
+        tokio::runtime::telekio::signal(tokio::runtime::telekio::SignalKind::from_raw(
+            request.number,
+        ))
+        .map(|receiver| Box::new(receiver) as Box<dyn Receiver>)
     } else {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -103,7 +108,7 @@ fn create(context: &HandleContext, request: SignalRequest) -> io::Result<Box<dyn
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "signal"))]
 fn create(context: &HandleContext, request: SignalRequest) -> io::Result<Box<dyn Receiver>> {
     let _guard = context.handle.enter();
     match request.kind {
@@ -125,11 +130,14 @@ fn create(context: &HandleContext, request: SignalRequest) -> io::Result<Box<dyn
     }
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(any(
+    all(unix, feature = "process"),
+    all(any(unix, windows), feature = "signal")
+)))]
 fn create(_: &HandleContext, _: SignalRequest) -> io::Result<Box<dyn Receiver>> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "signals are unavailable on this platform",
+        "Tokio host signals are unavailable in this configuration",
     ))
 }
 

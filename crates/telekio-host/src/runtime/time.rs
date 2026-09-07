@@ -1,34 +1,48 @@
 use std::{
     ffi::c_void,
     panic::{AssertUnwindSafe, catch_unwind},
-    pin::Pin,
-    sync::{Arc, OnceLock},
-    task::{Context as TaskContext, Poll as RustPoll},
+    sync::OnceLock,
     time::Duration,
 };
-
-use telekio::{
-    CallResult, ClockSample, DurationParts, InstantOffset, OperationPoll, OwnedBytes, Poll, Status,
-    Timer, TimerResult, Waker,
+#[cfg(feature = "time")]
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context as TaskContext, Poll as RustPoll},
 };
 
+use telekio::{CallResult, ClockSample, DurationParts, InstantOffset, Timer, TimerResult};
+#[cfg(feature = "time")]
+use telekio::{OperationPoll, OwnedBytes, Poll, Status, Waker};
+
+#[cfg(feature = "time")]
 use super::HandleContext;
-use crate::owner::HostResource;
-use crate::{host_callback, host_panic, result};
+use crate::host_panic;
+#[cfg(feature = "time")]
+use crate::{host_callback, owner::HostResource, result};
 
 static CLOCK_ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
 
+#[cfg(feature = "time")]
 struct TimeTimer {
     sleep: Pin<Box<tokio::time::Sleep>>,
 }
 
 pub(super) unsafe extern "C" fn clock(context: *const c_void) -> telekio::ClockResult {
     match catch_unwind(AssertUnwindSafe(|| {
-        let context = unsafe { &*context.cast::<HandleContext>() };
         let origin = *CLOCK_ORIGIN.get_or_init(std::time::Instant::now);
         let realtime = instant_offset(origin, std::time::Instant::now());
-        let _guard = context.handle.enter();
-        let logical = instant_offset(origin, tokio::time::Instant::now().into_std());
+        #[cfg(feature = "time")]
+        let logical = {
+            let context = unsafe { &*context.cast::<HandleContext>() };
+            let _guard = context.handle.enter();
+            instant_offset(origin, tokio::time::Instant::now().into_std())
+        };
+        #[cfg(not(feature = "time"))]
+        let logical = {
+            let _ = context;
+            realtime
+        };
         ClockSample { realtime, logical }
     })) {
         Ok(value) => telekio::ClockResult {
@@ -51,14 +65,25 @@ pub(super) unsafe extern "C" fn clock(context: *const c_void) -> telekio::ClockR
     }
 }
 
+#[cfg(feature = "test-util")]
 pub(super) unsafe extern "C" fn pause(context: *const c_void) -> CallResult {
     time_call(context, tokio::time::pause)
 }
 
+#[cfg(feature = "test-util")]
 pub(super) unsafe extern "C" fn resume(context: *const c_void) -> CallResult {
     time_call(context, tokio::time::resume)
 }
 
+#[cfg(not(feature = "test-util"))]
+pub(super) unsafe extern "C" fn pause(_: *const c_void) -> CallResult {
+    CallResult::error("Tokio host time control requires test-util")
+}
+
+#[cfg(not(feature = "test-util"))]
+pub(super) use pause as resume;
+
+#[cfg(feature = "test-util")]
 fn time_call(context: *const c_void, call: impl FnOnce()) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     match catch_unwind(AssertUnwindSafe(|| {
@@ -70,6 +95,7 @@ fn time_call(context: *const c_void, call: impl FnOnce()) -> CallResult {
     }
 }
 
+#[cfg(feature = "test-util")]
 pub(super) unsafe extern "C" fn advance(
     context: *const c_void,
     duration: DurationParts,
@@ -86,6 +112,12 @@ pub(super) unsafe extern "C" fn advance(
     }
 }
 
+#[cfg(not(feature = "test-util"))]
+pub(super) unsafe extern "C" fn advance(_: *const c_void, _: DurationParts) -> CallResult {
+    CallResult::error("Tokio host time control requires test-util")
+}
+
+#[cfg(feature = "time")]
 pub(super) unsafe extern "C" fn timer(
     context: *const c_void,
     deadline: InstantOffset,
@@ -123,6 +155,15 @@ pub(super) unsafe extern "C" fn timer(
     }
 }
 
+#[cfg(not(feature = "time"))]
+pub(super) unsafe extern "C" fn timer(_: *const c_void, _: InstantOffset) -> TimerResult {
+    TimerResult {
+        call: CallResult::error("Tokio host timers require time"),
+        timer: Timer::empty(),
+    }
+}
+
+#[cfg(feature = "time")]
 unsafe extern "C" fn poll_time_timer(data: *mut c_void, waker: *const Waker) -> OperationPoll {
     match catch_unwind(AssertUnwindSafe(|| {
         let timer = unsafe { &*data.cast::<HostResource<TimeTimer>>() };
@@ -145,6 +186,7 @@ unsafe extern "C" fn poll_time_timer(data: *mut c_void, waker: *const Waker) -> 
     }
 }
 
+#[cfg(feature = "time")]
 unsafe extern "C" fn reset_time_timer(data: *mut c_void, deadline: InstantOffset) -> CallResult {
     let timer = unsafe { &*data.cast::<HostResource<TimeTimer>>() };
     match catch_unwind(AssertUnwindSafe(|| {
@@ -158,6 +200,7 @@ unsafe extern "C" fn reset_time_timer(data: *mut c_void, deadline: InstantOffset
     }
 }
 
+#[cfg(feature = "time")]
 unsafe extern "C" fn time_timer_elapsed(data: *const c_void) -> telekio::BoolResult {
     match catch_unwind(AssertUnwindSafe(|| {
         unsafe { &*data.cast::<HostResource<TimeTimer>>() }
@@ -175,15 +218,18 @@ unsafe extern "C" fn time_timer_elapsed(data: *const c_void) -> telekio::BoolRes
     }
 }
 
+#[cfg(feature = "time")]
 unsafe extern "C" fn release_time_timer(data: *mut c_void) -> CallResult {
     host_callback(|| unsafe { &*data.cast::<HostResource<TimeTimer>>() }.release())
 }
 
+#[cfg(feature = "time")]
 fn time_instant(offset: InstantOffset) -> tokio::time::Instant {
     let origin = *CLOCK_ORIGIN.get_or_init(std::time::Instant::now);
     tokio::time::Instant::from_std(offset.apply(origin))
 }
 
+#[cfg(feature = "time")]
 fn time_poll(state: Poll, call: CallResult) -> OperationPoll {
     OperationPoll { state, call }
 }

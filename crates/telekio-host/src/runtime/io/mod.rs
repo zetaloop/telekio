@@ -27,13 +27,7 @@ mod imp;
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod imp;
-#[cfg(not(any(unix, windows)))]
-#[path = "other.rs"]
-mod imp;
-
 use imp::{Registration, register_inner};
-#[cfg(not(any(unix, windows)))]
-use imp::{clear, poll_registration, ready, try_operate, try_ready};
 
 #[cfg(any(unix, windows))]
 type OperationFuture = Pin<Box<dyn Future<Output = io::Result<HostReady>> + Send>>;
@@ -200,26 +194,29 @@ unsafe extern "C" fn release_driver(data: *mut std::ffi::c_void) -> CallResult {
 }
 
 #[cfg(any(unix, windows))]
-fn host_interest(interest: IoInterest) -> io::Result<tokio::io::Interest> {
+fn host_interest(interest: IoInterest) -> io::Result<tokio::runtime::telekio::Interest> {
     let mut result = None;
     if interest.contains(IoInterest::READABLE) {
-        add_interest(&mut result, tokio::io::Interest::READABLE);
+        add_interest(&mut result, tokio::runtime::telekio::Interest::READABLE);
     }
     if interest.contains(IoInterest::WRITABLE) {
-        add_interest(&mut result, tokio::io::Interest::WRITABLE);
+        add_interest(&mut result, tokio::runtime::telekio::Interest::WRITABLE);
     }
     if interest.contains(IoInterest::ERROR) {
-        add_interest(&mut result, tokio::io::Interest::ERROR);
+        add_interest(&mut result, tokio::runtime::telekio::Interest::ERROR);
     }
     #[cfg(any(target_os = "android", target_os = "linux"))]
     if interest.contains(IoInterest::PRIORITY) {
-        add_interest(&mut result, tokio::io::Interest::PRIORITY);
+        add_interest(&mut result, tokio::runtime::telekio::Interest::PRIORITY);
     }
     result.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "I/O interest is empty"))
 }
 
 #[cfg(any(unix, windows))]
-fn add_interest(target: &mut Option<tokio::io::Interest>, interest: tokio::io::Interest) {
+fn add_interest(
+    target: &mut Option<tokio::runtime::telekio::Interest>,
+    interest: tokio::runtime::telekio::Interest,
+) {
     *target = Some(target.map_or(interest, |current| current | interest));
 }
 
@@ -350,7 +347,7 @@ unsafe extern "C" fn release_operation(data: *mut std::ffi::c_void) -> CallResul
 }
 
 #[cfg(any(unix, windows))]
-fn host_ready((tick, ready, shutdown): (u8, tokio::io::Ready, bool)) -> HostReady {
+fn host_ready((tick, ready, shutdown): (u8, tokio::runtime::telekio::Ready, bool)) -> HostReady {
     let mut ready = map_ready(ready);
     if shutdown {
         ready |= IoReady::SHUTDOWN;
@@ -359,7 +356,9 @@ fn host_ready((tick, ready, shutdown): (u8, tokio::io::Ready, bool)) -> HostRead
 }
 
 #[cfg(any(unix, windows))]
-fn ready_poll(result: std::task::Poll<io::Result<(u8, tokio::io::Ready, bool)>>) -> IoPoll {
+fn ready_poll(
+    result: std::task::Poll<io::Result<(u8, tokio::runtime::telekio::Ready, bool)>>,
+) -> IoPoll {
     match result {
         std::task::Poll::Pending => io_poll(Poll::Pending, call_ok(), IoReady::empty()),
         std::task::Poll::Ready(Ok(ready)) => ready_now(host_ready(ready)),
@@ -368,7 +367,7 @@ fn ready_poll(result: std::task::Poll<io::Result<(u8, tokio::io::Ready, bool)>>)
 }
 
 #[cfg(any(unix, windows))]
-fn map_ready(ready: tokio::io::Ready) -> IoReady {
+fn map_ready(ready: tokio::runtime::telekio::Ready) -> IoReady {
     let mut result = IoReady::empty();
     if ready.is_readable() {
         result |= IoReady::READABLE;
@@ -393,26 +392,26 @@ fn map_ready(ready: tokio::io::Ready) -> IoReady {
 }
 
 #[cfg(any(unix, windows))]
-fn tokio_ready(ready: IoReady) -> tokio::io::Ready {
-    let mut result = tokio::io::Ready::EMPTY;
+fn tokio_ready(ready: IoReady) -> tokio::runtime::telekio::Ready {
+    let mut result = tokio::runtime::telekio::Ready::EMPTY;
     if ready.contains(IoReady::READABLE) {
-        result |= tokio::io::Ready::READABLE;
+        result |= tokio::runtime::telekio::Ready::READABLE;
     }
     if ready.contains(IoReady::WRITABLE) {
-        result |= tokio::io::Ready::WRITABLE;
+        result |= tokio::runtime::telekio::Ready::WRITABLE;
     }
     if ready.contains(IoReady::READ_CLOSED) {
-        result |= tokio::io::Ready::READ_CLOSED;
+        result |= tokio::runtime::telekio::Ready::READ_CLOSED;
     }
     if ready.contains(IoReady::WRITE_CLOSED) {
-        result |= tokio::io::Ready::WRITE_CLOSED;
+        result |= tokio::runtime::telekio::Ready::WRITE_CLOSED;
     }
     if ready.contains(IoReady::ERROR) {
-        result |= tokio::io::Ready::ERROR;
+        result |= tokio::runtime::telekio::Ready::ERROR;
     }
     #[cfg(any(target_os = "android", target_os = "linux"))]
     if ready.contains(IoReady::PRIORITY) {
-        result |= tokio::io::Ready::PRIORITY;
+        result |= tokio::runtime::telekio::Ready::PRIORITY;
     }
     result
 }

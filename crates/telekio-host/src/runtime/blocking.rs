@@ -11,6 +11,7 @@ use crate::{host_panic, result};
 
 use super::{HandleContext, context::with_task_execution};
 
+#[cfg(feature = "rt-multi-thread")]
 pub(super) unsafe extern "C" fn block_in_place(
     context: *const c_void,
     blocking: Blocking,
@@ -28,6 +29,11 @@ pub(super) unsafe extern "C" fn block_in_place(
         Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
         Err(payload) => host_panic(&*payload),
     }
+}
+
+#[cfg(not(feature = "rt-multi-thread"))]
+pub(super) unsafe extern "C" fn block_in_place(_: *const c_void, _: Blocking) -> CallResult {
+    CallResult::error("Tokio host block_in_place requires rt-multi-thread")
 }
 
 pub(super) unsafe extern "C" fn spawn_blocking(

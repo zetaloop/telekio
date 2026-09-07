@@ -60,7 +60,7 @@ impl Registration {
         &self,
         context: &mut std::task::Context<'_>,
         interest: IoInterest,
-    ) -> std::task::Poll<io::Result<(u8, tokio::io::Ready, bool)>> {
+    ) -> std::task::Poll<io::Result<(u8, tokio::runtime::telekio::Ready, bool)>> {
         match (host_interest(interest), &self.io) {
             (Ok(interest), WindowsIo::Socket(io)) => io.poll_ready(context, interest),
             (Ok(interest), WindowsIo::Pipe(io)) => io.poll_telekio_ready(context, interest),

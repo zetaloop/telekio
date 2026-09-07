@@ -97,15 +97,15 @@ pub(super) unsafe extern "C" fn metric(
                         Metric::WorkerMeanPollTime => {
                             metrics.worker_mean_poll_time(worker).as_nanos() as u64
                         }
-                        #[cfg(all(any(unix, windows), target_has_atomic = "64"))]
+                        #[cfg(all(feature = "net", any(unix, windows), target_has_atomic = "64"))]
                         Metric::IoDriverFdRegisteredCount => {
                             metrics.io_driver_fd_registered_count()
                         }
-                        #[cfg(all(any(unix, windows), target_has_atomic = "64"))]
+                        #[cfg(all(feature = "net", any(unix, windows), target_has_atomic = "64"))]
                         Metric::IoDriverFdDeregisteredCount => {
                             metrics.io_driver_fd_deregistered_count()
                         }
-                        #[cfg(all(any(unix, windows), target_has_atomic = "64"))]
+                        #[cfg(all(feature = "net", any(unix, windows), target_has_atomic = "64"))]
                         Metric::IoDriverReadyCount => metrics.io_driver_ready_count(),
                         #[cfg(all(
                             feature = "schedule-latency",
