@@ -1,15 +1,9 @@
 use super::*;
-use crate::runtime::{handle::telekio::Connection, scheduler, task_hooks::telekio::Hooks};
-use std::sync::Arc;
+use crate::runtime::{handle::telekio::Connection, scheduler};
 
 impl LocalRuntime {
-    pub(crate) fn install_host(
-        &self,
-        runtime: ::telekio::Runtime,
-        io_enabled: bool,
-        task_hooks: Arc<Hooks>,
-    ) {
-        let connection = Connection::new(runtime.handle(), io_enabled, task_hooks);
+    pub(crate) fn install_host(&self, runtime: ::telekio::Runtime, io_enabled: bool) {
+        let connection = Connection::new(runtime.handle(), io_enabled);
         match &self.handle.inner {
             scheduler::Handle::CurrentThread(handle) => handle.install(connection),
             #[cfg(feature = "rt-multi-thread")]

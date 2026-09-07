@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
 use crate::runtime::metrics::telekio::Workers;
-use crate::runtime::task_hooks::telekio::Hooks;
 
 pub(crate) struct Connection {
     pub(crate) handle: ::telekio::Handle,
@@ -12,21 +11,15 @@ pub(crate) struct Connection {
         expect(dead_code)
     )]
     pub(crate) io_enabled: bool,
-    pub(crate) task_hooks: Arc<Hooks>,
     #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
     pub(crate) workers: Arc<Workers>,
 }
 
 impl Connection {
-    pub(crate) fn new(
-        handle: ::telekio::Handle,
-        io_enabled: bool,
-        task_hooks: Arc<Hooks>,
-    ) -> Arc<Self> {
+    pub(crate) fn new(handle: ::telekio::Handle, io_enabled: bool) -> Arc<Self> {
         Arc::new(Self {
             handle,
             io_enabled,
-            task_hooks,
             #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
             workers: Arc::new(Workers::new()),
         })

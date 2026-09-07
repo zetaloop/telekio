@@ -57,9 +57,9 @@ impl Id {
 impl SpawnLocation {
     #[track_caller]
     pub(crate) fn capture() -> Self {
-        TASK_LOCATION
-            .take()
-            .map(Self::from)
-            .unwrap_or_else(Self::capture_local)
+        match TASK_LOCATION.take() {
+            Some(location) => Self::from(location),
+            None => Self::capture_local(),
+        }
     }
 }

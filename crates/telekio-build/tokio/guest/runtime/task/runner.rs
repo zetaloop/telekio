@@ -75,7 +75,6 @@ fn start<S: HostSchedule>(
             .spawn(task, id.as_u64(), location)
     };
     if let Err(error) = result.into_io_result() {
-        schedule.connection().task_hooks.remove(id);
         panic!("failed to spawn Tokio task {id}: {error}");
     }
 }
@@ -92,7 +91,6 @@ where
     T: TaskFuture + Send + 'static,
     T::Output: Send + 'static,
 {
-    schedule.connection().task_hooks.register(id, spawned_at);
     let runner = Runner::new(schedule.clone(), id);
     let task_schedule = TaskSchedule {
         runner: Arc::downgrade(&runner),
@@ -114,7 +112,6 @@ where
     T: TaskFuture + 'static,
     T::Output: 'static,
 {
-    schedule.connection().task_hooks.register(id, spawned_at);
     let runner = Runner::new(schedule.clone(), id);
     let task_schedule = TaskSchedule {
         runner: Arc::downgrade(&runner),
@@ -152,7 +149,6 @@ where
     };
     let (task, join) = task::unowned(future, task_schedule, id, spawned_at);
     *runner.task.lock().unwrap() = Some(task);
-    schedule.connection().task_hooks.register(id, spawned_at);
     let task = unsafe {
         ::telekio::BlockingTask::from_raw(
             Arc::into_raw(runner).cast_mut().cast(),
@@ -167,7 +163,6 @@ where
         .spawn_blocking(task, id.as_u64(), location)
         .into_io_result()
     {
-        schedule.connection().task_hooks.remove(id);
         panic!("failed to spawn blocking Tokio task {id}: {error}");
     }
     join

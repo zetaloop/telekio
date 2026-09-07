@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::{handle::telekio::Connection, scheduler, task_hooks::telekio::Hooks};
+use crate::runtime::{handle::telekio::Connection, scheduler};
 use std::sync::Arc;
 
 #[track_caller]
@@ -23,19 +23,14 @@ pub(crate) fn block_on<F: Future>(
 }
 
 impl Runtime {
-    pub(crate) fn install_host(
-        &self,
-        runtime: ::telekio::Runtime,
-        io_enabled: bool,
-        task_hooks: Arc<Hooks>,
-    ) {
-        self.install(Connection::new(runtime.handle(), io_enabled, task_hooks));
+    pub(crate) fn install_host(&self, runtime: ::telekio::Runtime, io_enabled: bool) {
+        self.install(Connection::new(runtime.handle(), io_enabled));
         self.blocking_pool.install(runtime);
     }
 
     #[cfg(not(test))]
     pub(crate) fn install_attached_host(&self, handle: ::telekio::Handle) {
-        self.install(Connection::new(handle, true, Hooks::empty()));
+        self.install(Connection::new(handle, true));
     }
 
     #[cfg(not(test))]

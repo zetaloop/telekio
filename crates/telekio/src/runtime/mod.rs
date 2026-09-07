@@ -3,6 +3,7 @@ mod builder;
 mod context;
 mod dump;
 mod handle;
+mod location;
 mod metrics;
 mod task;
 mod task_hooks;

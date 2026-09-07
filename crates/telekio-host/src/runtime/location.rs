@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     marker::PhantomData,
     panic::Location,
@@ -9,8 +10,8 @@ use std::{
 use telekio::SourceLocation;
 
 #[derive(Eq, Hash, PartialEq)]
-struct Key {
-    file: String,
+struct Key<'a> {
+    file: Cow<'a, str>,
     line: u32,
     column: u32,
 }
@@ -29,10 +30,11 @@ const _: () = {
 };
 
 pub(super) fn intern(source: SourceLocation) -> &'static Location<'static> {
-    static LOCATIONS: OnceLock<Mutex<HashMap<Key, &'static Location<'static>>>> = OnceLock::new();
+    static LOCATIONS: OnceLock<Mutex<HashMap<Key<'static>, &'static Location<'static>>>> =
+        OnceLock::new();
 
     let key = Key {
-        file: unsafe { source.file() }.to_owned(),
+        file: Cow::Borrowed(unsafe { source.file() }),
         line: source.line(),
         column: source.column(),
     };
@@ -61,6 +63,12 @@ pub(super) fn intern(source: SourceLocation) -> &'static Location<'static> {
     assert_eq!(location.file_as_c_str().to_bytes(), key.file.as_bytes());
     assert_eq!(location.line(), key.line);
     assert_eq!(location.column(), key.column);
-    locations.insert(key, location);
+    locations.insert(
+        Key {
+            file: Cow::Owned(key.file.into_owned()),
+            ..key
+        },
+        location,
+    );
     location
 }

@@ -1,6 +1,5 @@
 use super::*;
-use crate::runtime::{task_hooks::telekio::Hooks, TaskHooks};
-use std::sync::Arc;
+use crate::runtime::TaskHooks;
 #[cfg(not(test))]
 use std::{
     ffi::c_void,
@@ -15,24 +14,24 @@ struct AttachedContext {
 
 impl Builder {
     pub(super) fn build_hosted_current_thread(&mut self) -> io::Result<Runtime> {
-        let (host, task_hooks) = self.build_host(false)?;
+        let host = self.build_host(false)?;
         let runtime = self.build_guest(Self::build_current_thread_runtime)?;
-        runtime.install_host(host, self.enable_io, task_hooks);
+        runtime.install_host(host, self.enable_io);
         Ok(runtime)
     }
 
     pub(super) fn build_hosted_local(&mut self) -> io::Result<LocalRuntime> {
-        let (host, task_hooks) = self.build_host(true)?;
+        let host = self.build_host(true)?;
         let runtime = self.build_guest(Self::build_current_thread_local_runtime)?;
-        runtime.install_host(host, self.enable_io, task_hooks);
+        runtime.install_host(host, self.enable_io);
         Ok(runtime)
     }
 
     #[cfg(feature = "rt-multi-thread")]
     pub(super) fn build_hosted_multi_thread(&mut self) -> io::Result<Runtime> {
-        let (host, task_hooks) = self.build_host(false)?;
+        let host = self.build_host(false)?;
         let runtime = self.build_guest(Self::build_threaded_runtime)?;
-        runtime.install_host(host, self.enable_io, task_hooks);
+        runtime.install_host(host, self.enable_io);
         Ok(runtime)
     }
 
@@ -62,7 +61,7 @@ impl Builder {
         result
     }
 
-    fn build_host(&self, local: bool) -> io::Result<(::telekio::Runtime, Arc<Hooks>)> {
+    fn build_host(&self, local: bool) -> io::Result<::telekio::Runtime> {
         let flavor = if local {
             ::telekio::Flavor::Local
         } else {
@@ -74,14 +73,14 @@ impl Builder {
         };
         let keep_alive = self.keep_alive.unwrap_or_default();
         let (rng_one, rng_two) = self.seed_generator.telekio_parts();
-        let task_hooks = Hooks::new(TaskHooks {
+        let task_hooks = TaskHooks {
             task_spawn_callback: self.before_spawn.clone(),
             task_terminate_callback: self.after_termination.clone(),
             #[cfg(tokio_unstable)]
             before_poll_callback: self.before_poll.clone(),
             #[cfg(tokio_unstable)]
             after_poll_callback: self.after_poll.clone(),
-        });
+        };
         let config = ::telekio::RuntimeConfig {
             flavor,
             enable_io: self.enable_io.into(),
@@ -166,7 +165,7 @@ impl Builder {
         #[cfg(not(any(telekio_host, feature = "telekio-test")))]
         let result = ::telekio::attached().build(config);
         // Tokio's LocalRuntime keeps this value on its originating thread.
-        unsafe { result.into_runtime() }.map(|(runtime, _)| (runtime, task_hooks))
+        unsafe { result.into_runtime() }.map(|(runtime, _)| runtime)
     }
 }
 

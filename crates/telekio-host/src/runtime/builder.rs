@@ -12,9 +12,9 @@ struct TaskCallbackOwner(TaskCallback);
 struct StringCallbackOwner(StringCallback);
 
 impl TaskCallbackOwner {
-    fn call(&self, event: TaskEvent, id: u64) {
+    fn call(&self, event: TaskEvent, meta: &tokio::runtime::TaskMeta<'_>) {
         self.0
-            .call(event, id)
+            .call(event, meta.id().telekio_value(), meta.spawned_at())
             .resume("Tokio task callback panicked");
     }
 }
@@ -118,18 +118,18 @@ pub(super) fn build_runtime(
     if task_callback.0.is_some() {
         let callback = Arc::clone(&task_callback);
         builder.on_task_spawn(move |meta| {
-            callback.call(TaskEvent::Spawn, meta.id().telekio_value());
+            callback.call(TaskEvent::Spawn, meta);
         });
         let callback = Arc::clone(&task_callback);
         builder.on_before_task_poll(move |meta| {
-            callback.call(TaskEvent::PollStart, meta.id().telekio_value());
+            callback.call(TaskEvent::PollStart, meta);
         });
         let callback = Arc::clone(&task_callback);
         builder.on_after_task_poll(move |meta| {
-            callback.call(TaskEvent::PollStop, meta.id().telekio_value());
+            callback.call(TaskEvent::PollStop, meta);
         });
         builder.on_task_terminate(move |meta| {
-            task_callback.call(TaskEvent::Terminate, meta.id().telekio_value());
+            task_callback.call(TaskEvent::Terminate, meta);
         });
     }
 

@@ -26,7 +26,7 @@ Raw descriptors use private fields and unsafe constructors. Adapters own their r
 
 Resources may outlive the runtime wrapper that created them. Detach also reclaims descriptors whose guest destructors never ran. `LocalRuntime` stays on its creating thread through destruction.
 
-`telekio-host/src/runtime/location.rs` reconstructs host-local `std::panic::Location` values from file, line, and column. Its representation mirrors the host standard library's private layout; review that layout when changing the supported Rust toolchain.
+`telekio-host/src/runtime/location.rs` constructs host-owned source locations; `telekio/src/runtime/location.rs` adapts their representation for hook calls. Both mirror the local standard library's private `Location` layout; review that layout when changing the supported Rust toolchain.
 
 ## Checks
 
