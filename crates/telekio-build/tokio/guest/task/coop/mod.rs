@@ -1,6 +1,6 @@
 use super::Budget;
 
-#[cfg(all(tokio_unstable, feature = "rt", target_has_atomic = "64"))]
+#[cfg(all(tokio_unstable, feature = "rt"))]
 pub(super) fn forced_yield<F>(local: F) -> impl FnOnce(&crate::runtime::scheduler::Handle)
 where
     F: FnOnce(&crate::runtime::scheduler::Handle),
