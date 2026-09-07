@@ -4,7 +4,7 @@ Tokio across independently compiled native Rust libraries.
 
 Telekio lets Rust plugins use their host's Tokio runtime. Plugins use ordinary `tokio::*` APIs and Tokio-based libraries, with scheduling, timers, and I/O driven by the host.
 
-## Use with a Tokio application
+## Installation
 
 Install the Cargo wrapper:
 
@@ -12,30 +12,25 @@ Install the Cargo wrapper:
 cargo binstall telekio-cli
 ```
 
-An application can keep its usual Tokio dependency and code:
+To build the wrapper from source, use `cargo install telekio-cli`.
 
-```toml
-[dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+### Applications
+
+For applications that provide Telekio-enabled release binaries:
+
+```sh
+cargo binstall my-app
 ```
 
-```rust
-use std::time::Duration;
+For a source installation:
 
-#[tokio::main]
-async fn main() {
-    let answer = tokio::spawn(async {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        42
-    })
-    .await
-    .unwrap();
-
-    println!("{answer}");
-}
+```sh
+telekio cargo install my-app
 ```
 
-Run Cargo through Telekio:
+## Development
+
+Keep your application's usual Tokio dependency and code. Run Cargo through Telekio:
 
 ```sh
 telekio cargo run
@@ -43,9 +38,7 @@ telekio cargo test
 telekio cargo clippy
 ```
 
-The wrapper applies a Cargo patch to Tokio, including transitive dependencies. The generated implementation forwards runtime operations to the host through a C ABI.
-
-The wrapper prepares `Cargo.lock` before running the requested Cargo command and keeps the resulting lockfile.
+Telekio patches crates.io Tokio across the dependency graph and prepares `Cargo.lock` before invoking Cargo.
 
 For a persistent source-project patch:
 
@@ -54,15 +47,21 @@ telekio init
 cargo run
 ```
 
-Commit the generated `.telekio` directory together with the manifest change. Use `telekio remove` to remove the persistent patch.
-
-If Cargo still selects its previous Tokio dependency, run `telekio cargo update -p tokio`, or `cargo update -p tokio` after `telekio init`.
+Commit the generated `.telekio` directory together with the manifest change. `cargo update -p tokio` refreshes the Tokio selection in an existing lockfile. Use `telekio remove` to remove the persistent patch.
 
 ## Host and plugin
 
 Each plugin is attached to an Owner on the host. The resulting Attachment provides the Tokio runtime context for calls into the plugin.
 
-This example uses two packages, `plugin` and `host`. The plugin queries its current runtime, and the host checks that both see the same worker count.
+Create a workspace containing `host` and `plugin`:
+
+`Cargo.toml`:
+
+```toml
+[workspace]
+members = ["host", "plugin"]
+resolver = "3"
+```
 
 ### Plugin
 
@@ -93,12 +92,6 @@ pub extern "C" fn workers() -> usize {
 }
 ```
 
-Build the plugin with its guest patch:
-
-```sh
-telekio cargo build --manifest-path plugin/Cargo.toml
-```
-
 ### Host
 
 `host/Cargo.toml`:
@@ -111,7 +104,7 @@ edition = "2024"
 
 [dependencies]
 libloading = "0.9"
-telekio-host = "0.1"
+telekio-host = { version = "0.1", features = ["rt-multi-thread"] }
 ```
 
 `host/src/main.rs`:
@@ -123,7 +116,9 @@ use libloading::Library;
 use telekio_host::{Attach, Runtime};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let path = env::args_os().nth(1).expect("expected a plugin library path");
+    let path = env::args_os()
+        .nth(1)
+        .expect("expected a plugin library path");
     let library = unsafe { Library::new(path)? };
     let attach = unsafe { *library.get::<Attach>(b"telekio_attach")? };
     let workers = unsafe { *library.get::<unsafe extern "C" fn() -> usize>(b"workers")? };
@@ -133,22 +128,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut attachment = unsafe { owner.attach(attach)? };
 
     let count = attachment.enter(|| unsafe { workers() });
-    assert_eq!(count, runtime.tokio().handle().metrics().num_workers());
-    println!("Plugin is attached to the {count}-worker host runtime");
+    println!("Host workers: {count}");
 
     runtime.tokio().block_on(owner.detach(&mut attachment))?;
-    drop(library);
+    library.close()?;
     Ok(())
 }
 ```
 
-The host above uses the backend directly and builds with ordinary Cargo. On Linux:
+Build and run from the workspace root. On Linux:
 
 ```sh
-cargo run --manifest-path host/Cargo.toml -- plugin/target/debug/libplugin.so
+telekio cargo build
+telekio cargo run -p host -- target/debug/libplugin.so
 ```
 
-Use `plugin/target/debug/plugin.dll` on Windows or `plugin/target/debug/libplugin.dylib` on macOS. Workspace builds place artifacts in the workspace target directory instead.
+Use `target/debug/plugin.dll` on Windows or `target/debug/libplugin.dylib` on macOS.
 
 ### Async calls and shutdown
 
@@ -168,23 +163,20 @@ Package dependencies determine the role used by the wrapper:
 
 The wrapper reads normal direct dependencies, including aliases named `telekio-host`.
 
-```sh
-telekio cargo build --workspace
-telekio cargo test -p plugin
-telekio cargo +stable clippy --workspace --all-targets -- -D warnings
-```
+Workspace commands build host and guest packages in groups, sharing the workspace lockfile and target directory. Select an individual package with `-p`, for example `telekio cargo test -p plugin`.
 
-Workspace commands build host and guest packages in groups, sharing the workspace lockfile and target directory. Use `telekio cargo` for workspaces containing both roles, and `-p` to select a package for individual commands such as `run`.
+## Publishing applications
 
-## Publishing and installation
-
-Cargo strips a root patch and excludes the nested Tokio package when publishing an application. Installing that published application through ordinary `cargo install` consequently uses official Tokio. Installing through Telekio supplies the patch during compilation:
+Build release binaries with Telekio and publish source packages with Cargo:
 
 ```sh
-telekio cargo install my-app
+telekio cargo build --release
+cargo publish
 ```
 
-An application can display a notice when built with ordinary Tokio by adding the ABI crate under the `telekio-host` alias:
+These binaries include the runtime integration. For source users, document `telekio cargo install my-app`; Cargo omits project patches from published packages.
+
+Applications using Tokio directly can display a startup build notice by adding the ABI crate under the `telekio-host` alias:
 
 ```toml
 [dependencies]
@@ -195,7 +187,7 @@ telekio-host = { package = "telekio", version = "0.1" }
 telekio_host::require!();
 ```
 
-Call it from the application's entry point. It prints the Telekio installation instructions once when running with ordinary Tokio. Patched builds stay silent.
+Call it from the application's entry point. In ordinary-Tokio builds, it prints the Telekio build instructions once.
 
 ## Project layout
 

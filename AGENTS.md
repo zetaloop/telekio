@@ -1,76 +1,39 @@
 # Development
 
-Read [README.md](README.md) for the public integration model. Workspace package metadata is defined in `Cargo.toml`; the fixed upstream Tokio version is selected in `crates/telekio-build/src/source.rs`.
+[README.md](README.md) describes public usage. Build and validation recipes live in [.github/workflows/check.yml](.github/workflows/check.yml).
 
-## Architecture
+## Execution and ownership
 
-Host Tokio executes tasks and provides runtime services. Guest `UnownedTask` holds artifact-local futures, outputs, panic payloads, and join state; `LocalSet` uses Tokio's local scheduler. Both artifacts access the current task's identity, cooperative budget, and RNG through `ExecutionState`.
+Host Tokio owns the runtime services, scheduler, and real task identities. Guest `UnownedTask` retains the artifact-local future, output, panic payload, and join state required by Rust's types. `LocalSet` retains Tokio's local scheduler. Shared `ExecutionState` carries the current task identity, cooperative budget, and RNG across artifact calls.
 
-Guest `Runtime` and `LocalRuntime` own their `telekio::Runtime` through `BlockingPool`. Cloned Handles share a `Connection`. Keep runtime shutdown with the owning runtime and service access with the connection.
+Guest `Runtime` and `LocalRuntime` own their `telekio::Runtime` through `BlockingPool`, preserving Tokio's shutdown sequence. Handles share only `Connection` state. Organize task, scheduler, hooks, metrics, dump, I/O, and time code around their corresponding Tokio services.
 
-Organize services by their Tokio modules: task, scheduler, hooks, metrics, dump, I/O, and time. `Owner` and `Attachment` handle plugin lifetime separately. Project manifests and Cargo command handling belong to `telekio-cli`.
+`Owner` and `Attachment` provide per-plugin lifetime management. Detachment closes work, drains active calls, and reclaims host references abandoned by guest destructors. Resources can outlive the runtime wrapper that created them; incoming callback ownership must also be released when registration fails.
 
-## Source transformations
+Source locations outlive tasks because Tokio exposes them as `&'static Location`. The host retains foreign locations at task creation; hooks read the location already associated with the task. The representation adapters in `telekio-host/src/runtime/location.rs` and `telekio/src/runtime/location.rs` depend on the local standard library's private layout and require review when changing the supported toolchain.
 
-`telekio-build/src/transform` runs during generation. `telekio-build/tokio/{guest,host,shared}` is source compiled inside Tokio: its `crate::` paths refer to Tokio. Mounted paths follow the upstream module being extended.
+## Compilation contexts
 
-Cargo provides upstream source. Apply changes through the transformation program and mounted helpers, then regenerate the complete tree.
+`telekio` defines the native ABI and artifact-side adapters. Rust-owned values and callback destruction stay in their defining artifact, with panics reported through ABI results.
 
-Use symbol- and syntax-scoped edits from `src/edit.rs` and `src/edit/call.rs`. A singular edit must match exactly one target across the source and its macros. Implement replacement behavior in mounted helpers; discuss additions to the edit API before extending it.
+`telekio-tokio` provides the native backend under its own Cargo package identity; its Rust crate name is `tokio`. The workspace release version and the upstream Tokio source version selected in `telekio-build/src/source.rs` are separate.
 
-Exact `#[expect(dead_code)]` annotations identify upstream symbols made unreachable by a transformation.
+`telekio-build/src/transform` contains generation-time code. Files under `telekio-build/tokio/{guest,host,shared}` compile inside Tokio, so their `crate::` paths refer to Tokio. Mounted paths follow the upstream module being extended.
 
-## ABI and ownership
+`telekio-cli` owns user manifests, package-role selection, and Cargo orchestration. `telekio cargo` prepares the dependency graph and lockfile through Cargo metadata before executing the original user command. This preparation is independent of the final command's locking and offline flags.
 
-Raw descriptors use private fields and unsafe constructors. Adapters own their release; rejected operations release incoming references. Callbacks and destruction can reenter or panic, so invoke them outside state locks and report panics through ABI results.
+## Upstream integration
 
-Resources may outlive the runtime wrapper that created them. Detach also reclaims descriptors whose guest destructors never ran. `LocalRuntime` stays on its creating thread through destruction.
+Cargo supplies the fixed upstream source. Changes belong in the transformation program and mounted helpers; generated trees are regenerated from those inputs.
 
-`telekio-host/src/runtime/location.rs` constructs host-owned source locations; `telekio/src/runtime/location.rs` adapts their representation for hook calls. Both mirror the local standard library's private `Location` layout; review that layout when changing the supported Rust toolchain.
+Preserve upstream control flow through symbol- and syntax-scoped edits from `telekio-build/src/edit.rs`. Singular edits require one target across direct syntax and nested macros. Discuss additions to the edit API before extending it. Exact `#[expect(dead_code)]` annotations identify upstream execution symbols displaced by a transformation.
 
-## Checks
+Cargo root patches select the generated Tokio package. Publication strips application-root patches, so source installation uses the CLI to supply the same patch.
 
-Run from the workspace root:
+## Validation
 
-```sh
-cargo fmt
-rustfmt --edition 2021 $(git ls-files crates/telekio-build/tokio)
-cargo clippy --workspace --all-targets --features guest,full --fix --allow-dirty -- -D warnings
-cargo build --workspace
-cargo doc --workspace --no-deps
-```
+`tests/upstream` generates Tokio's original suite through `prepare_tests()`. These tests cover the transformed Tokio API; `tests/host` and `tests/plugin` exercise independently compiled artifacts and their invocation, cancellation, detach, and unload lifecycle. Both forms of validation are needed for cross-artifact behavior.
 
-Mounted source needs the separate rustfmt invocation because Cargo does not discover it. Use Tokio's edition for those files.
+Run the complete upstream suites. Compare failures with unmodified Tokio under the same configuration and preserve upstream-equivalent behavior. Native systems provide execution evidence; other targets receive source review and cross-compilation.
 
-### Behavior
-
-The `tests` workspace generates the complete upstream Tokio tree through `telekio_build::prepare_tests()`. Use cargo-nextest for test targets and Cargo for doctests:
-
-```sh
-export CARGO_TARGET_DIR="$PWD/target"
-suite=$(cargo run --quiet --manifest-path tests/Cargo.toml -p upstream-tests)
-cargo nextest run --manifest-path "$suite/Cargo.toml" --config-file .config/nextest.toml --features full,test-util,telekio-test
-cargo test --manifest-path "$suite/Cargo.toml" --features full,test-util,telekio-test --doc
-```
-
-Unstable checks set both `RUSTFLAGS='--cfg tokio_unstable'` and `RUSTDOCFLAGS='--cfg tokio_unstable'`, and enable the relevant Tokio features such as `tracing`, `schedule-latency`, `taskdump`, and `io-uring`. Exercise reduced feature sets as well as `full`, including Tokio's standard-lock branch without `parking_lot`.
-
-Run the complete upstream suite. Investigate failures with temporary reproductions and compare them against unmodified Tokio in the same environment.
-
-The `plugin-host` executable in `tests` accepts the built `plugin` library path and exercises invocation, future polling, cancellation, detach, and unload. Build both roles with `cargo run -p telekio-cli -- cargo build --manifest-path tests/Cargo.toml --workspace`. The platform and cargo-hack feature matrices are in `.github/workflows/check.yml`.
-
-Reuse target directories. Test on available native systems and use cross-compilation for other Tokio targets. Taskdump checks enable `taskdump` in both the guest and host.
-
-### Packaging
-
-Local patches let Cargo verify the workspace packages together. In Bash or Zsh:
-
-```sh
-patches=()
-for package in telekio telekio-build telekio-tokio telekio-host telekio-cli; do
-    patches+=(--config "patch.crates-io.$package.path=\"crates/$package\"")
-done
-cargo package --workspace --allow-dirty "${patches[@]}"
-```
-
-Check that packages include the mounted sources and README. Exercise application installation with ordinary Cargo and with `telekio cargo`, since publication removes the application's root patch.
+The CI recipes include the separate rustfmt pass for mounted Tokio source, feature combinations, stable and unstable tests, doctests, and package verification. Taskdump requires the corresponding guest and host features.
