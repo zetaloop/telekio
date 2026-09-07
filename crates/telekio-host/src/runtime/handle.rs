@@ -23,7 +23,6 @@ pub(crate) struct HandleContext {
     pub(crate) owner: Arc<OwnerState>,
     pub(super) flavor: Flavor,
     pub(super) local: Option<Arc<LocalSlot>>,
-    pub(super) io_enabled: bool,
     #[cfg(tokio_unstable)]
     pub(super) worker_observer: Mutex<Option<WorkerObserver>>,
 }
@@ -68,14 +67,12 @@ pub(super) fn handle_context(
     handle: tokio::runtime::Handle,
     owner: Arc<OwnerState>,
     local: Option<Arc<LocalSlot>>,
-    io_enabled: bool,
     flavor: Flavor,
 ) -> Arc<HandleContext> {
     Arc::new(HandleContext {
         handle,
         owner,
         local,
-        io_enabled,
         flavor,
         #[cfg(tokio_unstable)]
         worker_observer: Mutex::new(None),

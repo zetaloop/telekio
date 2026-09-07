@@ -84,6 +84,20 @@ cfg_io_driver! {
 }
 
 impl Handle {
+    cfg_io_driver! {
+        #[doc(hidden)]
+        pub fn telekio_io_enabled(&self) -> bool {
+            self.inner.driver().io.as_ref().is_some()
+        }
+    }
+
+    cfg_not_io_driver! {
+        #[doc(hidden)]
+        pub fn telekio_io_enabled(&self) -> bool {
+            false
+        }
+    }
+
     pub fn telekio_unhandled_panic(&self) {
         match &self.inner {
             scheduler::Handle::CurrentThread(handle) => {

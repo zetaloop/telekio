@@ -61,7 +61,7 @@ pub(super) unsafe extern "C" fn register(
     interest: IoInterest,
 ) -> IoResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
-    if !context.io_enabled {
+    if !context.handle.telekio_io_enabled() {
         let error = io::Error::other(telekio::IO_DRIVER_DISABLED_ERROR);
         return IoResult {
             error: IoError::from_error(&error),
@@ -109,7 +109,7 @@ pub(super) unsafe extern "C" fn register_driver(
 ) -> IoDriverResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     match catch_unwind(AssertUnwindSafe(|| -> io::Result<_> {
-        if !context.io_enabled {
+        if !context.handle.telekio_io_enabled() {
             return Err(io::Error::other(telekio::IO_DRIVER_DISABLED_ERROR));
         }
         if resource.kind() != IoKind::Fd {

@@ -182,7 +182,6 @@ pub(super) fn build_runtime(
                 runtime.handle().clone(),
                 Arc::clone(&owner),
                 None,
-                config.enable_io != 0,
                 config.flavor,
             );
             Ok((RuntimeKind::Runtime(Some(runtime)), handle, workers))
@@ -192,13 +191,7 @@ pub(super) fn build_runtime(
             let handle = runtime.handle().clone();
             let workers = handle.metrics().num_workers();
             let local = Arc::new(LocalSlot::new(runtime));
-            let handle = handle_context(
-                handle,
-                owner,
-                Some(Arc::clone(&local)),
-                config.enable_io != 0,
-                config.flavor,
-            );
+            let handle = handle_context(handle, owner, Some(Arc::clone(&local)), config.flavor);
             Ok((RuntimeKind::Local(local), handle, workers))
         }
     }
