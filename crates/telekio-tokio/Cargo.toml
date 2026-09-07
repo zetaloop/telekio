@@ -36,6 +36,7 @@ full = [
 fs = []
 io-util = ["bytes"]
 io-std = []
+io-uring = ["dep:io-uring", "libc", "mio/os-poll", "mio/os-ext", "dep:slab"]
 macros = ["tokio-macros"]
 net = [
     "libc",
@@ -76,6 +77,7 @@ sync = []
 taskdump = ["dep:backtrace"]
 test-util = ["rt", "sync", "time"]
 time = []
+tracing = ["dep:tracing"]
 
 [dependencies]
 bytes = { version = "1.2.1", optional = true }
@@ -87,9 +89,6 @@ tokio-macros = { version = "~2.7.0", optional = true }
 [target.'cfg(any(not(target_family = "wasm"), all(target_os = "wasi", not(target_env = "p1"))))'.dependencies]
 socket2 = { version = "0.6.3", optional = true, features = ["all"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-backtrace = { version = "0.3.58", optional = true }
-
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2.168", optional = true }
 signal-hook-registry = { version = "1.1.1", optional = true }
@@ -100,6 +99,16 @@ libc = { version = "0.2.168", optional = true }
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.61"
 optional = true
+
+[target."cfg(tokio_unstable)".dependencies]
+tracing = { version = "0.1.29", default-features = false, features = ["std"], optional = true }
+
+[target.'cfg(all(tokio_unstable, target_os = "linux"))'.dependencies]
+backtrace = { version = "0.3.58", optional = true }
+io-uring = { version = "0.7.11", default-features = false, optional = true }
+libc = { version = "0.2.168", optional = true }
+mio = { version = "1.2.0", default-features = false, features = ["os-poll", "os-ext"], optional = true }
+slab = { version = "0.4.9", optional = true }
 
 [build-dependencies]
 telekio-build = { version = "=0.1.0", path = "../telekio-build" }
@@ -114,6 +123,5 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(tokio_no_parking_lot)",
     "cfg(tokio_no_tuning_tests)",
     "cfg(tokio_unstable)",
-    'cfg(feature, values("io-uring", "schedule-latency", "taskdump", "tracing"))',
     'cfg(target_os, values("cygwin"))',
 ] }

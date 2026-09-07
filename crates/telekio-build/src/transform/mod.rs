@@ -94,7 +94,9 @@ pub(crate) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
         (
             "runtime/io/mod.rs",
             Some("pub(crate)"),
-            Some("#[cfg(any(target_os = \"freebsd\", target_os = \"linux\"))]"),
+            Some(
+                "#[cfg(all(feature = \"rt\", any(target_os = \"freebsd\", target_os = \"linux\")))]",
+            ),
         ),
         (
             "runtime/io/driver.rs",
@@ -114,6 +116,10 @@ pub(crate) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
     ] {
         patch(&source.join("src").join(module), |contents| {
             mount(contents, visibility, "telekio", &format!("host/{module}"))?;
+            if module == "io/async_fd.rs" {
+                edit::retarget_use(contents, "Interest", "crate::io::interest::Interest")?;
+                edit::retarget_use(contents, "Ready", "crate::io::ready::Ready")?;
+            }
             if visibility.is_some() {
                 edit::add_attr(
                     contents,
@@ -125,6 +131,30 @@ pub(crate) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
                 edit::add_attr(contents, edit::AttrTarget::Module("telekio"), attribute)?;
             }
             Ok(())
+        })?;
+    }
+    if std::env::var_os("CARGO_CFG_UNIX").is_some()
+        && std::env::var_os("CARGO_FEATURE_RT").is_some()
+        && std::env::var_os("CARGO_FEATURE_NET").is_none()
+    {
+        patch(&source.join("src/runtime/io/driver.rs"), |contents| {
+            edit::retarget_macro(
+                contents,
+                edit::Scope::Method {
+                    owner: "ReadyEvent",
+                    name: "with_ready",
+                },
+                "cfg_net_unix",
+                "cfg_unix",
+            )
+        })?;
+        patch(&source.join("src/runtime/io/mod.rs"), |contents| {
+            edit::mount_module(
+                contents,
+                Some("pub(crate)"),
+                "async_fd",
+                &source.join("src/io/async_fd.rs"),
+            )
         })?;
     }
     task::host(source)?;

@@ -1,5 +1,5 @@
 use super::*;
-use crate::io::Ready;
+use crate::io::ready::Ready;
 
 impl Registration {
     pub(crate) fn poll_telekio_ready(

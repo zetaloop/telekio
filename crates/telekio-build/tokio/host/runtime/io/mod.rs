@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 pub(crate) use super::driver::telekio::Registration;
 
-#[cfg(target_os = "freebsd")]
+#[cfg(all(target_os = "freebsd", feature = "net"))]
 mod aio {
     use super::super::{Direction, Handle, ReadyEvent, ScheduledIo};
     use crate::io::{Interest, Ready};
@@ -104,5 +104,5 @@ mod aio {
     }
 }
 
-#[cfg(target_os = "freebsd")]
+#[cfg(all(target_os = "freebsd", feature = "net"))]
 pub(crate) use aio::Aio;

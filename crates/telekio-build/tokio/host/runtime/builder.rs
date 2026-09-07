@@ -1,5 +1,5 @@
 use super::Builder;
-#[cfg(tokio_unstable)]
+#[cfg(all(tokio_unstable, feature = "time", feature = "rt-multi-thread"))]
 use super::TimerFlavor;
 #[cfg(tokio_unstable)]
 use crate::runtime::{HistogramBuilder, UnhandledPanic};
@@ -27,13 +27,13 @@ impl Builder {
         self.disable_lifo_slot = true;
     }
 
-    #[cfg(tokio_unstable)]
+    #[cfg(all(tokio_unstable, feature = "rt-multi-thread"))]
     #[doc(hidden)]
     pub fn telekio_enable_eager_driver_handoff(&mut self) {
         self.enable_eager_driver_handoff = true;
     }
 
-    #[cfg(tokio_unstable)]
+    #[cfg(all(tokio_unstable, feature = "time", feature = "rt-multi-thread"))]
     #[doc(hidden)]
     pub fn telekio_enable_alt_timer(&mut self) {
         self.enable_time();

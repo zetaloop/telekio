@@ -25,6 +25,7 @@ fn queue() -> &'static OrphanQueueImpl<Child> {
     QUEUE.get_or_init(OrphanQueueImpl::new)
 }
 
+#[cfg(feature = "rt")]
 pub(crate) fn push(id: u32) {
     queue().push_orphan(Child(id));
 }

@@ -1,6 +1,8 @@
 mod call;
+mod macros;
 
 pub use call::delegate_call;
+pub use macros::retarget_macro;
 
 use std::{error::Error, path::Path};
 

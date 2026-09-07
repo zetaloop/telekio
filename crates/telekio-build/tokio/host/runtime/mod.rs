@@ -1,7 +1,19 @@
-#[cfg(target_os = "freebsd")]
-pub use super::handle::telekio::TelekioAio;
-#[cfg(target_os = "linux")]
-pub use super::handle::telekio::TelekioIo;
+cfg_io_driver! {
+    pub use crate::io::{interest::Interest, ready::Ready};
+    #[cfg(target_os = "linux")]
+    pub use super::handle::telekio::TelekioIo;
+    #[cfg(all(unix, feature = "net"))]
+    pub use crate::io::unix::AsyncFd;
+    #[cfg(all(unix, not(feature = "net")))]
+    pub use crate::runtime::io::async_fd::AsyncFd;
+}
+
+cfg_aio! {
+    pub use super::handle::telekio::TelekioAio;
+}
+
+#[cfg(all(unix, any(feature = "signal", feature = "process")))]
+pub use crate::signal::unix::{signal, Signal, SignalKind};
 
 #[cfg(feature = "rt")]
 pub fn next_task_id() -> u64 {
@@ -61,7 +73,7 @@ pub fn with_task_execution<R>(call: impl FnOnce(*mut std::ffi::c_void) -> R) -> 
     super::context::telekio::with_task(call)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "process"))]
 pub fn reap_process(id: u32) {
     crate::process::unix::telekio::push(id);
 }
