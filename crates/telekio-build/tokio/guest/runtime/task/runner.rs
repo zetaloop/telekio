@@ -52,11 +52,11 @@ fn start<S: HostSchedule>(
     schedule: &S,
     runner: Arc<Runner<S>>,
     local: bool,
-    location: ::telekio::SourceLocation,
+    location: ::telekio_abi::SourceLocation,
 ) {
     let id = runner.id;
     let task = unsafe {
-        ::telekio::Task::from_raw(
+        ::telekio_abi::Task::from_raw(
             Arc::into_raw(runner).cast_mut().cast(),
             poll_runner::<S>,
             cancel_runner::<S>,
@@ -85,7 +85,7 @@ fn bind<S: HostSchedule, T>(
     id: task::Id,
     spawned_at: SpawnLocation,
     local: bool,
-    location: ::telekio::SourceLocation,
+    location: ::telekio_abi::SourceLocation,
 ) -> task::JoinHandle<T::Output>
 where
     T: TaskFuture + Send + 'static,
@@ -106,7 +106,7 @@ unsafe fn bind_local<S: HostSchedule, T>(
     future: T,
     id: task::Id,
     spawned_at: SpawnLocation,
-    location: ::telekio::SourceLocation,
+    location: ::telekio_abi::SourceLocation,
 ) -> task::JoinHandle<T::Output>
 where
     T: TaskFuture + 'static,
@@ -127,7 +127,7 @@ pub(crate) fn spawn_blocking<S: HostSchedule, F, R>(
     function: F,
     id: task::Id,
     spawned_at: task::SpawnLocation,
-    location: ::telekio::SourceLocation,
+    location: ::telekio_abi::SourceLocation,
 ) -> task::JoinHandle<R>
 where
     F: FnOnce() -> R + Send + 'static,
@@ -150,7 +150,7 @@ where
     let (task, join) = task::unowned(future, task_schedule, id, spawned_at);
     *runner.task.lock().unwrap() = Some(task);
     let task = unsafe {
-        ::telekio::BlockingTask::from_raw(
+        ::telekio_abi::BlockingTask::from_raw(
             Arc::into_raw(runner).cast_mut().cast(),
             run_blocking::<S>,
             cancel_blocking::<S>,
@@ -379,7 +379,7 @@ impl<S: HostSchedule> Runner<S> {
     }
 
     fn wake(&self) {
-        let state = ::telekio::execution_state();
+        let state = ::telekio_abi::execution_state();
         if !state.is_null() && unsafe { (*state).tracing } != 0 {
             return;
         }
@@ -407,7 +407,7 @@ impl<S: HostSchedule> Runner<S> {
             let task = self.task.get().unwrap();
             let waker =
                 super::super::waker::waker_ref::<TaskSchedule<S>>(task.raw.header_ptr_ref());
-            let waker = unsafe { ::telekio::Waker::from_ref(&waker) };
+            let waker = unsafe { ::telekio_abi::Waker::from_ref(&waker) };
             self.schedule
                 .connection()
                 .handle
@@ -427,25 +427,25 @@ impl<S: HostSchedule> Runner<S> {
 
 unsafe extern "C" fn poll_runner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
-    execution: *mut ::telekio::ExecutionState,
-    waker: *const ::telekio::Waker,
-) -> ::telekio::TaskPoll {
+    execution: *mut ::telekio_abi::ExecutionState,
+    waker: *const ::telekio_abi::Waker,
+) -> ::telekio_abi::TaskPoll {
     match catch_unwind(AssertUnwindSafe(|| unsafe {
-        ::telekio::with_execution_state(execution, || poll_runner_inner::<S>(data, waker))
+        ::telekio_abi::with_execution_state(execution, || poll_runner_inner::<S>(data, waker))
     })) {
         Ok(poll) => poll,
         Err(_) => {
             let runner = unsafe { &*data.cast::<Runner<S>>() };
             runner.abort.get().unwrap().abort();
-            ::telekio::TaskPoll::unmeasured(::telekio::Poll::Panicked)
+            ::telekio_abi::TaskPoll::unmeasured(::telekio_abi::Poll::Panicked)
         }
     }
 }
 
 unsafe fn poll_runner_inner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
-    waker: *const ::telekio::Waker,
-) -> ::telekio::TaskPoll {
+    waker: *const ::telekio_abi::Waker,
+) -> ::telekio_abi::TaskPoll {
     struct Polling<'a>(&'a AtomicBool);
 
     impl Drop for Polling<'_> {
@@ -462,10 +462,10 @@ unsafe fn poll_runner_inner<S: HostSchedule>(
     let _polling = Polling(&runner.polling);
     *runner.waker.lock().unwrap() = Some(unsafe { (*waker).clone_rust_waker() });
     if runner.complete.load(Ordering::Acquire) {
-        return ::telekio::TaskPoll::unmeasured(::telekio::Poll::Ready);
+        return ::telekio_abi::TaskPoll::unmeasured(::telekio_abi::Poll::Ready);
     }
     let mut duration = None;
-    let runnable = if unsafe { (*::telekio::execution_state()).tracing } != 0 {
+    let runnable = if unsafe { (*::telekio_abi::execution_state()).tracing } != 0 {
         #[cfg(feature = "taskdump")]
         {
             runner.take_or_notify()
@@ -481,25 +481,25 @@ unsafe fn poll_runner_inner<S: HostSchedule>(
         duration = Some(runner.run(runnable));
     }
     let state = if runner.complete.load(Ordering::Acquire) {
-        ::telekio::Poll::Ready
+        ::telekio_abi::Poll::Ready
     } else {
         if runner.runnable.lock().unwrap().is_some() {
             runner.wake();
         }
-        ::telekio::Poll::Pending
+        ::telekio_abi::Poll::Pending
     };
     duration.map_or_else(
-        || ::telekio::TaskPoll::unmeasured(state),
-        |duration| ::telekio::TaskPoll::new(state, duration),
+        || ::telekio_abi::TaskPoll::unmeasured(state),
+        |duration| ::telekio_abi::TaskPoll::new(state, duration),
     )
 }
 
 unsafe extern "C" fn cancel_runner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
-    execution: *mut ::telekio::ExecutionState,
-) -> ::telekio::CallResult {
+    execution: *mut ::telekio_abi::ExecutionState,
+) -> ::telekio_abi::CallResult {
     callback(|| unsafe {
-        ::telekio::with_execution_state(execution, || {
+        ::telekio_abi::with_execution_state(execution, || {
             let runner = &*data.cast::<Runner<S>>();
             runner.cancel();
         });
@@ -508,7 +508,7 @@ unsafe extern "C" fn cancel_runner<S: HostSchedule>(
 
 unsafe extern "C" fn release_runner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
-) -> ::telekio::CallResult {
+) -> ::telekio_abi::CallResult {
     callback(|| drop(unsafe { Arc::from_raw(data.cast::<Runner<S>>()) }))
 }
 
@@ -537,10 +537,10 @@ impl<S: HostSchedule> BlockingRunner<S> {
 
 unsafe extern "C" fn run_blocking<S: HostSchedule>(
     data: *mut std::ffi::c_void,
-    execution: *mut ::telekio::ExecutionState,
-) -> ::telekio::CallResult {
+    execution: *mut ::telekio_abi::ExecutionState,
+) -> ::telekio_abi::CallResult {
     callback(|| unsafe {
-        ::telekio::with_execution_state(execution, || {
+        ::telekio_abi::with_execution_state(execution, || {
             (&*data.cast::<BlockingRunner<S>>()).run();
         });
     })
@@ -548,10 +548,10 @@ unsafe extern "C" fn run_blocking<S: HostSchedule>(
 
 unsafe extern "C" fn cancel_blocking<S: HostSchedule>(
     data: *mut std::ffi::c_void,
-    execution: *mut ::telekio::ExecutionState,
-) -> ::telekio::CallResult {
+    execution: *mut ::telekio_abi::ExecutionState,
+) -> ::telekio_abi::CallResult {
     callback(|| unsafe {
-        ::telekio::with_execution_state(execution, || {
+        ::telekio_abi::with_execution_state(execution, || {
             (&*data.cast::<BlockingRunner<S>>()).cancel();
         });
     })
@@ -559,13 +559,13 @@ unsafe extern "C" fn cancel_blocking<S: HostSchedule>(
 
 unsafe extern "C" fn release_blocking<S: HostSchedule>(
     data: *mut std::ffi::c_void,
-) -> ::telekio::CallResult {
+) -> ::telekio_abi::CallResult {
     callback(|| drop(unsafe { Arc::from_raw(data.cast::<BlockingRunner<S>>()) }))
 }
 
-fn callback(call: impl FnOnce()) -> ::telekio::CallResult {
+fn callback(call: impl FnOnce()) -> ::telekio_abi::CallResult {
     match catch_unwind(AssertUnwindSafe(call)) {
-        Ok(()) => ::telekio::CallResult::ok(),
-        Err(payload) => ::telekio::CallResult::panicked(&*payload),
+        Ok(()) => ::telekio_abi::CallResult::ok(),
+        Err(payload) => ::telekio_abi::CallResult::panicked(&*payload),
     }
 }

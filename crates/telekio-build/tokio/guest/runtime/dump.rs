@@ -9,10 +9,10 @@ where
     F: std::future::Future<Output = Dump>,
 {
     let _ = original;
-    let ::telekio::DumpResult { call, mut dump } = handle.inner.connection().handle.dump();
+    let ::telekio_abi::DumpResult { call, mut dump } = handle.inner.connection().handle.dump();
     call.resume("failed to start Tokio runtime dump");
     let bytes = std::future::poll_fn(|context| {
-        let waker = unsafe { ::telekio::Waker::from_ref(context.waker()) };
+        let waker = unsafe { ::telekio_abi::Waker::from_ref(context.waker()) };
         dump.poll(&waker)
     })
     .await;

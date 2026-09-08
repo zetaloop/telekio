@@ -3,7 +3,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
-use telekio::{CallResult, DumpOperation, DumpResult};
+use telekio_abi::{CallResult, DumpOperation, DumpResult};
 
 use crate::host_panic;
 
@@ -46,7 +46,7 @@ mod imp {
         sync::Arc,
         task::{Context, Poll as RustPoll},
     };
-    use telekio::{OperationPoll, OwnedBytes, Poll, Status, Waker};
+    use telekio_abi::{OperationPoll, OwnedBytes, Poll, Status, Waker};
 
     use crate::owner::HostResource;
 

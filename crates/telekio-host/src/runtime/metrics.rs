@@ -6,8 +6,8 @@ use std::{
 };
 
 #[cfg(tokio_unstable)]
-use telekio::Flavor;
-use telekio::{CallResult, Metric, MetricResult, OwnedBytes, Status, WorkerCallback};
+use telekio_abi::Flavor;
+use telekio_abi::{CallResult, Metric, MetricResult, OwnedBytes, Status, WorkerCallback};
 
 use crate::{host_panic, result};
 

@@ -12,7 +12,7 @@ use std::{
 mod api;
 use api::{PluginFuture, PluginPoll};
 
-telekio::plugin!();
+telekio_abi::plugin!();
 
 static RELEASED: AtomicUsize = AtomicUsize::new(0);
 
@@ -60,35 +60,35 @@ pub unsafe extern "C" fn request(url: *const u8, length: usize) -> PluginFuture 
     }
 }
 
-unsafe extern "C" fn poll(data: *mut c_void, waker: *const telekio::Waker) -> PluginPoll {
+unsafe extern "C" fn poll(data: *mut c_void, waker: *const telekio_abi::Waker) -> PluginPoll {
     match catch_unwind(AssertUnwindSafe(|| {
         let request = unsafe { &mut *data.cast::<Request>() };
         let waker = unsafe { (*waker).clone_rust_waker() };
         request.0.as_mut().poll(&mut Context::from_waker(&waker))
     })) {
         Ok(Poll::Pending) => PluginPoll {
-            state: telekio::Poll::Pending,
+            state: telekio_abi::Poll::Pending,
             value: 0,
             task_id: 0,
         },
         Ok(Poll::Ready((value, task_id))) => PluginPoll {
-            state: telekio::Poll::Ready,
+            state: telekio_abi::Poll::Ready,
             value,
             task_id,
         },
         Err(_) => PluginPoll {
-            state: telekio::Poll::Panicked,
+            state: telekio_abi::Poll::Panicked,
             value: 0,
             task_id: 0,
         },
     }
 }
 
-unsafe extern "C" fn release(data: *mut c_void) -> telekio::CallResult {
+unsafe extern "C" fn release(data: *mut c_void) -> telekio_abi::CallResult {
     match catch_unwind(AssertUnwindSafe(|| {
         drop(unsafe { Box::from_raw(data.cast::<Request>()) });
     })) {
-        Ok(()) => telekio::CallResult::ok(),
-        Err(payload) => telekio::CallResult::panicked(&*payload),
+        Ok(()) => telekio_abi::CallResult::ok(),
+        Err(payload) => telekio_abi::CallResult::panicked(&*payload),
     }
 }

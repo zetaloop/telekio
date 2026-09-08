@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::runtime::metrics::telekio::Workers;
 
 pub(crate) struct Connection {
-    pub(crate) handle: ::telekio::Handle,
+    pub(crate) handle: ::telekio_abi::Handle,
     #[cfg_attr(
         not(any(feature = "signal", all(unix, feature = "process"))),
         expect(dead_code)
@@ -16,7 +16,7 @@ pub(crate) struct Connection {
 }
 
 impl Connection {
-    pub(crate) fn new(handle: ::telekio::Handle, io_enabled: bool) -> Arc<Self> {
+    pub(crate) fn new(handle: ::telekio_abi::Handle, io_enabled: bool) -> Arc<Self> {
         Arc::new(Self {
             handle,
             io_enabled,
@@ -28,7 +28,7 @@ impl Connection {
 
 cfg_taskdump! {
     pub(super) fn is_tracing() -> bool {
-        let state = ::telekio::execution_state();
+        let state = ::telekio_abi::execution_state();
         !state.is_null() && unsafe { (*state).tracing } != 0
     }
 }
@@ -43,10 +43,10 @@ impl Handle {
     pub fn runtime_flavor(&self) -> RuntimeFlavor {
         let _ = self.runtime_flavor_inner();
         match self.inner.connection().handle.flavor() {
-            ::telekio::Flavor::CurrentThread | ::telekio::Flavor::Local => {
+            ::telekio_abi::Flavor::CurrentThread | ::telekio_abi::Flavor::Local => {
                 RuntimeFlavor::CurrentThread
             }
-            ::telekio::Flavor::MultiThread => RuntimeFlavor::MultiThread,
+            ::telekio_abi::Flavor::MultiThread => RuntimeFlavor::MultiThread,
         }
     }
 }

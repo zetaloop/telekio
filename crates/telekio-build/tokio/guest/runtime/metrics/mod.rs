@@ -51,18 +51,18 @@ pub(crate) struct HostSchedulerMetrics {
 #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
 pub(crate) struct HostHistogram {
     connection: Arc<Connection>,
-    enabled: ::telekio::Metric,
-    buckets: ::telekio::Metric,
-    count: ::telekio::Metric,
-    start: ::telekio::Metric,
-    end: ::telekio::Metric,
+    enabled: ::telekio_abi::Metric,
+    buckets: ::telekio_abi::Metric,
+    count: ::telekio_abi::Metric,
+    start: ::telekio_abi::Metric,
+    end: ::telekio_abi::Metric,
     worker: usize,
 }
 
 #[cfg(target_has_atomic = "64")]
 pub(crate) struct HostMetric {
     connection: Arc<Connection>,
-    metric: ::telekio::Metric,
+    metric: ::telekio_abi::Metric,
     worker: usize,
 }
 
@@ -112,54 +112,54 @@ impl Handle {
     pub(crate) fn host_global_queue_depth(&self) -> usize {
         self.connection()
             .handle
-            .metric(::telekio::Metric::GlobalQueueDepth, 0) as usize
+            .metric(::telekio_abi::Metric::GlobalQueueDepth, 0) as usize
     }
 
     pub(crate) fn host_num_alive_tasks(&self) -> usize {
         self.connection()
             .handle
-            .metric(::telekio::Metric::NumAliveTasks, 0) as usize
+            .metric(::telekio_abi::Metric::NumAliveTasks, 0) as usize
     }
 
     pub(crate) fn host_num_workers(&self) -> usize {
         self.connection()
             .handle
-            .metric(::telekio::Metric::NumWorkers, 0) as usize
+            .metric(::telekio_abi::Metric::NumWorkers, 0) as usize
     }
 
     #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
     pub(crate) fn host_spawned_tasks_count(&self) -> u64 {
         self.connection()
             .handle
-            .metric(::telekio::Metric::SpawnedTasksCount, 0)
+            .metric(::telekio_abi::Metric::SpawnedTasksCount, 0)
     }
 
     #[cfg(tokio_unstable)]
     pub(crate) fn host_num_blocking_threads(&self) -> usize {
         self.connection()
             .handle
-            .metric(::telekio::Metric::NumBlockingThreads, 0) as usize
+            .metric(::telekio_abi::Metric::NumBlockingThreads, 0) as usize
     }
 
     #[cfg(tokio_unstable)]
     pub(crate) fn host_num_idle_blocking_threads(&self) -> usize {
         self.connection()
             .handle
-            .metric(::telekio::Metric::NumIdleBlockingThreads, 0) as usize
+            .metric(::telekio_abi::Metric::NumIdleBlockingThreads, 0) as usize
     }
 
     #[cfg(tokio_unstable)]
     pub(crate) fn host_worker_local_queue_depth(&self, worker: usize) -> usize {
         self.connection()
             .handle
-            .metric(::telekio::Metric::WorkerLocalQueueDepth, worker) as usize
+            .metric(::telekio_abi::Metric::WorkerLocalQueueDepth, worker) as usize
     }
 
     #[cfg(tokio_unstable)]
     pub(crate) fn host_blocking_queue_depth(&self) -> usize {
         self.connection()
             .handle
-            .metric(::telekio::Metric::BlockingQueueDepth, 0) as usize
+            .metric(::telekio_abi::Metric::BlockingQueueDepth, 0) as usize
     }
 
     #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
@@ -167,12 +167,12 @@ impl Handle {
         HostSchedulerMetrics {
             remote_schedule_count: HostMetric {
                 connection: Arc::clone(self.connection()),
-                metric: ::telekio::Metric::RemoteScheduleCount,
+                metric: ::telekio_abi::Metric::RemoteScheduleCount,
                 worker: 0,
             },
             budget_forced_yield_count: HostMetric {
                 connection: Arc::clone(self.connection()),
-                metric: ::telekio::Metric::BudgetForcedYieldCount,
+                metric: ::telekio_abi::Metric::BudgetForcedYieldCount,
                 worker: 0,
             },
         }
@@ -205,44 +205,44 @@ impl Handle {
             connection: Arc::clone(self.connection()),
             #[cfg(tokio_unstable)]
             worker,
-            busy_duration_total: metric(::telekio::Metric::WorkerTotalBusyDuration),
-            park_count: metric(::telekio::Metric::WorkerParkCount),
-            park_unpark_count: metric(::telekio::Metric::WorkerParkUnparkCount),
+            busy_duration_total: metric(::telekio_abi::Metric::WorkerTotalBusyDuration),
+            park_count: metric(::telekio_abi::Metric::WorkerParkCount),
+            park_unpark_count: metric(::telekio_abi::Metric::WorkerParkUnparkCount),
             #[cfg(tokio_unstable)]
-            noop_count: metric(::telekio::Metric::WorkerNoopCount),
+            noop_count: metric(::telekio_abi::Metric::WorkerNoopCount),
             #[cfg(tokio_unstable)]
-            steal_count: metric(::telekio::Metric::WorkerStealCount),
+            steal_count: metric(::telekio_abi::Metric::WorkerStealCount),
             #[cfg(tokio_unstable)]
-            steal_operations: metric(::telekio::Metric::WorkerStealOperations),
+            steal_operations: metric(::telekio_abi::Metric::WorkerStealOperations),
             #[cfg(tokio_unstable)]
-            poll_count: metric(::telekio::Metric::WorkerPollCount),
+            poll_count: metric(::telekio_abi::Metric::WorkerPollCount),
             #[cfg(tokio_unstable)]
-            mean_poll_time: metric(::telekio::Metric::WorkerMeanPollTime),
+            mean_poll_time: metric(::telekio_abi::Metric::WorkerMeanPollTime),
             #[cfg(tokio_unstable)]
-            local_schedule_count: metric(::telekio::Metric::WorkerLocalScheduleCount),
+            local_schedule_count: metric(::telekio_abi::Metric::WorkerLocalScheduleCount),
             #[cfg(tokio_unstable)]
-            overflow_count: metric(::telekio::Metric::WorkerOverflowCount),
+            overflow_count: metric(::telekio_abi::Metric::WorkerOverflowCount),
             #[cfg(tokio_unstable)]
             poll_count_histogram: histogram(
-                ::telekio::Metric::PollTimeHistogramEnabled,
-                ::telekio::Metric::PollTimeHistogramNumBuckets,
-                ::telekio::Metric::PollTimeHistogramBucketCount,
-                ::telekio::Metric::PollTimeHistogramRangeStart,
-                ::telekio::Metric::PollTimeHistogramRangeEnd,
+                ::telekio_abi::Metric::PollTimeHistogramEnabled,
+                ::telekio_abi::Metric::PollTimeHistogramNumBuckets,
+                ::telekio_abi::Metric::PollTimeHistogramBucketCount,
+                ::telekio_abi::Metric::PollTimeHistogramRangeStart,
+                ::telekio_abi::Metric::PollTimeHistogramRangeEnd,
             ),
             #[cfg(feature = "schedule-latency")]
             schedule_latency_histogram: histogram(
-                ::telekio::Metric::ScheduleLatencyHistogramEnabled,
-                ::telekio::Metric::ScheduleLatencyHistogramNumBuckets,
-                ::telekio::Metric::ScheduleLatencyHistogramBucketCount,
-                ::telekio::Metric::ScheduleLatencyHistogramRangeStart,
-                ::telekio::Metric::ScheduleLatencyHistogramRangeEnd,
+                ::telekio_abi::Metric::ScheduleLatencyHistogramEnabled,
+                ::telekio_abi::Metric::ScheduleLatencyHistogramNumBuckets,
+                ::telekio_abi::Metric::ScheduleLatencyHistogramBucketCount,
+                ::telekio_abi::Metric::ScheduleLatencyHistogramRangeStart,
+                ::telekio_abi::Metric::ScheduleLatencyHistogramRangeEnd,
             ),
         }
     }
 
     #[cfg(all(tokio_unstable, feature = "net", target_has_atomic = "64"))]
-    pub(crate) fn host_io_driver_metric(&self, metric: ::telekio::Metric) -> u64 {
+    pub(crate) fn host_io_driver_metric(&self, metric: ::telekio_abi::Metric) -> u64 {
         self.connection().handle.metric(metric, 0)
     }
 }

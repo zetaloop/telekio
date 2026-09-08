@@ -54,7 +54,7 @@ use std::{
     time::Duration,
 };
 
-use telekio::{
+use telekio_abi::{
     BuildResult, CallResult, Flavor, Future, OwnedBytes, RawRuntime, RuntimeApi, RuntimeConfig,
     Shutdown, Status,
 };

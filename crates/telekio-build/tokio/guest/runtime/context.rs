@@ -6,10 +6,10 @@ use std::{
     task::{Context, Poll},
 };
 
-type State = ::telekio::ExecutionState;
+type State = ::telekio_abi::ExecutionState;
 
 fn execution_state() -> *mut State {
-    ::telekio::execution_state()
+    ::telekio_abi::execution_state()
 }
 
 #[path = "../../shared/runtime/context.rs"]
@@ -102,7 +102,7 @@ pub(crate) fn defer(waker: &std::task::Waker) {
         return;
     }
     match super::with_current(|handle| {
-        let waker = unsafe { ::telekio::Waker::from_ref(waker) };
+        let waker = unsafe { ::telekio_abi::Waker::from_ref(waker) };
         handle.connection().handle.defer(&waker)
     }) {
         Ok(result) => result

@@ -6,21 +6,21 @@
 
 Host Tokio owns the runtime services, scheduler, and real task identities. Guest `UnownedTask` retains the artifact-local future, output, panic payload, and join state required by Rust's types. `LocalSet` retains Tokio's local scheduler. Shared `ExecutionState` carries the current task identity, cooperative budget, and RNG across artifact calls.
 
-Guest `Runtime` and `LocalRuntime` own their `telekio::Runtime` through `BlockingPool`, preserving Tokio's shutdown sequence. Handles share only `Connection` state. Organize task, scheduler, hooks, metrics, dump, I/O, and time code around their corresponding Tokio services.
+Guest `Runtime` and `LocalRuntime` own their `telekio_abi::Runtime` through `BlockingPool`, preserving Tokio's shutdown sequence. Handles share only `Connection` state. Organize task, scheduler, hooks, metrics, dump, I/O, and time code around their corresponding Tokio services.
 
 `Owner` and `Attachment` provide per-plugin lifetime management. Detachment closes work, drains active calls, and reclaims host references abandoned by guest destructors. Resources can outlive the runtime wrapper that created them; incoming callback ownership must also be released when registration fails.
 
-Source locations outlive tasks because Tokio exposes them as `&'static Location`. The host retains foreign locations at task creation; hooks read the location already associated with the task. The representation adapters in `telekio-host/src/runtime/location.rs` and `telekio/src/runtime/location.rs` depend on the local standard library's private layout and require review when changing the supported toolchain.
+Source locations outlive tasks because Tokio exposes them as `&'static Location`. The host retains foreign locations at task creation; hooks read the location already associated with the task. The representation adapters in `telekio-host/src/runtime/location.rs` and `telekio-abi/src/runtime/location.rs` depend on the local standard library's private layout and require review when changing the supported toolchain.
 
 ## Compilation contexts
 
-`telekio` defines the native ABI and artifact-side adapters. Rust-owned values and callback destruction stay in their defining artifact, with panics reported through ABI results.
+`telekio-abi` defines the native ABI and artifact-side adapters. Rust-owned values and callback destruction stay in their defining artifact, with panics reported through ABI results.
 
 `telekio-tokio` provides the native backend under its own Cargo package identity; its Rust crate name is `tokio`. The workspace release version and the upstream Tokio source version selected in `telekio-build/src/source.rs` are separate.
 
 `telekio-build/src/transform` contains generation-time code. Files under `telekio-build/tokio/{guest,host,shared}` compile inside Tokio, so their `crate::` paths refer to Tokio. Mounted paths follow the upstream module being extended.
 
-`telekio-cli` owns user manifests, package-role selection, and Cargo orchestration. `telekio cargo` prepares the dependency graph and lockfile through Cargo metadata before executing the original user command. This preparation is independent of the final command's locking and offline flags.
+`telekio` owns user manifests, package-role selection, and Cargo orchestration. `telekio cargo` prepares the dependency graph and lockfile through Cargo metadata before executing the original user command. This preparation is independent of the final command's locking and offline flags.
 
 ## Upstream integration
 

@@ -581,6 +581,15 @@ dependencies = [
 [[package]]
 name = "telekio"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "telekio-build",
+ "toml_edit",
+]
+
+[[package]]
+name = "telekio-abi"
+version = "0.1.0"
 
 [[package]]
 name = "telekio-build"
@@ -593,19 +602,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "telekio-cli"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "telekio-build",
- "toml_edit",
-]
-
-[[package]]
 name = "telekio-host"
 version = "0.1.0"
 dependencies = [
- "telekio",
+ "telekio-abi",
  "telekio-tokio",
 ]
 

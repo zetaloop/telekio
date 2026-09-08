@@ -9,10 +9,10 @@ Telekio lets Rust plugins use their host's Tokio runtime. Plugins use ordinary `
 Install the Cargo wrapper:
 
 ```sh
-cargo binstall telekio-cli
+cargo binstall telekio
 ```
 
-To build the wrapper from source, use `cargo install telekio-cli`.
+To build the wrapper from source, use `cargo install telekio`.
 
 ### Applications
 
@@ -77,14 +77,14 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-telekio = "0.1"
+telekio-abi = "0.1"
 tokio = { version = "1", features = ["rt"] }
 ```
 
 `plugin/src/lib.rs`:
 
 ```rust
-telekio::plugin!();
+telekio_abi::plugin!();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn workers() -> usize {
@@ -158,7 +158,7 @@ Package dependencies determine the role used by the wrapper:
 | Dependencies | Role |
 | --- | --- |
 | `telekio-host` | Host |
-| `telekio` without `telekio-host` | Guest |
+| `telekio-abi` without `telekio-host` | Guest |
 | Neither | Host |
 
 The wrapper reads normal direct dependencies, including aliases named `telekio-host`.
@@ -180,7 +180,7 @@ Applications using Tokio directly can display a startup build notice by adding t
 
 ```toml
 [dependencies]
-telekio-host = { package = "telekio", version = "0.1" }
+telekio-host = { package = "telekio-abi", version = "0.1" }
 ```
 
 ```rust
@@ -193,11 +193,11 @@ Call it from the application's entry point. In ordinary-Tokio builds, it prints 
 
 | Crate | Responsibility |
 | --- | --- |
-| `telekio` | Dependency-free ABI descriptors, artifact-side adapters, and attachment entry |
+| `telekio-abi` | Dependency-free ABI descriptors, artifact-side adapters, and attachment entry |
 | `telekio-host` | Runtime services and per-plugin ownership |
 | `telekio-tokio` | Native Tokio backend, with Rust crate name `tokio` |
 | `telekio-build` | Upstream source preparation, structural transformations, and sparse patch generation |
-| `telekio-cli` | Cargo wrapper and persistent project patches; executable name `telekio` |
+| `telekio` | Cargo wrapper and persistent project patches |
 
 ## License
 

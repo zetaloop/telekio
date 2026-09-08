@@ -8,7 +8,7 @@ impl RuntimeMetrics {
     {
         self.handle
             .inner
-            .host_io_driver_metric(::telekio::Metric::IoDriverFdRegisteredCount)
+            .host_io_driver_metric(::telekio_abi::Metric::IoDriverFdRegisteredCount)
     }
 
     #[cfg(all(tokio_unstable, feature = "net", target_has_atomic = "64"))]
@@ -18,7 +18,7 @@ impl RuntimeMetrics {
     {
         self.handle
             .inner
-            .host_io_driver_metric(::telekio::Metric::IoDriverFdDeregisteredCount)
+            .host_io_driver_metric(::telekio_abi::Metric::IoDriverFdDeregisteredCount)
     }
 
     #[cfg(all(tokio_unstable, feature = "net", target_has_atomic = "64"))]
@@ -28,6 +28,6 @@ impl RuntimeMetrics {
     {
         self.handle
             .inner
-            .host_io_driver_metric(::telekio::Metric::IoDriverReadyCount)
+            .host_io_driver_metric(::telekio_abi::Metric::IoDriverReadyCount)
     }
 }

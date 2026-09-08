@@ -11,9 +11,9 @@ use std::{
     task::{Context as TaskContext, Poll as RustPoll},
 };
 
-use telekio::{CallResult, ClockSample, DurationParts, InstantOffset, Timer, TimerResult};
+use telekio_abi::{CallResult, ClockSample, DurationParts, InstantOffset, Timer, TimerResult};
 #[cfg(feature = "time")]
-use telekio::{OperationPoll, OwnedBytes, Poll, Status, Waker};
+use telekio_abi::{OperationPoll, OwnedBytes, Poll, Status, Waker};
 
 #[cfg(feature = "time")]
 use super::HandleContext;
@@ -28,7 +28,7 @@ struct TimeTimer {
     sleep: Pin<Box<tokio::time::Sleep>>,
 }
 
-pub(super) unsafe extern "C" fn clock(context: *const c_void) -> telekio::ClockResult {
+pub(super) unsafe extern "C" fn clock(context: *const c_void) -> telekio_abi::ClockResult {
     match catch_unwind(AssertUnwindSafe(|| {
         let origin = *CLOCK_ORIGIN.get_or_init(std::time::Instant::now);
         let realtime = instant_offset(origin, std::time::Instant::now());
@@ -45,11 +45,11 @@ pub(super) unsafe extern "C" fn clock(context: *const c_void) -> telekio::ClockR
         };
         ClockSample { realtime, logical }
     })) {
-        Ok(value) => telekio::ClockResult {
+        Ok(value) => telekio_abi::ClockResult {
             call: CallResult::ok(),
             value,
         },
-        Err(payload) => telekio::ClockResult {
+        Err(payload) => telekio_abi::ClockResult {
             call: host_panic(&*payload),
             value: ClockSample {
                 realtime: InstantOffset {
@@ -201,17 +201,17 @@ unsafe extern "C" fn reset_time_timer(data: *mut c_void, deadline: InstantOffset
 }
 
 #[cfg(feature = "time")]
-unsafe extern "C" fn time_timer_elapsed(data: *const c_void) -> telekio::BoolResult {
+unsafe extern "C" fn time_timer_elapsed(data: *const c_void) -> telekio_abi::BoolResult {
     match catch_unwind(AssertUnwindSafe(|| {
         unsafe { &*data.cast::<HostResource<TimeTimer>>() }
             .with(|timer| timer.sleep.is_elapsed())
             .unwrap_or(true)
     })) {
-        Ok(value) => telekio::BoolResult {
+        Ok(value) => telekio_abi::BoolResult {
             call: CallResult::ok(),
             value,
         },
-        Err(payload) => telekio::BoolResult {
+        Err(payload) => telekio_abi::BoolResult {
             call: host_panic(&*payload),
             value: true,
         },

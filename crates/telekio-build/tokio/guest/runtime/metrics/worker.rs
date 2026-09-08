@@ -20,10 +20,10 @@ pub(crate) struct Root<'a, F> {
     connection: &'a Connection,
 }
 
-pub(crate) fn worker_index(handle: &::telekio::Handle) -> Option<usize> {
+pub(crate) fn worker_index(handle: &::telekio_abi::Handle) -> Option<usize> {
     usize::try_from(
         handle
-            .metric(::telekio::Metric::CurrentWorkerIndex, 0)
+            .metric(::telekio_abi::Metric::CurrentWorkerIndex, 0)
             .checked_sub(1)?,
     )
     .ok()
@@ -34,7 +34,7 @@ pub(crate) fn record_worker(connection: &Connection) {
     // Thread identities are collected when the host provides worker metrics.
     let Ok(worker) = connection
         .handle
-        .try_metric(::telekio::Metric::CurrentWorkerIndex, 0, 0)
+        .try_metric(::telekio_abi::Metric::CurrentWorkerIndex, 0, 0)
     else {
         return;
     };
@@ -81,13 +81,13 @@ impl Workers {
 
     pub(crate) fn thread_id(
         self: &Arc<Self>,
-        handle: &::telekio::Handle,
+        handle: &::telekio_abi::Handle,
         worker: usize,
     ) -> Option<std::thread::ThreadId> {
-        assert!(worker < handle.metric(::telekio::Metric::NumWorkers, 0) as usize);
+        assert!(worker < handle.metric(::telekio_abi::Metric::NumWorkers, 0) as usize);
         self.observing.get_or_init(|| {
             let workers = Arc::clone(self);
-            let callback = ::telekio::WorkerCallback::from_arc(Arc::new(move |worker| {
+            let callback = ::telekio_abi::WorkerCallback::from_arc(Arc::new(move |worker| {
                 workers.store(worker);
             }));
             handle

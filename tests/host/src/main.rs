@@ -29,14 +29,14 @@ impl Future for Request {
     type Output = (u64, u64);
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let waker = unsafe { telekio::Waker::from_ref(context.waker()) };
+        let waker = unsafe { telekio_abi::Waker::from_ref(context.waker()) };
         let result = self
             .attachment
             .enter(|| unsafe { (self.future.poll)(self.future.data, &raw const waker) });
         match result.state {
-            telekio::Poll::Pending => Poll::Pending,
-            telekio::Poll::Ready => Poll::Ready((result.value, result.task_id)),
-            telekio::Poll::Panicked => panic!("plugin request panicked"),
+            telekio_abi::Poll::Pending => Poll::Pending,
+            telekio_abi::Poll::Ready => Poll::Ready((result.value, result.task_id)),
+            telekio_abi::Poll::Panicked => panic!("plugin request panicked"),
         }
     }
 }

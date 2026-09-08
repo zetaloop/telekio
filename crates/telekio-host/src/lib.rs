@@ -12,7 +12,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
-use telekio::{CallResult, OwnedBytes, Status};
+use telekio_abi::{CallResult, OwnedBytes, Status};
 
 fn result(status: Status, payload: OwnedBytes) -> CallResult {
     CallResult { status, payload }

@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use telekio::{CallResult, Flavor, Future, NameResult, OwnedBytes, RawHandle, Status};
+use telekio_abi::{CallResult, Flavor, Future, NameResult, OwnedBytes, RawHandle, Status};
 
 use crate::owner::OwnerState;
 use crate::{host_panic, result};

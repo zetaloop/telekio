@@ -11,14 +11,14 @@ impl Spawner {
 }
 
 impl BlockingPool {
-    pub(crate) fn install(&self, runtime: ::telekio::Runtime) {
+    pub(crate) fn install(&self, runtime: ::telekio_abi::Runtime) {
         assert!(
             self.telekio.set(runtime).is_ok(),
             "Tokio runtime was initialized twice"
         );
     }
 
-    pub(crate) fn runtime(&self) -> &::telekio::Runtime {
+    pub(crate) fn runtime(&self) -> &::telekio_abi::Runtime {
         self.telekio
             .get()
             .expect("Tokio runtime is not initialized")
@@ -28,9 +28,9 @@ impl BlockingPool {
         self.shutdown_workers(timeout);
         if let Some(runtime) = self.telekio.get() {
             let mode = if timeout.is_some() {
-                ::telekio::Shutdown::Timeout
+                ::telekio_abi::Shutdown::Timeout
             } else {
-                ::telekio::Shutdown::Wait
+                ::telekio_abi::Shutdown::Wait
             };
             let duration = timeout.unwrap_or_default();
             runtime

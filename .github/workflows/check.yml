@@ -53,7 +53,7 @@ jobs:
       - name: Packages
         run: |
           patches=()
-          for package in telekio telekio-build telekio-tokio telekio-host telekio-cli; do
+          for package in telekio telekio-abi telekio-build telekio-tokio telekio-host; do
             patches+=(--config "patch.crates-io.$package.path=\"crates/$package\"")
           done
           cargo package --workspace "${patches[@]}"
@@ -226,11 +226,11 @@ jobs:
             tests -> ../target
       - name: Mixed workspace
         run: |
-          cargo run -p telekio-cli -- cargo check --workspace --locked
-          cargo run -p telekio-cli -- cargo check --manifest-path tests/Cargo.toml --workspace
-          cargo run -p telekio-cli -- cargo clippy --manifest-path tests/Cargo.toml --workspace --all-targets --locked -- -D warnings
-          cargo run -p telekio-cli -- cargo build --manifest-path tests/Cargo.toml --workspace --locked
-          cargo run -p telekio-cli -- cargo check --manifest-path tests/Cargo.toml -p feature-check --features tokio/full --frozen
+          cargo run -p telekio -- cargo check --workspace --locked
+          cargo run -p telekio -- cargo check --manifest-path tests/Cargo.toml --workspace
+          cargo run -p telekio -- cargo clippy --manifest-path tests/Cargo.toml --workspace --all-targets --locked -- -D warnings
+          cargo run -p telekio -- cargo build --manifest-path tests/Cargo.toml --workspace --locked
+          cargo run -p telekio -- cargo check --manifest-path tests/Cargo.toml -p feature-check --features tokio/full --frozen
       - name: Cargo aliases
         working-directory: tests
         run: |
@@ -291,4 +291,4 @@ jobs:
             . -> target
             tests -> ../target
       - name: Target features
-        run: cargo run -p telekio-cli -- cargo check --manifest-path tests/Cargo.toml -p feature-check --target "${{ matrix.target }}" --features "${{ matrix.features }}"
+        run: cargo run -p telekio -- cargo check --manifest-path tests/Cargo.toml -p feature-check --target "${{ matrix.target }}" --features "${{ matrix.features }}"

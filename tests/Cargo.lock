@@ -788,7 +788,7 @@ name = "plugin"
 version = "0.1.0"
 dependencies = [
  "reqwest",
- "telekio",
+ "telekio-abi",
  "tokio",
 ]
 
@@ -797,7 +797,7 @@ name = "plugin-host"
 version = "0.1.0"
 dependencies = [
  "libloading",
- "telekio",
+ "telekio-abi",
  "telekio-host",
  "telekio-tokio",
 ]
@@ -1401,7 +1401,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "telekio"
+name = "telekio-abi"
 version = "0.1.0"
 
 [[package]]
@@ -1418,7 +1418,7 @@ dependencies = [
 name = "telekio-host"
 version = "0.1.0"
 dependencies = [
- "telekio",
+ "telekio-abi",
  "telekio-tokio",
 ]
 
@@ -1498,7 +1498,7 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "socket2",
- "telekio",
+ "telekio-abi",
  "telekio-build",
  "telekio-host",
  "tokio-macros",

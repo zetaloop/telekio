@@ -11,7 +11,7 @@ pub(super) type RxFuture = crate::signal::RxFuture;
     any(feature = "signal", all(unix, feature = "process"))
 ))]
 #[derive(Debug)]
-pub(crate) struct RxFuture(::telekio::Signal);
+pub(crate) struct RxFuture(::telekio_abi::Signal);
 
 #[cfg(all(
     not(test),
@@ -62,7 +62,7 @@ pub(crate) fn signal(
     kind: super::SignalKind,
     _: &crate::runtime::signal::Handle,
 ) -> std::io::Result<RxFuture> {
-    register(::telekio::SignalRequest::unix(kind.as_raw_value())).map(RxFuture)
+    register(::telekio_abi::SignalRequest::unix(kind.as_raw_value())).map(RxFuture)
 }
 
 #[cfg(all(
@@ -71,7 +71,7 @@ pub(crate) fn signal(
 ))]
 #[cfg_attr(test, expect(dead_code))]
 #[track_caller]
-fn register(request: ::telekio::SignalRequest) -> std::io::Result<::telekio::Signal> {
+fn register(request: ::telekio_abi::SignalRequest) -> std::io::Result<::telekio_abi::Signal> {
     let handle = crate::runtime::scheduler::Handle::current();
     let connection = handle.connection();
     assert!(
@@ -93,7 +93,7 @@ macro_rules! console_signals {
             #[cfg(all(not(test), feature = "rt", feature = "signal"))]
             #[track_caller]
             pub(crate) fn $name() -> std::io::Result<RxFuture> {
-                register(::telekio::SignalRequest::console(::telekio::SignalKind::$kind))
+                register(::telekio_abi::SignalRequest::console(::telekio_abi::SignalKind::$kind))
                     .map(RxFuture)
             }
         )+

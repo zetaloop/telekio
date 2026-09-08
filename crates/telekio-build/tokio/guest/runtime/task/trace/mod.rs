@@ -4,7 +4,7 @@ pub(super) fn trace_leaf<F, R>(capture: F) -> Option<R>
 where
     F: for<'a> FnOnce(&'a mut dyn FnMut(&TraceMeta)) -> R,
 {
-    let state = ::telekio::execution_state();
+    let state = ::telekio_abi::execution_state();
     if state.is_null() || unsafe { (*state).tracing } == 0 {
         return Context::try_with_current_trace_leaf_fn(capture);
     }

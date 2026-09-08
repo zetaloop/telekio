@@ -80,22 +80,22 @@ impl Registration {
         if let Some(error) = self.shared.take_telekio_error() {
             return Poll::Ready(Err(error));
         }
-        let waker = unsafe { ::telekio::Waker::from_ref(cx.waker()) };
+        let waker = unsafe { ::telekio_abi::Waker::from_ref(cx.waker()) };
         let result = self.shared.poll_telekio(telekio_interest(interest), &waker);
         match result.state {
-            ::telekio::Poll::Pending => {
+            ::telekio_abi::Poll::Pending => {
                 unsafe { result.call.payload.release() };
                 Poll::Pending
             }
-            ::telekio::Poll::Ready => {
+            ::telekio_abi::Poll::Ready => {
                 result.call.into_io_result()?;
-                if result.ready.contains(::telekio::IoReady::SHUTDOWN) {
+                if result.ready.contains(::telekio_abi::IoReady::SHUTDOWN) {
                     Poll::Ready(Err(gone()))
                 } else {
                     Poll::Ready(Ok(ready_event(result.ready, result.tick)))
                 }
             }
-            ::telekio::Poll::Panicked => {
+            ::telekio_abi::Poll::Panicked => {
                 result.call.into_io_result()?;
                 unreachable!()
             }
@@ -115,7 +115,7 @@ impl Registration {
                 .shared
                 .ready_telekio(telekio_interest(interest))
                 .await?;
-            if event.ready.contains(::telekio::IoReady::SHUTDOWN) {
+            if event.ready.contains(::telekio_abi::IoReady::SHUTDOWN) {
                 Err(gone())
             } else {
                 Ok(ready_event(event.ready, event.tick))
@@ -124,7 +124,7 @@ impl Registration {
     }
 
     #[cfg(windows)]
-    pub(crate) fn try_operate(&self, request: ::telekio::IoRequest) -> ::telekio::IoPoll {
+    pub(crate) fn try_operate(&self, request: ::telekio_abi::IoRequest) -> ::telekio_abi::IoPoll {
         self.shared.try_operate_telekio(request)
     }
 
@@ -143,11 +143,11 @@ impl Registration {
             }
             let result = self.shared.try_ready_telekio(telekio_interest(interest));
             match result.state {
-                ::telekio::Poll::Pending => {
+                ::telekio_abi::Poll::Pending => {
                     unsafe { result.call.payload.release() };
                     Err(io::ErrorKind::WouldBlock.into())
                 }
-                ::telekio::Poll::Ready => {
+                ::telekio_abi::Poll::Ready => {
                     result.call.into_io_result()?;
                     match f() {
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -158,7 +158,7 @@ impl Registration {
                         result => result,
                     }
                 }
-                ::telekio::Poll::Panicked => {
+                ::telekio_abi::Poll::Panicked => {
                     result.call.into_io_result()?;
                     unreachable!()
                 }
@@ -173,13 +173,13 @@ impl Registration {
         #[cfg(feature = "rt")]
         self.shared.clear_telekio(
             event.tick,
-            ::telekio::IoReady::from_bits(event.ready.as_usize() as u8),
+            ::telekio_abi::IoReady::from_bits(event.ready.as_usize() as u8),
         );
     }
 }
 
 #[cfg(feature = "rt")]
-fn ready_event(ready: ::telekio::IoReady, tick: u8) -> ReadyEvent {
+fn ready_event(ready: ::telekio_abi::IoReady, tick: u8) -> ReadyEvent {
     ReadyEvent {
         tick,
         ready: Ready::from_usize(ready.bits() as usize),
@@ -188,28 +188,28 @@ fn ready_event(ready: ::telekio::IoReady, tick: u8) -> ReadyEvent {
 }
 
 #[cfg(feature = "rt")]
-fn telekio_interest(interest: Interest) -> ::telekio::IoInterest {
-    let mut result = ::telekio::IoInterest::empty();
+fn telekio_interest(interest: Interest) -> ::telekio_abi::IoInterest {
+    let mut result = ::telekio_abi::IoInterest::empty();
     if interest.is_readable() {
-        result |= ::telekio::IoInterest::READABLE;
+        result |= ::telekio_abi::IoInterest::READABLE;
     }
     if interest.is_writable() {
-        result |= ::telekio::IoInterest::WRITABLE;
+        result |= ::telekio_abi::IoInterest::WRITABLE;
     }
     if interest.is_error() {
-        result |= ::telekio::IoInterest::ERROR;
+        result |= ::telekio_abi::IoInterest::ERROR;
     }
     #[cfg(target_os = "freebsd")]
     if interest.is_aio() {
-        result |= ::telekio::IoInterest::AIO;
+        result |= ::telekio_abi::IoInterest::AIO;
     }
     #[cfg(target_os = "freebsd")]
     if interest.is_lio() {
-        result |= ::telekio::IoInterest::LIO;
+        result |= ::telekio_abi::IoInterest::LIO;
     }
     #[cfg(any(target_os = "android", target_os = "linux"))]
     if interest.is_priority() {
-        result |= ::telekio::IoInterest::PRIORITY;
+        result |= ::telekio_abi::IoInterest::PRIORITY;
     }
     result
 }

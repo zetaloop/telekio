@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use telekio::{Blocking, BlockingTask, CallResult, OwnedBytes, SourceLocation, Status};
+use telekio_abi::{Blocking, BlockingTask, CallResult, OwnedBytes, SourceLocation, Status};
 
 use crate::owner::{OwnerContext, TaskCleanup};
 use crate::{host_panic, result};

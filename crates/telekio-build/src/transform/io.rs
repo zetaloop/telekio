@@ -195,7 +195,7 @@ pub(super) fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
                     "crate::runtime::io::telekio::delegate",
                     &[
                         "self.io.registration()",
-                        &format!("::telekio::IoOperationKind::{kind}"),
+                        &format!("::telekio_abi::IoOperationKind::{kind}"),
                         data,
                         "buf.len()",
                     ],

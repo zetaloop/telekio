@@ -33,7 +33,7 @@ pub enum Role {
 }
 
 pub fn prepare_tests() -> Result<PathBuf, Box<dyn Error>> {
-    let generated = prepare_guest_with(prepare_tokio()?, package_dependency("telekio", true))?;
+    let generated = prepare_guest_with(prepare_tokio()?, package_dependency("telekio-abi", true))?;
     let path = generated.join("Cargo.toml");
     let mut manifest: Value = toml::from_str(&fs::read_to_string(&path)?)?;
     let features = manifest
@@ -85,7 +85,7 @@ pub fn prepare_tests() -> Result<PathBuf, Box<dyn Error>> {
 }
 
 pub fn prepare_guest() -> Result<PathBuf, Box<dyn Error>> {
-    let generated = prepare_guest_with(prepare_tokio()?, package_dependency("telekio", true))?;
+    let generated = prepare_guest_with(prepare_tokio()?, package_dependency("telekio-abi", true))?;
     let root = generated.join("src/lib.rs");
     fs::write(&root, include_source(&fs::read_to_string(&root)?)?)?;
     Ok(generated)
@@ -170,6 +170,7 @@ fn patch_current(
     Ok(version == Some(concat!("=", env!("CARGO_PKG_VERSION")))
         && rust_version == Some(env!("CARGO_PKG_RUST_VERSION"))
         && features.is_some_and(|features| features.contains_key("telekio-test"))
+        && dependencies.contains_key("telekio-abi")
         && !dependencies.contains_key("telekio-host")
         && build.contains("rustc-cfg=telekio_host") == (source_role == Role::Host)
         && host == (dependency_role == Role::Host)
@@ -261,7 +262,7 @@ fn write_patch(
         .get_mut("dependencies")
         .and_then(Value::as_table_mut)
         .ok_or("Tokio manifest has no dependencies")?;
-    dependencies.insert("telekio".to_owned(), registry_dependency(true));
+    dependencies.insert("telekio-abi".to_owned(), registry_dependency(true));
     dependencies.remove("telekio-host");
     if dependency_role == Role::Host {
         manifest
@@ -383,11 +384,11 @@ fn registry_dependency(guest: bool) -> Value {
     Value::Table(dependency)
 }
 
-fn prepare_guest_with(generated: PathBuf, telekio: Value) -> Result<PathBuf, Box<dyn Error>> {
+fn prepare_guest_with(generated: PathBuf, abi: Value) -> Result<PathBuf, Box<dyn Error>> {
     let native =
         env::var_os("CARGO_CFG_UNIX").is_some() || env::var_os("CARGO_CFG_WINDOWS").is_some();
     if native && env::var_os("CARGO_CFG_LOOM").is_none() {
-        patch_manifest(&generated.join("Cargo.toml"), telekio)?;
+        patch_manifest(&generated.join("Cargo.toml"), abi)?;
         transform::guest(&generated)?;
     }
     Ok(generated)
@@ -402,13 +403,13 @@ pub fn prepare_tokio_host() -> Result<PathBuf, Box<dyn Error>> {
     Ok(directory)
 }
 
-fn patch_manifest(path: &Path, telekio: Value) -> Result<(), Box<dyn Error>> {
+fn patch_manifest(path: &Path, abi: Value) -> Result<(), Box<dyn Error>> {
     let mut manifest: Value = toml::from_str(&fs::read_to_string(path)?)?;
     let dependencies = manifest
         .get_mut("dependencies")
         .and_then(Value::as_table_mut)
         .ok_or("Tokio manifest has no dependencies")?;
-    dependencies.insert("telekio".to_owned(), telekio);
+    dependencies.insert("telekio-abi".to_owned(), abi);
     manifest
         .get_mut("features")
         .and_then(Value::as_table_mut)

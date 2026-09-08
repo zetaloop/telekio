@@ -16,27 +16,27 @@ where
         result: None,
     };
     let call = connection.handle.block_in_place(unsafe {
-        ::telekio::Blocking::from_raw((&raw mut state).cast(), run::<F, R>)
+        ::telekio_abi::Blocking::from_raw((&raw mut state).cast(), run::<F, R>)
     });
     context::telekio::restore();
     match (call.status, state.result) {
-        (::telekio::Status::Ok, Some(Ok(output))) => {
+        (::telekio_abi::Status::Ok, Some(Ok(output))) => {
             unsafe { call.payload.release() };
             output
         }
-        (::telekio::Status::Panicked, Some(Err(payload))) => {
+        (::telekio_abi::Status::Panicked, Some(Err(payload))) => {
             unsafe { call.payload.release() };
             resume_unwind(payload)
         }
-        (::telekio::Status::HostPanicked, _) => {
+        (::telekio_abi::Status::HostPanicked, _) => {
             resume_unwind(Box::new(unsafe { call.payload.into_string() }))
         }
-        (::telekio::Status::Error, _) => panic!("{}", unsafe { call.payload.into_string() }),
+        (::telekio_abi::Status::Error, _) => panic!("{}", unsafe { call.payload.into_string() }),
         _ => panic!("host Tokio runtime returned an invalid block_in_place result"),
     }
 }
 
-unsafe extern "C" fn run<F, R>(data: *mut std::ffi::c_void) -> ::telekio::Status
+unsafe extern "C" fn run<F, R>(data: *mut std::ffi::c_void) -> ::telekio_abi::Status
 where
     F: FnOnce() -> R,
 {
@@ -46,11 +46,11 @@ where
     })) {
         Ok(output) => {
             state.result = Some(Ok(output));
-            ::telekio::Status::Ok
+            ::telekio_abi::Status::Ok
         }
         Err(payload) => {
             state.result = Some(Err(payload));
-            ::telekio::Status::Panicked
+            ::telekio_abi::Status::Panicked
         }
     }
 }

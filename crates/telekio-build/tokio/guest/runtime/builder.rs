@@ -9,7 +9,7 @@ use std::{
 #[cfg(not(test))]
 struct AttachedContext {
     runtime: Runtime,
-    flavor: ::telekio::Flavor,
+    flavor: ::telekio_abi::Flavor,
 }
 
 impl Builder {
@@ -36,7 +36,10 @@ impl Builder {
     }
 
     #[cfg(not(test))]
-    fn build_attached_context(&mut self, handle: ::telekio::Handle) -> io::Result<AttachedContext> {
+    fn build_attached_context(
+        &mut self,
+        handle: ::telekio_abi::Handle,
+    ) -> io::Result<AttachedContext> {
         let flavor = handle.flavor();
         if let Some(name) = handle.name() {
             self.name(name);
@@ -61,14 +64,14 @@ impl Builder {
         result
     }
 
-    fn build_host(&self, local: bool) -> io::Result<::telekio::Runtime> {
+    fn build_host(&self, local: bool) -> io::Result<::telekio_abi::Runtime> {
         let flavor = if local {
-            ::telekio::Flavor::Local
+            ::telekio_abi::Flavor::Local
         } else {
             match self.kind {
-                Kind::CurrentThread => ::telekio::Flavor::CurrentThread,
+                Kind::CurrentThread => ::telekio_abi::Flavor::CurrentThread,
                 #[cfg(feature = "rt-multi-thread")]
-                Kind::MultiThread => ::telekio::Flavor::MultiThread,
+                Kind::MultiThread => ::telekio_abi::Flavor::MultiThread,
             }
         };
         let keep_alive = self.keep_alive.unwrap_or_default();
@@ -81,32 +84,32 @@ impl Builder {
             #[cfg(tokio_unstable)]
             after_poll_callback: self.after_poll.clone(),
         };
-        let config = ::telekio::RuntimeConfig {
+        let config = ::telekio_abi::RuntimeConfig {
             flavor,
             enable_io: self.enable_io.into(),
             enable_time: self.enable_time.into(),
             start_paused: self.start_paused.into(),
             worker_threads: self.worker_threads.unwrap_or_default(),
             max_blocking_threads: self.max_blocking_threads,
-            thread_name: ::telekio::StringCallback::from_arc(self.thread_name.clone()),
+            thread_name: ::telekio_abi::StringCallback::from_arc(self.thread_name.clone()),
             thread_stack_size: self.thread_stack_size.unwrap_or_default(),
             has_thread_stack_size: self.thread_stack_size.is_some().into(),
-            after_start: self
-                .after_start
-                .clone()
-                .map_or_else(::telekio::Callback::none, ::telekio::Callback::from_arc),
-            before_stop: self
-                .before_stop
-                .clone()
-                .map_or_else(::telekio::Callback::none, ::telekio::Callback::from_arc),
-            before_park: self
-                .before_park
-                .clone()
-                .map_or_else(::telekio::Callback::none, ::telekio::Callback::from_arc),
-            after_unpark: self
-                .after_unpark
-                .clone()
-                .map_or_else(::telekio::Callback::none, ::telekio::Callback::from_arc),
+            after_start: self.after_start.clone().map_or_else(
+                ::telekio_abi::Callback::none,
+                ::telekio_abi::Callback::from_arc,
+            ),
+            before_stop: self.before_stop.clone().map_or_else(
+                ::telekio_abi::Callback::none,
+                ::telekio_abi::Callback::from_arc,
+            ),
+            before_park: self.before_park.clone().map_or_else(
+                ::telekio_abi::Callback::none,
+                ::telekio_abi::Callback::from_arc,
+            ),
+            after_unpark: self.after_unpark.clone().map_or_else(
+                ::telekio_abi::Callback::none,
+                ::telekio_abi::Callback::from_arc,
+            ),
             task_callback: task_hooks.callback(),
             keep_alive_secs: keep_alive.as_secs(),
             keep_alive_nanos: keep_alive.subsec_nanos(),
@@ -116,7 +119,7 @@ impl Builder {
             max_io_events_per_tick: self.nevents,
             rng_one,
             rng_two,
-            name: unsafe { ::telekio::Bytes::borrow(self.name.as_deref()) },
+            name: unsafe { ::telekio_abi::Bytes::borrow(self.name.as_deref()) },
             disable_lifo_slot: self.disable_lifo_slot.into(),
             eager_driver_handoff: self.enable_eager_driver_handoff.into(),
             alternative_timer: {
@@ -146,7 +149,7 @@ impl Builder {
                 }
                 #[cfg(not(tokio_unstable))]
                 {
-                    ::telekio::HistogramConfig::disabled()
+                    ::telekio_abi::HistogramConfig::disabled()
                 }
             },
             schedule_histogram: {
@@ -156,14 +159,14 @@ impl Builder {
                 }
                 #[cfg(not(tokio_unstable))]
                 {
-                    ::telekio::HistogramConfig::disabled()
+                    ::telekio_abi::HistogramConfig::disabled()
                 }
             },
         };
         #[cfg(any(telekio_host, feature = "telekio-test"))]
         let result = ::telekio_host::build_root(config);
         #[cfg(not(any(telekio_host, feature = "telekio-test")))]
-        let result = ::telekio::attached().build(config);
+        let result = ::telekio_abi::attached().build(config);
         // Tokio's LocalRuntime keeps this value on its originating thread.
         unsafe { result.into_runtime() }.map(|(runtime, _)| runtime)
     }
@@ -172,37 +175,37 @@ impl Builder {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub(super) unsafe extern "C" fn telekio_guest_context(
-    raw: ::telekio::RawHandle,
-) -> ::telekio::AttachResult {
+    raw: ::telekio_abi::RawHandle,
+) -> ::telekio_abi::AttachResult {
     match catch_unwind(AssertUnwindSafe(|| {
-        let handle = unsafe { ::telekio::Handle::from_abi(raw) };
+        let handle = unsafe { ::telekio_abi::Handle::from_abi(raw) };
         let mut builder = Builder::new_current_thread();
         let runtime = builder
             .build_attached_context(handle.clone())
             .map_err(|error| error.to_string())?;
-        if let Err(handle) = ::telekio::install_handle(handle) {
+        if let Err(handle) = ::telekio_abi::install_handle(handle) {
             drop(handle);
             return Err("Telekio runtime is already attached".to_owned());
         }
         Ok(unsafe {
-            ::telekio::RawAttachment::from_raw(
+            ::telekio_abi::RawAttachment::from_raw(
                 Box::into_raw(Box::new(runtime)).cast(),
                 enter_guest_context,
                 detach_guest_context,
             )
         })
     })) {
-        Ok(Ok(attachment)) => ::telekio::AttachResult {
-            call: ::telekio::CallResult::ok(),
+        Ok(Ok(attachment)) => ::telekio_abi::AttachResult {
+            call: ::telekio_abi::CallResult::ok(),
             attachment,
         },
-        Ok(Err(error)) => ::telekio::AttachResult {
-            call: ::telekio::CallResult::error(&error),
-            attachment: ::telekio::RawAttachment::empty(),
+        Ok(Err(error)) => ::telekio_abi::AttachResult {
+            call: ::telekio_abi::CallResult::error(&error),
+            attachment: ::telekio_abi::RawAttachment::empty(),
         },
-        Err(payload) => ::telekio::AttachResult {
-            call: ::telekio::CallResult::panicked(&*payload),
-            attachment: ::telekio::RawAttachment::empty(),
+        Err(payload) => ::telekio_abi::AttachResult {
+            call: ::telekio_abi::CallResult::panicked(&*payload),
+            attachment: ::telekio_abi::RawAttachment::empty(),
         },
     }
 }
@@ -210,11 +213,11 @@ pub(super) unsafe extern "C" fn telekio_guest_context(
 #[cfg(not(test))]
 unsafe extern "C" fn enter_guest_context(
     data: *mut c_void,
-    execution: *mut ::telekio::ExecutionState,
-    call: ::telekio::GuestCall,
-) -> ::telekio::CallResult {
+    execution: *mut ::telekio_abi::ExecutionState,
+    call: ::telekio_abi::GuestCall,
+) -> ::telekio_abi::CallResult {
     match catch_unwind(AssertUnwindSafe(|| unsafe {
-        ::telekio::with_execution_state(execution, || {
+        ::telekio_abi::with_execution_state(execution, || {
             let context = &*data.cast::<AttachedContext>();
             context
                 .runtime
@@ -222,26 +225,26 @@ unsafe extern "C" fn enter_guest_context(
         })
     })) {
         Ok(result) => result,
-        Err(payload) => ::telekio::CallResult::panicked(&*payload),
+        Err(payload) => ::telekio_abi::CallResult::panicked(&*payload),
     }
 }
 
 #[cfg(tokio_unstable)]
-fn histogram(builder: Option<HistogramBuilder>) -> ::telekio::HistogramConfig {
+fn histogram(builder: Option<HistogramBuilder>) -> ::telekio_abi::HistogramConfig {
     let Some(builder) = builder else {
-        return ::telekio::HistogramConfig::disabled();
+        return ::telekio_abi::HistogramConfig::disabled();
     };
     let (kind, a, b, c) = builder.telekio_parts();
-    ::telekio::HistogramConfig { kind, a, b, c }
+    ::telekio_abi::HistogramConfig { kind, a, b, c }
 }
 
 #[cfg(not(test))]
-unsafe extern "C" fn detach_guest_context(data: *mut c_void) -> ::telekio::CallResult {
+unsafe extern "C" fn detach_guest_context(data: *mut c_void) -> ::telekio_abi::CallResult {
     match catch_unwind(AssertUnwindSafe(|| {
         drop(unsafe { Box::from_raw(data.cast::<AttachedContext>()) });
-        unsafe { ::telekio::detach_attached() }
+        unsafe { ::telekio_abi::detach_attached() }
     })) {
         Ok(result) => result,
-        Err(payload) => ::telekio::CallResult::panicked(&*payload),
+        Err(payload) => ::telekio_abi::CallResult::panicked(&*payload),
     }
 }

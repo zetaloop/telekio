@@ -1,6 +1,6 @@
 use super::*;
 use std::sync::Mutex;
-use telekio::IoOperationKind;
+use telekio_abi::IoOperationKind;
 
 #[derive(Clone)]
 enum WindowsIo {

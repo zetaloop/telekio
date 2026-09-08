@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) struct Timer {
     handle: scheduler::Handle,
-    timer: Option<::telekio::Timer>,
+    timer: Option<::telekio_abi::Timer>,
 }
 
 impl Timer {
@@ -20,7 +20,7 @@ impl Timer {
     pub(crate) fn is_elapsed(&self) -> bool {
         self.timer
             .as_ref()
-            .is_some_and(::telekio::Timer::is_elapsed)
+            .is_some_and(::telekio_abi::Timer::is_elapsed)
     }
 
     pub(crate) fn reset(mut self: Pin<&mut Self>, handle: scheduler::Handle, deadline: Instant) {
@@ -46,7 +46,7 @@ impl Timer {
             if let Some(timer) = &mut self.timer {
                 timer.reset(deadline);
             } else {
-                self.timer = Some(::telekio::Timer::from_result(
+                self.timer = Some(::telekio_abi::Timer::from_result(
                     self.handle.connection().handle.timer(deadline),
                 ));
             }

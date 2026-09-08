@@ -6,7 +6,7 @@ use std::{
     task::{Context as TaskContext, Poll as RustPoll},
 };
 
-use telekio::{CallResult, ExecutionState, Future, OwnedBytes, Poll, Status, Waker};
+use telekio_abi::{CallResult, ExecutionState, Future, OwnedBytes, Poll, Status, Waker};
 
 use crate::owner::{Activity, OwnerState};
 use crate::{host_panic, result};

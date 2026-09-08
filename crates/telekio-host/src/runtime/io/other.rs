@@ -1,6 +1,6 @@
 use std::{ffi::c_void, io};
 
-use telekio::{
+use telekio_abi::{
     CallResult, Callback, IoDriverRegistration, IoDriverResult, IoError, IoInterest,
     IoRegistration, IoResource, IoResult, Status,
 };

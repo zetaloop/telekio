@@ -6,7 +6,7 @@ where
     F: FnOnce(&crate::runtime::scheduler::Handle),
 {
     move |handle| {
-        let state = ::telekio::execution_state();
+        let state = ::telekio_abi::execution_state();
         if state.is_null() {
             local(handle);
         } else {

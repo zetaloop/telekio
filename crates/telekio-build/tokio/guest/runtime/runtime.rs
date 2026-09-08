@@ -23,20 +23,20 @@ pub(crate) fn block_on<F: Future>(
 }
 
 impl Runtime {
-    pub(crate) fn install_host(&self, runtime: ::telekio::Runtime, io_enabled: bool) {
+    pub(crate) fn install_host(&self, runtime: ::telekio_abi::Runtime, io_enabled: bool) {
         self.install(Connection::new(runtime.handle(), io_enabled));
         self.blocking_pool.install(runtime);
     }
 
     #[cfg(not(test))]
-    pub(crate) fn install_attached_host(&self, handle: ::telekio::Handle) {
+    pub(crate) fn install_attached_host(&self, handle: ::telekio_abi::Handle) {
         self.install(Connection::new(handle, true));
     }
 
     #[cfg(not(test))]
     pub(crate) fn enter_attached<R>(
         &self,
-        flavor: ::telekio::Flavor,
+        flavor: ::telekio_abi::Flavor,
         call: impl FnOnce() -> R,
     ) -> R {
         if Handle::try_current().is_ok() {
@@ -44,7 +44,7 @@ impl Runtime {
         }
         crate::runtime::context::enter_runtime(
             &self.handle.inner,
-            flavor == ::telekio::Flavor::MultiThread,
+            flavor == ::telekio_abi::Flavor::MultiThread,
             |_| crate::runtime::context::telekio::enter(call),
         )
     }

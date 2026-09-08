@@ -7,14 +7,14 @@ use std::sync::Arc;
 #[cfg(any(unix, windows))]
 use std::{future::Future, pin::Pin};
 
-use telekio::{
+use telekio_abi::{
     CallResult, Callback, IoCallResult, IoDriverRegistration, IoDriverResult, IoError, IoInterest,
     IoOperationResult, IoPoll, IoReady, IoRegistration, IoRequest, IoResource, IoResult,
     OwnedBytes, Poll, Status, Waker,
 };
 
 #[cfg(any(unix, windows))]
-use telekio::IoKind;
+use telekio_abi::IoKind;
 
 use super::HandleContext;
 use crate::owner::HostResource;
@@ -56,7 +56,7 @@ pub(super) unsafe extern "C" fn register(
 ) -> IoResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     if !context.handle.telekio_io_enabled() {
-        let error = io::Error::other(telekio::IO_DRIVER_DISABLED_ERROR);
+        let error = io::Error::other(telekio_abi::IO_DRIVER_DISABLED_ERROR);
         return IoResult {
             error: IoError::from_error(&error),
             call: call_error(error),
@@ -104,7 +104,7 @@ pub(super) unsafe extern "C" fn register_driver(
     let context = unsafe { &*context.cast::<HandleContext>() };
     match catch_unwind(AssertUnwindSafe(|| -> io::Result<_> {
         if !context.handle.telekio_io_enabled() {
-            return Err(io::Error::other(telekio::IO_DRIVER_DISABLED_ERROR));
+            return Err(io::Error::other(telekio_abi::IO_DRIVER_DISABLED_ERROR));
         }
         if resource.kind() != IoKind::Fd {
             return Err(io::Error::new(
@@ -267,7 +267,7 @@ unsafe extern "C" fn ready(data: *mut std::ffi::c_void, interest: IoInterest) ->
         let future = registration.with(|registration| registration.ready(interest))?;
         let operation = HostResource::new(&owner, Operation { future })?;
         Ok::<_, String>(unsafe {
-            telekio::IoOperation::from_raw(
+            telekio_abi::IoOperation::from_raw(
                 Arc::as_ptr(&operation).cast_mut().cast(),
                 poll_operation,
                 release_operation,
@@ -283,11 +283,11 @@ unsafe extern "C" fn ready(data: *mut std::ffi::c_void, interest: IoInterest) ->
                 status: Status::Error,
                 payload: OwnedBytes::from_string(error),
             },
-            operation: telekio::IoOperation::empty(),
+            operation: telekio_abi::IoOperation::empty(),
         },
         Err(payload) => IoOperationResult {
             call: crate::host_panic(&*payload),
-            operation: telekio::IoOperation::empty(),
+            operation: telekio_abi::IoOperation::empty(),
         },
     }
 }

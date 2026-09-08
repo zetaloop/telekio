@@ -8,27 +8,27 @@ use crate::runtime::{
 impl TaskHooks {
     pub(crate) fn spawn_host(&self, _: &TaskMeta<'_>) {}
 
-    pub(crate) fn callback(self) -> ::telekio::TaskCallback {
+    pub(crate) fn callback(self) -> ::telekio_abi::TaskCallback {
         if !self.hooks_active() {
-            return ::telekio::TaskCallback::none();
+            return ::telekio_abi::TaskCallback::none();
         }
-        ::telekio::TaskCallback::from_arc(Arc::new(move |event, id, location| {
+        ::telekio_abi::TaskCallback::from_arc(Arc::new(move |event, id, location| {
             let meta = TaskMeta {
                 id: task::Id::from_telekio(id),
                 spawned_at: SpawnLocation::from(location),
                 _phantom: Default::default(),
             };
             match event {
-                ::telekio::TaskEvent::Spawn => self.spawn(&meta),
-                ::telekio::TaskEvent::PollStart => {
+                ::telekio_abi::TaskEvent::Spawn => self.spawn(&meta),
+                ::telekio_abi::TaskEvent::PollStart => {
                     #[cfg(tokio_unstable)]
                     self.poll_start_callback(&meta);
                 }
-                ::telekio::TaskEvent::PollStop => {
+                ::telekio_abi::TaskEvent::PollStop => {
                     #[cfg(tokio_unstable)]
                     self.poll_stop_callback(&meta);
                 }
-                ::telekio::TaskEvent::Terminate => {
+                ::telekio_abi::TaskEvent::Terminate => {
                     if let Some(callback) = &self.task_terminate_callback {
                         callback(&meta);
                     }

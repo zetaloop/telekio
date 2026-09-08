@@ -5,7 +5,7 @@ impl OrphanQueueImpl<StdChild> {
         #[cfg(any(telekio_host, feature = "telekio-test"))]
         ::telekio_host::reap_process(orphan.id());
         #[cfg(not(any(telekio_host, feature = "telekio-test")))]
-        if ::telekio::attached()
+        if ::telekio_abi::attached()
             .reap_process(orphan.id())
             .into_io_result()
             .is_err()

@@ -2,7 +2,7 @@ use std::ffi::c_void;
 #[cfg(all(unix, feature = "process"))]
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use telekio::CallResult;
+use telekio_abi::CallResult;
 
 #[cfg(all(unix, feature = "process"))]
 use crate::host_panic;

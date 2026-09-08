@@ -117,7 +117,7 @@ jobs:
           else
             tag=$(git tag --points-at HEAD --list 'v*' | head -1)
           fi
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "telekio-cli") | .version')
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "telekio") | .version')
           if [ -n "$tag" ] && [ "$tag" != "v$version" ]; then
             echo "tag $tag does not match the CLI version $version" >&2
             exit 1

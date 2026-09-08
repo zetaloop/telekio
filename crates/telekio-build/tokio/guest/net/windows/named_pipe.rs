@@ -9,7 +9,7 @@ impl super::PollEvented<super::mio_windows::NamedPipe> {
         let read = std::task::ready!(self.registration().poll_read_io(context, || {
             crate::runtime::io::telekio::operation(
                 self.registration(),
-                ::telekio::IoOperationKind::Read,
+                ::telekio_abi::IoOperationKind::Read,
                 data,
                 len,
             )
@@ -27,7 +27,7 @@ impl super::PollEvented<super::mio_windows::NamedPipe> {
         self.registration().poll_write_io(context, || {
             crate::runtime::io::telekio::operation(
                 self.registration(),
-                ::telekio::IoOperationKind::Write,
+                ::telekio_abi::IoOperationKind::Write,
                 buffer.as_ptr().cast_mut(),
                 buffer.len(),
             )
@@ -49,7 +49,7 @@ impl super::PollEvented<super::mio_windows::NamedPipe> {
     pub(super) fn connect_host(&self) -> std::io::Result<()> {
         crate::runtime::io::telekio::operation(
             self.registration(),
-            ::telekio::IoOperationKind::Connect,
+            ::telekio_abi::IoOperationKind::Connect,
             std::ptr::null_mut(),
             0,
         )
@@ -59,7 +59,7 @@ impl super::PollEvented<super::mio_windows::NamedPipe> {
     pub(super) fn disconnect_host(&self) -> std::io::Result<()> {
         crate::runtime::io::telekio::operation(
             self.registration(),
-            ::telekio::IoOperationKind::Disconnect,
+            ::telekio_abi::IoOperationKind::Disconnect,
             std::ptr::null_mut(),
             0,
         )

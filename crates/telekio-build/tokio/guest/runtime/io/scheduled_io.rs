@@ -2,12 +2,12 @@ use super::ScheduledIo;
 
 #[derive(Debug, Default)]
 pub(super) struct State {
-    registration: Option<std::sync::Arc<::telekio::IoRegistration>>,
+    registration: Option<std::sync::Arc<::telekio_abi::IoRegistration>>,
     error: Option<std::io::Error>,
 }
 
 impl ScheduledIo {
-    pub(crate) fn install(&self, registration: ::telekio::IoRegistration) {
+    pub(crate) fn install(&self, registration: ::telekio_abi::IoRegistration) {
         let previous = self
             .telekio
             .lock()
@@ -19,26 +19,35 @@ impl ScheduledIo {
 
     pub(crate) fn poll_telekio(
         &self,
-        interest: ::telekio::IoInterest,
-        waker: &::telekio::Waker,
-    ) -> ::telekio::IoPoll {
+        interest: ::telekio_abi::IoInterest,
+        waker: &::telekio_abi::Waker,
+    ) -> ::telekio_abi::IoPoll {
         self.registration().poll(interest, waker)
     }
 
-    pub(crate) fn ready_telekio(&self, interest: ::telekio::IoInterest) -> ::telekio::IoOperation {
+    pub(crate) fn ready_telekio(
+        &self,
+        interest: ::telekio_abi::IoInterest,
+    ) -> ::telekio_abi::IoOperation {
         self.registration().ready(interest)
     }
 
     #[cfg(windows)]
-    pub(crate) fn try_operate_telekio(&self, request: ::telekio::IoRequest) -> ::telekio::IoPoll {
+    pub(crate) fn try_operate_telekio(
+        &self,
+        request: ::telekio_abi::IoRequest,
+    ) -> ::telekio_abi::IoPoll {
         self.registration().try_operate(request)
     }
 
-    pub(crate) fn try_ready_telekio(&self, interest: ::telekio::IoInterest) -> ::telekio::IoPoll {
+    pub(crate) fn try_ready_telekio(
+        &self,
+        interest: ::telekio_abi::IoInterest,
+    ) -> ::telekio_abi::IoPoll {
         self.registration().try_ready(interest)
     }
 
-    pub(crate) fn clear_telekio(&self, tick: u8, ready: ::telekio::IoReady) {
+    pub(crate) fn clear_telekio(&self, tick: u8, ready: ::telekio_abi::IoReady) {
         if let Err(error) = self.registration().clear(tick, ready) {
             self.telekio.lock().unwrap().error.get_or_insert(error);
         }
@@ -47,7 +56,7 @@ impl ScheduledIo {
     pub(crate) fn clear_telekio_result(
         &self,
         tick: u8,
-        ready: ::telekio::IoReady,
+        ready: ::telekio_abi::IoReady,
     ) -> std::io::Result<()> {
         self.registration().clear(tick, ready)
     }
@@ -65,7 +74,7 @@ impl ScheduledIo {
         drop(registration);
     }
 
-    fn registration(&self) -> std::sync::Arc<::telekio::IoRegistration> {
+    fn registration(&self) -> std::sync::Arc<::telekio_abi::IoRegistration> {
         self.telekio
             .lock()
             .unwrap()

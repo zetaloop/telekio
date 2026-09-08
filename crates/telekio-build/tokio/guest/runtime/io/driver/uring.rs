@@ -16,16 +16,16 @@ impl UringHandle {
 impl Handle {
     pub(crate) fn add_uring_source_host(&self, fd: RawFd) -> io::Result<()> {
         let handle = UringHandle(self);
-        let callback = ::telekio::Callback::from_arc(Arc::new(move || unsafe {
+        let callback = ::telekio_abi::Callback::from_arc(Arc::new(move || unsafe {
             handle.dispatch();
         }));
         let result = crate::runtime::Handle::current()
             .inner
             .connection()
             .handle
-            .register_io_driver(unsafe { ::telekio::IoResource::fd(fd) }, callback);
+            .register_io_driver(unsafe { ::telekio_abi::IoResource::fd(fd) }, callback);
         self.telekio_uring
-            .install(::telekio::IoDriverRegistration::from_result(result)?)
+            .install(::telekio_abi::IoDriverRegistration::from_result(result)?)
     }
 
     fn dispatch_uring_completions(&self) {

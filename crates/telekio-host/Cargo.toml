@@ -22,7 +22,7 @@ schedule-latency = ["tokio/schedule-latency"]
 taskdump = ["tokio/taskdump"]
 
 [dependencies]
-telekio = { version = "=0.1.0", path = "../telekio" }
+telekio-abi = { version = "=0.1.0", path = "../telekio-abi" }
 tokio = { version = "=0.1.0", path = "../telekio-tokio", package = "telekio-tokio", features = ["rt", "sync"] }
 
 [lints.rust]

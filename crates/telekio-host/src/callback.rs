@@ -1,6 +1,6 @@
 use std::panic::resume_unwind;
 
-use telekio::{Callback, Status};
+use telekio_abi::{Callback, Status};
 
 pub(super) struct CallbackOwner(pub(super) Callback);
 

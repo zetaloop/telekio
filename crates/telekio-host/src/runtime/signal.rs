@@ -10,8 +10,8 @@ use std::{
     all(unix, feature = "process"),
     all(any(unix, windows), feature = "signal")
 ))]
-use telekio::SignalKind;
-use telekio::{
+use telekio_abi::SignalKind;
+use telekio_abi::{
     CallResult, IoError, OperationPoll, OwnedBytes, Poll, SignalRequest, SignalResult, Status,
     Waker,
 };
@@ -67,7 +67,11 @@ pub(super) unsafe extern "C" fn signal(
                 call: call_ok(),
                 error: IoError::none(),
                 signal: unsafe {
-                    telekio::Signal::from_raw(Arc::as_ptr(&signal).cast_mut().cast(), poll, release)
+                    telekio_abi::Signal::from_raw(
+                        Arc::as_ptr(&signal).cast_mut().cast(),
+                        poll,
+                        release,
+                    )
                 },
             },
             Err(error) => SignalResult {
@@ -76,18 +80,18 @@ pub(super) unsafe extern "C" fn signal(
                     payload: OwnedBytes::from_string(error),
                 },
                 error: IoError::none(),
-                signal: telekio::Signal::empty(),
+                signal: telekio_abi::Signal::empty(),
             },
         },
         Ok(Err(error)) => SignalResult {
             error: IoError::from_error(&error),
             call: call_error(error),
-            signal: telekio::Signal::empty(),
+            signal: telekio_abi::Signal::empty(),
         },
         Err(payload) => SignalResult {
             call: crate::host_panic(&*payload),
             error: IoError::none(),
-            signal: telekio::Signal::empty(),
+            signal: telekio_abi::Signal::empty(),
         },
     }
 }

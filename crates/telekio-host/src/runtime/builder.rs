@@ -1,8 +1,8 @@
 use std::{io, panic::resume_unwind, sync::Arc, time::Duration};
 
-use telekio::{Flavor, RuntimeConfig, Status, StringCallback};
+use telekio_abi::{Flavor, RuntimeConfig, Status, StringCallback};
 #[cfg(tokio_unstable)]
-use telekio::{TaskCallback, TaskEvent};
+use telekio_abi::{TaskCallback, TaskEvent};
 
 use crate::owner::OwnerState;
 

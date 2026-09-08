@@ -9,7 +9,9 @@ use std::{
     task::{Context as TaskContext, Poll as RustPoll},
 };
 
-use telekio::{CallResult, OwnedBytes, Poll, SourceLocation, Status, Task, TaskIdResult, Waker};
+use telekio_abi::{
+    CallResult, OwnedBytes, Poll, SourceLocation, Status, Task, TaskIdResult, Waker,
+};
 
 use crate::owner::{OwnerContext, TaskCleanup};
 use crate::{host_panic, result};

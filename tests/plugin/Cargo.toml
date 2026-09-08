@@ -9,5 +9,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
-telekio = { version = "0.1.0", path = "../../crates/telekio" }
+telekio-abi = { version = "0.1.0", path = "../../crates/telekio-abi" }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }

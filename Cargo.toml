@@ -1,8 +1,8 @@
 [workspace]
 members = [
     "crates/telekio",
+    "crates/telekio-abi",
     "crates/telekio-build",
-    "crates/telekio-cli",
     "crates/telekio-host",
     "crates/telekio-tokio",
 ]

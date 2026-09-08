@@ -89,7 +89,7 @@ pub(super) fn patch_blocking(path: &Path) -> Result<(), Box<dyn Error>> {
             &[edit::Field {
                 visibility: None,
                 name: "telekio",
-                ty: "std::sync::OnceLock<::telekio::Runtime>",
+                ty: "std::sync::OnceLock<::telekio_abi::Runtime>",
             }],
         )?;
         edit::append_record_fields(

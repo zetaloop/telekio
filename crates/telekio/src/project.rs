@@ -118,7 +118,7 @@ fn package_role(package: &serde_json::Value) -> Role {
         if name == Some("telekio-host") || matches!(rename, Some("telekio-host" | "telekio_host")) {
             return Role::Host;
         }
-        if name == Some("telekio") {
+        if name == Some("telekio-abi") {
             guest = true;
         }
     }

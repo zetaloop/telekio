@@ -1,6 +1,6 @@
 use std::panic::Location;
 
-use telekio::SourceLocation;
+use telekio_abi::SourceLocation;
 
 pub(super) fn intern(source: SourceLocation) -> Option<&'static Location<'static>> {
     #[cfg(tokio_unstable)]

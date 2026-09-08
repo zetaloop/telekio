@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use telekio::{CallResult, OwnedBytes, Status, Waker};
+use telekio_abi::{CallResult, OwnedBytes, Status, Waker};
 
 use crate::owner::CallbackCleanup;
 use crate::{host_panic, result};

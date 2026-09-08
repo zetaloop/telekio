@@ -2,7 +2,7 @@
 use super::Registration;
 
 pub(crate) trait Source {
-    fn telekio_resource(&mut self) -> ::telekio::IoResource;
+    fn telekio_resource(&mut self) -> ::telekio_abi::IoResource;
 }
 
 pub(crate) struct Uring {
@@ -13,7 +13,7 @@ pub(crate) struct Uring {
         feature = "fs",
         target_os = "linux"
     ))]
-    registration: std::sync::Mutex<Option<::telekio::IoDriverRegistration>>,
+    registration: std::sync::Mutex<Option<::telekio_abi::IoDriverRegistration>>,
 }
 
 impl Uring {
@@ -39,7 +39,7 @@ impl Uring {
     ))]
     pub(crate) fn install(
         &self,
-        registration: ::telekio::IoDriverRegistration,
+        registration: ::telekio_abi::IoDriverRegistration,
     ) -> std::io::Result<()> {
         let mut current = self.registration.lock().unwrap();
         if current.is_some() {
@@ -79,8 +79,8 @@ impl Drop for Uring {
 
 #[cfg(unix)]
 impl<T: std::os::fd::AsRawFd> Source for T {
-    fn telekio_resource(&mut self) -> ::telekio::IoResource {
-        unsafe { ::telekio::IoResource::fd(self.as_raw_fd()) }
+    fn telekio_resource(&mut self) -> ::telekio_abi::IoResource {
+        unsafe { ::telekio_abi::IoResource::fd(self.as_raw_fd()) }
     }
 }
 
@@ -89,9 +89,9 @@ macro_rules! socket_source {
     ($($ty:ty),+ $(,)?) => {
         $(
             impl Source for $ty {
-                fn telekio_resource(&mut self) -> ::telekio::IoResource {
+                fn telekio_resource(&mut self) -> ::telekio_abi::IoResource {
                     use std::os::windows::io::AsRawSocket;
-                    unsafe { ::telekio::IoResource::socket(self.as_raw_socket() as u64) }
+                    unsafe { ::telekio_abi::IoResource::socket(self.as_raw_socket() as u64) }
                 }
             }
         )+
@@ -107,16 +107,16 @@ socket_source!(
 
 #[cfg(windows)]
 impl Source for mio::windows::NamedPipe {
-    fn telekio_resource(&mut self) -> ::telekio::IoResource {
+    fn telekio_resource(&mut self) -> ::telekio_abi::IoResource {
         use std::os::windows::io::AsRawHandle;
-        unsafe { ::telekio::IoResource::handle(self.as_raw_handle() as usize as u64) }
+        unsafe { ::telekio_abi::IoResource::handle(self.as_raw_handle() as usize as u64) }
     }
 }
 
 #[cfg(windows)]
 pub(crate) fn delegate<'a>(
     registration: &'a Registration,
-    kind: ::telekio::IoOperationKind,
+    kind: ::telekio_abi::IoOperationKind,
     data: *mut u8,
     len: usize,
     guest: impl FnOnce() -> std::io::Result<usize> + 'a,
@@ -145,7 +145,7 @@ pub(crate) fn delegate_read_vectored<'a>(
             .map_or(&mut [][..], |buffer| &mut **buffer);
         operation(
             registration,
-            ::telekio::IoOperationKind::Read,
+            ::telekio_abi::IoOperationKind::Read,
             buffer.as_mut_ptr(),
             buffer.len(),
         )
@@ -169,7 +169,7 @@ pub(crate) fn delegate_write_vectored<'a>(
             .map_or(&[][..], |buffer| &**buffer);
         operation(
             registration,
-            ::telekio::IoOperationKind::Write,
+            ::telekio_abi::IoOperationKind::Write,
             buffer.as_ptr().cast_mut(),
             buffer.len(),
         )
@@ -188,7 +188,7 @@ pub(crate) fn delegate_read_buf<'a, B: bytes::BufMut + 'a>(
         let chunk = buffer.chunk_mut();
         let read = operation(
             registration,
-            ::telekio::IoOperationKind::Read,
+            ::telekio_abi::IoOperationKind::Read,
             chunk.as_mut_ptr(),
             chunk.len(),
         )?;
@@ -200,22 +200,22 @@ pub(crate) fn delegate_read_buf<'a, B: bytes::BufMut + 'a>(
 #[cfg(windows)]
 pub(crate) fn operation(
     registration: &Registration,
-    kind: ::telekio::IoOperationKind,
+    kind: ::telekio_abi::IoOperationKind,
     data: *mut u8,
     len: usize,
 ) -> std::io::Result<usize> {
     let result =
-        registration.try_operate(unsafe { ::telekio::IoRequest::from_raw(kind, data, len) });
+        registration.try_operate(unsafe { ::telekio_abi::IoRequest::from_raw(kind, data, len) });
     match result.state {
-        ::telekio::Poll::Pending => {
+        ::telekio_abi::Poll::Pending => {
             unsafe { result.call.payload.release() };
             Err(std::io::ErrorKind::WouldBlock.into())
         }
-        ::telekio::Poll::Ready => {
+        ::telekio_abi::Poll::Ready => {
             result.error.into_io_result(result.call)?;
             Ok(result.value)
         }
-        ::telekio::Poll::Panicked => {
+        ::telekio_abi::Poll::Panicked => {
             result.error.into_io_result(result.call)?;
             unreachable!()
         }
