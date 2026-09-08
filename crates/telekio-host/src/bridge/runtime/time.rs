@@ -1,4 +1,4 @@
-#[cfg(feature = "time")]
+#[cfg(feature = "test-util")]
 use std::future::Future;
 use std::{
     ffi::c_void,
@@ -27,7 +27,8 @@ static CLOCK_ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
 
 #[cfg(feature = "time")]
 struct TimeTimer {
-    sleep: Pin<Box<crate::time::Sleep>>,
+    handle: crate::runtime::scheduler::Handle,
+    timer: Pin<Box<crate::runtime::Timer>>,
 }
 
 pub(super) unsafe extern "C" fn clock(context: *const c_void) -> telekio_abi::ClockResult {
@@ -126,13 +127,11 @@ pub(super) unsafe extern "C" fn timer(
 ) -> TimerResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
     match catch_unwind(AssertUnwindSafe(|| {
-        let _guard = context.handle.enter();
-        HostResource::new(
-            &context.owner,
-            TimeTimer {
-                sleep: Box::pin(crate::time::sleep_until(time_instant(deadline))),
-            },
-        )
+        let handle = context.handle.inner.clone();
+        let deadline = time_instant(deadline);
+        let mut timer = Box::pin(crate::runtime::Timer::new(handle.clone(), deadline));
+        timer.as_mut().init(deadline);
+        HostResource::new(&context.owner, TimeTimer { handle, timer })
     })) {
         Ok(Ok(timer)) => TimerResult {
             call: result(Status::Ok, OwnedBytes::empty()),
@@ -172,7 +171,13 @@ unsafe extern "C" fn poll_time_timer(data: *mut c_void, waker: *const Waker) -> 
         timer.update_waker(unsafe { &*waker });
         let waker = unsafe { (*waker).clone_rust_waker() };
         let mut context = TaskContext::from_waker(&waker);
-        timer.with_mut(|timer| timer.sleep.as_mut().poll(&mut context))
+        timer.with_mut(|timer| {
+            timer
+                .timer
+                .as_mut()
+                .poll_elapsed(&mut context)
+                .map(|result| result.unwrap_or_else(|error| panic!("timer error: {error}")))
+        })
     })) {
         Ok(Ok(RustPoll::Pending)) => {
             time_poll(Poll::Pending, result(Status::Ok, OwnedBytes::empty()))
@@ -193,7 +198,10 @@ unsafe extern "C" fn reset_time_timer(data: *mut c_void, deadline: InstantOffset
     let timer = unsafe { &*data.cast::<HostResource<TimeTimer>>() };
     match catch_unwind(AssertUnwindSafe(|| {
         timer.with_mut(|timer| {
-            timer.sleep.as_mut().reset(time_instant(deadline));
+            timer
+                .timer
+                .as_mut()
+                .reset(timer.handle.clone(), time_instant(deadline));
         })
     })) {
         Ok(Ok(())) => result(Status::Ok, OwnedBytes::empty()),
@@ -206,7 +214,7 @@ unsafe extern "C" fn reset_time_timer(data: *mut c_void, deadline: InstantOffset
 unsafe extern "C" fn time_timer_elapsed(data: *const c_void) -> telekio_abi::BoolResult {
     match catch_unwind(AssertUnwindSafe(|| {
         unsafe { &*data.cast::<HostResource<TimeTimer>>() }
-            .with(|timer| timer.sleep.is_elapsed())
+            .with(|timer| timer.timer.is_elapsed())
             .unwrap_or(true)
     })) {
         Ok(value) => telekio_abi::BoolResult {

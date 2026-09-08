@@ -88,7 +88,11 @@ fn serve(response: bool) -> (String, mpsc::Receiver<()>, JoinHandle<()>) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let path = std::env::args_os().nth(1).expect("expected plugin path");
-    let runtime = Runtime::new()?;
+    let runtime = Runtime::from_tokio(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?,
+    );
     for _ in 0..10 {
         let library = unsafe { Library::new(&path)? };
         let attach = unsafe { *library.get::<Attach>(b"telekio_attach")? };

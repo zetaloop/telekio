@@ -30,7 +30,7 @@ pub use time::{ClockResult, ClockSample, DurationParts, InstantOffset, Timer, Ti
 
 #[doc(hidden)]
 pub fn require_package(package: &str) {
-    #[cfg(not(feature = "guest"))]
+    #[cfg(not(any(feature = "guest", feature = "host")))]
     {
         static WARNING: std::sync::Once = std::sync::Once::new();
         WARNING.call_once(|| {
@@ -39,7 +39,7 @@ pub fn require_package(package: &str) {
             );
         });
     }
-    #[cfg(feature = "guest")]
+    #[cfg(any(feature = "guest", feature = "host"))]
     let _ = package;
 }
 

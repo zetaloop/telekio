@@ -16,7 +16,7 @@ Source locations outlive tasks because Tokio exposes them as `&'static Location`
 
 `telekio-abi` defines the native ABI and artifact-side adapters. Rust-owned values and callback destruction stay in their defining artifact, with panics reported through ABI results.
 
-`telekio-host` compiles native Tokio and its host bridge in one crate. The bridge implementation lives in `src/bridge`; the crate root follows Tokio's module layout. The workspace release version and the upstream Tokio source version selected in `telekio-build/src/source.rs` are separate.
+`telekio-host` compiles native Tokio and its host bridge in one crate. The bridge implementation lives in `src/bridge`; the crate root follows Tokio's module layout. Generated host patches re-export its Tokio API. The workspace release version and the upstream Tokio source version selected in `telekio-build/src/source.rs` are separate.
 
 `telekio-build/src/transform` contains generation-time code. Files under `telekio-build/tokio/{guest,host,shared}` compile inside Tokio, so their `crate::` paths refer to Tokio. Mounted paths follow the upstream module being extended.
 

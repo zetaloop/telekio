@@ -67,6 +67,11 @@ pub(crate) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
         ("runtime/context.rs", Some("pub(crate)"), None),
         ("task/coop/mod.rs", None, None),
         ("util/rand.rs", None, None),
+        (
+            "util/trace.rs",
+            Some("pub(crate)"),
+            Some("#[cfg(feature = \"rt\")]"),
+        ),
         ("runtime/handle.rs", Some("pub(crate)"), None),
         ("runtime/id.rs", None, None),
         (
@@ -133,6 +138,38 @@ pub(crate) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
             Ok(())
         })?;
     }
+    for (file, owner, methods) in [
+        (
+            "runtime/handle.rs",
+            "Handle",
+            &["spawn_named", "spawn_local_named", "block_on_inner"][..],
+        ),
+        ("runtime/runtime.rs", "Runtime", &["block_on_inner"][..]),
+        (
+            "runtime/local_runtime/runtime.rs",
+            "LocalRuntime",
+            &["block_on_inner"][..],
+        ),
+    ] {
+        patch(&source.join("src").join(file), |contents| {
+            for name in methods {
+                edit::redirect_call(
+                    contents,
+                    edit::Scope::Method { owner, name },
+                    "crate::util::trace::task",
+                    "crate::util::trace::telekio::task",
+                )?;
+            }
+            Ok(())
+        })?;
+    }
+    patch(&source.join("src/runtime/blocking/pool.rs"), |contents| {
+        edit::retarget_use(
+            contents,
+            "blocking_task",
+            "crate::util::trace::telekio::blocking_task",
+        )
+    })?;
     if std::env::var_os("CARGO_CFG_UNIX").is_some()
         && std::env::var_os("CARGO_FEATURE_RT").is_some()
         && std::env::var_os("CARGO_FEATURE_NET").is_none()

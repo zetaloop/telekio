@@ -26,7 +26,7 @@ pub fn with_task<R>(
     location: Option<&'static std::panic::Location<'static>>,
     call: impl FnOnce() -> R,
 ) -> R {
-    super::task::Id::with_telekio(id, location, call)
+    crate::util::trace::telekio::forward(|| super::task::Id::with_telekio(id, location, call))
 }
 
 pub fn defer(waker: &std::task::Waker) {

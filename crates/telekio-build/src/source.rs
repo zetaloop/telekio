@@ -14,10 +14,10 @@ use crate::invocation;
 const TOKIO_VERSION: &str = "1.53.1";
 
 pub fn prepare_tokio() -> Result<PathBuf, Box<dyn Error>> {
-    prepare_tokio_artifact(invocation::offline()?)
+    prepare_tokio_artifact(invocation::offline()?).map(|(source, _)| source)
 }
 
-pub(crate) fn prepare_tokio_artifact(offline: bool) -> Result<PathBuf, Box<dyn Error>> {
+pub(crate) fn prepare_tokio_artifact(offline: bool) -> Result<(PathBuf, Json), Box<dyn Error>> {
     prepare_tokio_in(&output_directory()?, offline, true)
 }
 
@@ -25,7 +25,7 @@ pub(crate) fn prepare_tokio_in(
     output: &Path,
     offline: bool,
     emit: bool,
-) -> Result<PathBuf, Box<dyn Error>> {
+) -> Result<(PathBuf, Json), Box<dyn Error>> {
     prepare_package(output, "tokio", TOKIO_VERSION, offline, emit)
 }
 
@@ -41,7 +41,7 @@ fn prepare_package(
     version: &str,
     offline: bool,
     emit: bool,
-) -> Result<PathBuf, Box<dyn Error>> {
+) -> Result<(PathBuf, Json), Box<dyn Error>> {
     let out = output.join(format!("{package}-source-{version}"));
     fs::create_dir_all(out.join("src"))?;
     let manifest = out.join("Cargo.toml");
@@ -72,7 +72,7 @@ fn prepare_package(
             return Err(format!("cargo generate-lockfile failed with {status}").into());
         }
     }
-    let source = package_source(&manifest, package, version, offline)?;
+    let (source, features) = package_source(&manifest, package, version, offline)?;
     let destination = output.join(format!("{package}-{version}"));
     if destination.is_dir() {
         fs::remove_dir_all(&destination)?;
@@ -86,7 +86,7 @@ fn prepare_package(
         println!("cargo:rerun-if-changed={}", lock.display());
         println!("cargo:rerun-if-env-changed=CARGO_HOME");
     }
-    Ok(destination)
+    Ok((destination, features))
 }
 
 fn package_source(
@@ -94,7 +94,7 @@ fn package_source(
     package: &str,
     version: &str,
     offline: bool,
-) -> Result<PathBuf, Box<dyn Error>> {
+) -> Result<(PathBuf, Json), Box<dyn Error>> {
     let output = Command::new(cargo())
         .current_dir(env::temp_dir())
         .args([
@@ -138,10 +138,11 @@ fn package_source(
     let manifest = selected["manifest_path"]
         .as_str()
         .ok_or("registry package has no manifest path")?;
-    Path::new(manifest)
+    let source = Path::new(manifest)
         .parent()
-        .map(Path::to_owned)
-        .ok_or_else(|| "registry package manifest has no parent".into())
+        .ok_or("registry package manifest has no parent")?
+        .to_owned();
+    Ok((source, selected["features"].clone()))
 }
 
 fn copy_directory(source: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {

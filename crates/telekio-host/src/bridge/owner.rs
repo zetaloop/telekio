@@ -210,8 +210,8 @@ pub(super) fn owner_state() -> Arc<OwnerState> {
             resources: HashMap::new(),
             next_id: 1,
         }),
-        notify: crate::sync::Notify::new(),
-        shutdown: crate::sync::Mutex::new(()),
+        notify: crate::sync::Notify::const_new(),
+        shutdown: crate::sync::Mutex::const_new(()),
     })
 }
 

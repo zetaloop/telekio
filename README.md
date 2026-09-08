@@ -104,7 +104,8 @@ edition = "2024"
 
 [dependencies]
 libloading = "0.9"
-telekio-host = { version = "0.1", features = ["rt-multi-thread"] }
+telekio-host = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
 ```
 
 `host/src/main.rs`:
@@ -194,8 +195,7 @@ Call it from the application's entry point. In ordinary-Tokio builds, it prints 
 | Crate | Responsibility |
 | --- | --- |
 | `telekio-abi` | Dependency-free ABI descriptors, artifact-side adapters, and attachment entry |
-| `telekio-host` | Runtime services and per-plugin ownership |
-| `telekio-tokio` | Native Tokio backend, with Rust crate name `tokio` |
+| `telekio-host` | Native Tokio runtime, cross-artifact services, and per-plugin ownership |
 | `telekio-build` | Upstream source preparation, structural transformations, and sparse patch generation |
 | `telekio` | Cargo wrapper and persistent project patches |
 

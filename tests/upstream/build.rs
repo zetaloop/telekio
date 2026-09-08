@@ -10,7 +10,9 @@ fn main() {
         manifest["features"]["full"]
             .as_array_mut()
             .unwrap()
-            .retain(|feature| feature.as_str() != Some("parking_lot"));
+            .retain(|feature| {
+                !matches!(feature.as_str(), Some("parking_lot" | "telekio-host?/full"))
+            });
         std::fs::write(path, manifest.to_string()).unwrap();
     }
     println!("cargo::rustc-env=TOKIO_TESTS={}", source.display());

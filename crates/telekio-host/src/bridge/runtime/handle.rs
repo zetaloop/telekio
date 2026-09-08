@@ -91,7 +91,9 @@ pub(super) unsafe extern "C" fn handle_block_on(
     let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<Status, String> {
         let context = unsafe { &*context.cast::<HandleContext>() };
         let activity = context.owner.activity()?;
-        let status = context.handle.block_on(GuestFuture::new(future, &activity));
+        let status = crate::util::trace::telekio::forward(|| {
+            context.handle.block_on(GuestFuture::new(future, &activity))
+        });
         drop(activity);
         Ok(status)
     }));

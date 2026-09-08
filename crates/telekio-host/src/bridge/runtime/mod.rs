@@ -377,7 +377,7 @@ pub(super) unsafe extern "C" fn runtime_block_on(owner: *mut c_void, future: Fut
             .ok_or_else(|| "Tokio owner has gone away".to_owned())?;
         let activity = owner.activity()?;
         let kind = runtime.kind.read().unwrap();
-        let status = match &*kind {
+        let status = crate::util::trace::telekio::forward(|| match &*kind {
             RuntimeKind::Runtime(runtime) => runtime
                 .as_ref()
                 .expect("Tokio runtime has shut down")
@@ -386,7 +386,7 @@ pub(super) unsafe extern "C" fn runtime_block_on(owner: *mut c_void, future: Fut
                 .with(|runtime| runtime.block_on(GuestFuture::new(future, &activity)))
                 .unwrap_or_else(|error| panic!("{error}")),
             RuntimeKind::Closed => panic!("Tokio runtime has shut down"),
-        };
+        });
         drop(activity);
         Ok(status)
     }));

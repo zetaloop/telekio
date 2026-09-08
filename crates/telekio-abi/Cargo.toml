@@ -12,3 +12,4 @@ description = "Cross-artifact interfaces and adapters for Telekio"
 
 [features]
 guest = []
+host = []
