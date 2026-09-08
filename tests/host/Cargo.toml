@@ -8,4 +8,3 @@ publish = false
 libloading = "0.9.0"
 telekio-abi = { version = "0.1.0", path = "../../crates/telekio-abi" }
 telekio-host = { version = "0.1.0", path = "../../crates/telekio-host", features = ["full"] }
-tokio = { version = "0.1.0", path = "../../crates/telekio-tokio", package = "telekio-tokio", features = ["full"] }

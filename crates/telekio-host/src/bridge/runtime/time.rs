@@ -1,3 +1,5 @@
+#[cfg(feature = "time")]
+use std::future::Future;
 use std::{
     ffi::c_void,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -17,15 +19,15 @@ use telekio_abi::{OperationPoll, OwnedBytes, Poll, Status, Waker};
 
 #[cfg(feature = "time")]
 use super::HandleContext;
-use crate::host_panic;
+use crate::bridge::host_panic;
 #[cfg(feature = "time")]
-use crate::{host_callback, owner::HostResource, result};
+use crate::bridge::{host_callback, owner::HostResource, result};
 
 static CLOCK_ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
 
 #[cfg(feature = "time")]
 struct TimeTimer {
-    sleep: Pin<Box<tokio::time::Sleep>>,
+    sleep: Pin<Box<crate::time::Sleep>>,
 }
 
 pub(super) unsafe extern "C" fn clock(context: *const c_void) -> telekio_abi::ClockResult {
@@ -36,7 +38,7 @@ pub(super) unsafe extern "C" fn clock(context: *const c_void) -> telekio_abi::Cl
         let logical = {
             let context = unsafe { &*context.cast::<HandleContext>() };
             let _guard = context.handle.enter();
-            instant_offset(origin, tokio::time::Instant::now().into_std())
+            instant_offset(origin, crate::time::Instant::now().into_std())
         };
         #[cfg(not(feature = "time"))]
         let logical = {
@@ -67,12 +69,12 @@ pub(super) unsafe extern "C" fn clock(context: *const c_void) -> telekio_abi::Cl
 
 #[cfg(feature = "test-util")]
 pub(super) unsafe extern "C" fn pause(context: *const c_void) -> CallResult {
-    time_call(context, tokio::time::pause)
+    time_call(context, crate::time::pause)
 }
 
 #[cfg(feature = "test-util")]
 pub(super) unsafe extern "C" fn resume(context: *const c_void) -> CallResult {
-    time_call(context, tokio::time::resume)
+    time_call(context, crate::time::resume)
 }
 
 #[cfg(not(feature = "test-util"))]
@@ -103,7 +105,7 @@ pub(super) unsafe extern "C" fn advance(
     let context = unsafe { &*context.cast::<HandleContext>() };
     match catch_unwind(AssertUnwindSafe(|| {
         let _guard = context.handle.enter();
-        let mut operation = std::pin::pin!(tokio::time::advance(duration.duration()));
+        let mut operation = std::pin::pin!(crate::time::advance(duration.duration()));
         let mut context = TaskContext::from_waker(std::task::Waker::noop());
         _ = operation.as_mut().poll(&mut context);
     })) {
@@ -128,7 +130,7 @@ pub(super) unsafe extern "C" fn timer(
         HostResource::new(
             &context.owner,
             TimeTimer {
-                sleep: Box::pin(tokio::time::sleep_until(time_instant(deadline))),
+                sleep: Box::pin(crate::time::sleep_until(time_instant(deadline))),
             },
         )
     })) {
@@ -224,9 +226,9 @@ unsafe extern "C" fn release_time_timer(data: *mut c_void) -> CallResult {
 }
 
 #[cfg(feature = "time")]
-fn time_instant(offset: InstantOffset) -> tokio::time::Instant {
+fn time_instant(offset: InstantOffset) -> crate::time::Instant {
     let origin = *CLOCK_ORIGIN.get_or_init(std::time::Instant::now);
-    tokio::time::Instant::from_std(offset.apply(origin))
+    crate::time::Instant::from_std(offset.apply(origin))
 }
 
 #[cfg(feature = "time")]

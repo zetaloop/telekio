@@ -4,8 +4,8 @@ use telekio_abi::IoOperationKind;
 
 #[derive(Clone)]
 enum WindowsIo {
-    Socket(Arc<tokio::net::telekio::Socket>),
-    Pipe(Arc<tokio::net::windows::named_pipe::NamedPipeServer>),
+    Socket(Arc<crate::net::telekio::Socket>),
+    Pipe(Arc<crate::net::windows::named_pipe::NamedPipeServer>),
 }
 
 pub(super) struct Registration {
@@ -26,7 +26,7 @@ pub(super) fn register_inner(
             interest |= IoInterest::ERROR;
             let _guard = context.handle.enter();
             WindowsIo::Socket(Arc::new(unsafe {
-                tokio::net::telekio::Socket::from_raw_socket(
+                crate::net::telekio::Socket::from_raw_socket(
                     resource.raw() as RawSocket,
                     host_interest(interest)?,
                 )?
@@ -37,7 +37,7 @@ pub(super) fn register_inner(
             let handle = unsafe { BorrowedHandle::borrow_raw(raw) }.try_clone_to_owned()?;
             let _guard = context.handle.enter();
             WindowsIo::Pipe(Arc::new(unsafe {
-                tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(
+                crate::net::windows::named_pipe::NamedPipeServer::from_raw_handle(
                     handle.into_raw_handle(),
                 )?
             }))
@@ -60,7 +60,7 @@ impl Registration {
         &self,
         context: &mut std::task::Context<'_>,
         interest: IoInterest,
-    ) -> std::task::Poll<io::Result<(u8, tokio::runtime::telekio::Ready, bool)>> {
+    ) -> std::task::Poll<io::Result<(u8, crate::runtime::telekio::Ready, bool)>> {
         match (host_interest(interest), &self.io) {
             (Ok(interest), WindowsIo::Socket(io)) => io.poll_ready(context, interest),
             (Ok(interest), WindowsIo::Pipe(io)) => io.poll_telekio_ready(context, interest),

@@ -9,7 +9,7 @@ use std::{
 use telekio_abi::Flavor;
 use telekio_abi::{CallResult, Metric, MetricResult, OwnedBytes, Status, WorkerCallback};
 
-use crate::{host_panic, result};
+use crate::bridge::{host_panic, result};
 
 use super::HandleContext;
 
@@ -70,7 +70,7 @@ pub(super) unsafe extern "C" fn metric(
                             .end
                             .as_nanos()
                             as u64,
-                        Metric::CurrentWorkerIndex => tokio::runtime::worker_index()
+                        Metric::CurrentWorkerIndex => crate::runtime::worker_index()
                             .map(|worker| worker as u64 + 1)
                             .unwrap_or_default(),
                         #[cfg(target_has_atomic = "64")]
@@ -177,7 +177,7 @@ pub(super) unsafe extern "C" fn metric(
 
 #[cfg(tokio_unstable)]
 pub(super) struct WorkerObserver {
-    handle: tokio::runtime::Handle,
+    handle: crate::runtime::Handle,
     id: Option<u64>,
 }
 

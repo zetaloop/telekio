@@ -4,10 +4,10 @@ use telekio_abi::{Flavor, RuntimeConfig, Status, StringCallback};
 #[cfg(tokio_unstable)]
 use telekio_abi::{TaskCallback, TaskEvent};
 
-use crate::owner::OwnerState;
+use crate::bridge::owner::OwnerState;
 
 use super::{HandleContext, LocalSlot, RuntimeKind, handle::handle_context};
-use crate::callback::CallbackOwner;
+use crate::bridge::callback::CallbackOwner;
 
 #[cfg(tokio_unstable)]
 struct TaskCallbackOwner(TaskCallback);
@@ -16,7 +16,7 @@ struct StringCallbackOwner(StringCallback);
 
 #[cfg(tokio_unstable)]
 impl TaskCallbackOwner {
-    fn call(&self, event: TaskEvent, meta: &tokio::runtime::TaskMeta<'_>) {
+    fn call(&self, event: TaskEvent, meta: &crate::runtime::TaskMeta<'_>) {
         self.0
             .call(event, meta.id().telekio_value(), meta.spawned_at())
             .resume("Tokio task callback panicked");
@@ -117,9 +117,9 @@ pub(super) fn build_runtime(
     #[cfg(tokio_unstable)]
     let task_callback = Arc::new(TaskCallbackOwner(config.task_callback));
     let mut builder = match config.flavor {
-        Flavor::CurrentThread | Flavor::Local => tokio::runtime::Builder::new_current_thread(),
+        Flavor::CurrentThread | Flavor::Local => crate::runtime::Builder::new_current_thread(),
         #[cfg(feature = "rt-multi-thread")]
-        Flavor::MultiThread => tokio::runtime::Builder::new_multi_thread(),
+        Flavor::MultiThread => crate::runtime::Builder::new_multi_thread(),
         #[cfg(not(feature = "rt-multi-thread"))]
         Flavor::MultiThread => {
             return Err(io::Error::new(

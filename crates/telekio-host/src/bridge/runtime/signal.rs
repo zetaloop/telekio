@@ -17,7 +17,7 @@ use telekio_abi::{
 };
 
 use super::HandleContext;
-use crate::owner::HostResource;
+use crate::bridge::owner::HostResource;
 
 trait Receiver: Send {
     fn poll_recv(&mut self, context: &mut Context<'_>) -> RustPoll<()>;
@@ -28,7 +28,7 @@ struct Signal {
 }
 
 #[cfg(all(unix, any(feature = "signal", feature = "process")))]
-impl Receiver for tokio::runtime::telekio::Signal {
+impl Receiver for crate::runtime::telekio::Signal {
     fn poll_recv(&mut self, context: &mut Context<'_>) -> RustPoll<()> {
         self.poll_recv(context).map(|_| ())
     }
@@ -49,11 +49,11 @@ macro_rules! windows_receivers {
 
 #[cfg(all(windows, feature = "signal"))]
 windows_receivers!(
-    tokio::signal::windows::CtrlC,
-    tokio::signal::windows::CtrlBreak,
-    tokio::signal::windows::CtrlClose,
-    tokio::signal::windows::CtrlLogoff,
-    tokio::signal::windows::CtrlShutdown,
+    crate::signal::windows::CtrlC,
+    crate::signal::windows::CtrlBreak,
+    crate::signal::windows::CtrlClose,
+    crate::signal::windows::CtrlLogoff,
+    crate::signal::windows::CtrlShutdown,
 );
 
 pub(super) unsafe extern "C" fn signal(
@@ -89,7 +89,7 @@ pub(super) unsafe extern "C" fn signal(
             signal: telekio_abi::Signal::empty(),
         },
         Err(payload) => SignalResult {
-            call: crate::host_panic(&*payload),
+            call: crate::bridge::host_panic(&*payload),
             error: IoError::none(),
             signal: telekio_abi::Signal::empty(),
         },
@@ -100,7 +100,7 @@ pub(super) unsafe extern "C" fn signal(
 fn create(context: &HandleContext, request: SignalRequest) -> io::Result<Box<dyn Receiver>> {
     let _guard = context.handle.enter();
     if request.kind == SignalKind::Unix {
-        tokio::runtime::telekio::signal(tokio::runtime::telekio::SignalKind::from_raw(
+        crate::runtime::telekio::signal(crate::runtime::telekio::SignalKind::from_raw(
             request.number,
         ))
         .map(|receiver| Box::new(receiver) as Box<dyn Receiver>)
@@ -117,15 +117,15 @@ fn create(context: &HandleContext, request: SignalRequest) -> io::Result<Box<dyn
     let _guard = context.handle.enter();
     match request.kind {
         SignalKind::CtrlC => {
-            tokio::signal::windows::ctrl_c().map(|receiver| Box::new(receiver) as Box<dyn Receiver>)
+            crate::signal::windows::ctrl_c().map(|receiver| Box::new(receiver) as Box<dyn Receiver>)
         }
-        SignalKind::CtrlBreak => tokio::signal::windows::ctrl_break()
+        SignalKind::CtrlBreak => crate::signal::windows::ctrl_break()
             .map(|receiver| Box::new(receiver) as Box<dyn Receiver>),
-        SignalKind::CtrlClose => tokio::signal::windows::ctrl_close()
+        SignalKind::CtrlClose => crate::signal::windows::ctrl_close()
             .map(|receiver| Box::new(receiver) as Box<dyn Receiver>),
-        SignalKind::CtrlLogoff => tokio::signal::windows::ctrl_logoff()
+        SignalKind::CtrlLogoff => crate::signal::windows::ctrl_logoff()
             .map(|receiver| Box::new(receiver) as Box<dyn Receiver>),
-        SignalKind::CtrlShutdown => tokio::signal::windows::ctrl_shutdown()
+        SignalKind::CtrlShutdown => crate::signal::windows::ctrl_shutdown()
             .map(|receiver| Box::new(receiver) as Box<dyn Receiver>),
         SignalKind::Unix => Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -171,13 +171,13 @@ unsafe extern "C" fn poll(data: *mut c_void, waker: *const Waker) -> OperationPo
         Ok(result) => result,
         Err(payload) => OperationPoll {
             state: Poll::Panicked,
-            call: crate::host_panic(&*payload),
+            call: crate::bridge::host_panic(&*payload),
         },
     }
 }
 
 unsafe extern "C" fn release(data: *mut c_void) -> CallResult {
-    crate::host_callback(|| unsafe { &*data.cast::<HostResource<Signal>>() }.release())
+    crate::bridge::host_callback(|| unsafe { &*data.cast::<HostResource<Signal>>() }.release())
 }
 
 fn call_ok() -> CallResult {

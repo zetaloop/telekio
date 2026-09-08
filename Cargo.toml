@@ -4,7 +4,6 @@ members = [
     "crates/telekio-abi",
     "crates/telekio-build",
     "crates/telekio-host",
-    "crates/telekio-tokio",
 ]
 resolver = "3"
 

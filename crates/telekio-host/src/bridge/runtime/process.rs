@@ -5,12 +5,12 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use telekio_abi::CallResult;
 
 #[cfg(all(unix, feature = "process"))]
-use crate::host_panic;
+use crate::bridge::host_panic;
 
 #[cfg(all(unix, feature = "process"))]
 #[doc(hidden)]
 pub fn reap_process(id: u32) {
-    tokio::runtime::telekio::reap_process(id);
+    crate::runtime::telekio::reap_process(id);
 }
 
 pub(super) unsafe extern "C" fn reap_process_abi(_: *const c_void, id: u32) -> CallResult {

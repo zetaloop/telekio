@@ -13,14 +13,14 @@ use telekio_abi::{
     CallResult, OwnedBytes, Poll, SourceLocation, Status, Task, TaskIdResult, Waker,
 };
 
-use crate::owner::{OwnerContext, TaskCleanup};
-use crate::{host_panic, result};
+use crate::bridge::owner::{OwnerContext, TaskCleanup};
+use crate::bridge::{host_panic, result};
 
 use super::{HandleContext, context::with_task_execution};
 
 #[doc(hidden)]
 pub fn next_task_id() -> u64 {
-    tokio::runtime::telekio::next_task_id()
+    crate::runtime::telekio::next_task_id()
 }
 
 pub(super) unsafe extern "C" fn task_id(_: *const c_void) -> TaskIdResult {
@@ -150,7 +150,7 @@ impl RustFuture for GuestTask {
         #[cfg(feature = "rt-multi-thread")]
         if let Some(guest) = poll.duration_nanos() {
             let actual = started.elapsed().as_nanos().min(u64::MAX.into()) as u64;
-            tokio::runtime::Handle::telekio_record_poll(actual, guest);
+            crate::runtime::Handle::telekio_record_poll(actual, guest);
         }
         match poll.state() {
             Poll::Pending => RustPoll::Pending,

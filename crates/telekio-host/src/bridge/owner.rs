@@ -2,7 +2,7 @@ use std::{
     cell::Cell,
     collections::HashMap,
     ffi::c_void,
-    io,
+    fmt, io,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
@@ -16,8 +16,9 @@ use telekio_abi::{
 use super::runtime::{HandleContext, RuntimeOwner, raw_handle};
 use super::{host_callback, host_panic, result};
 
+/// A runtime's task and resource ownership for one plugin.
 pub struct Owner {
-    pub(super) runtime: Arc<tokio::runtime::Runtime>,
+    pub(super) runtime: Arc<crate::runtime::Runtime>,
     pub(super) handle: Arc<HandleContext>,
 }
 
@@ -38,8 +39,8 @@ struct GuestCallState<F, R> {
 
 pub(super) struct OwnerState {
     state: Mutex<OwnerStatus>,
-    notify: tokio::sync::Notify,
-    shutdown: tokio::sync::Mutex<()>,
+    notify: crate::sync::Notify,
+    shutdown: crate::sync::Mutex<()>,
 }
 
 struct OwnerStatus {
@@ -58,7 +59,7 @@ struct HandleRecord {
 }
 
 struct TaskRecord {
-    handle: Option<tokio::task::AbortHandle>,
+    handle: Option<crate::task::AbortHandle>,
 }
 
 trait OwnerResource: Send + Sync {
@@ -97,11 +98,31 @@ thread_local! {
     static ACTIVE_OWNER: Cell<*const OwnerState> = const { Cell::new(std::ptr::null()) };
 }
 
+impl fmt::Debug for Owner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Owner")
+            .field("runtime", &self.runtime)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for Attachment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Attachment")
+            .field("attached", &self.raw.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Owner {
+    /// Returns the ABI handle for this owner's runtime services.
     pub fn runtime(&self) -> telekio_abi::Handle {
         unsafe { telekio_abi::Handle::from_abi(raw_handle(Arc::clone(&self.handle))) }
     }
 
+    /// Stops this owner's work and waits for its active calls.
     pub async fn shutdown(&self) -> io::Result<()> {
         if ACTIVE_OWNER.get() == Arc::as_ptr(&self.handle.owner) {
             return Err(io::Error::other(
@@ -150,7 +171,7 @@ impl Attachment {
             output: None,
         };
         let call = unsafe { GuestCall::from_raw((&raw mut state).cast(), run_guest_call::<F, R>) };
-        tokio::runtime::telekio::with_execution(|state| unsafe { raw.enter(state.cast(), call) })
+        crate::runtime::telekio::with_execution(|state| unsafe { raw.enter(state.cast(), call) })
             .resume("failed to enter Telekio guest runtime");
         drop(activity);
         state.output.take().expect("Telekio guest call did not run")
@@ -189,8 +210,8 @@ pub(super) fn owner_state() -> Arc<OwnerState> {
             resources: HashMap::new(),
             next_id: 1,
         }),
-        notify: tokio::sync::Notify::new(),
-        shutdown: tokio::sync::Mutex::new(()),
+        notify: crate::sync::Notify::new(),
+        shutdown: crate::sync::Mutex::new(()),
     })
 }
 
@@ -309,7 +330,7 @@ impl OwnerState {
         }
     }
 
-    pub(super) fn register_task(&self, id: u64, handle: tokio::task::AbortHandle) {
+    pub(super) fn register_task(&self, id: u64, handle: crate::task::AbortHandle) {
         let mut state = self.state.lock().unwrap();
         if !state.accepting {
             handle.abort();
@@ -370,7 +391,7 @@ impl OwnerState {
     fn begin_shutdown(
         &self,
     ) -> (
-        Vec<tokio::task::AbortHandle>,
+        Vec<crate::task::AbortHandle>,
         Vec<Arc<dyn OwnerResource>>,
         Vec<std::task::Waker>,
     ) {
@@ -539,7 +560,7 @@ impl<T: Send + 'static> HostResource<T> {
 
 async fn shutdown_owner(
     owner: &Arc<OwnerState>,
-    handle: &tokio::runtime::Handle,
+    handle: &crate::runtime::Handle,
 ) -> io::Result<()> {
     let (tasks, resources, activities) = owner.begin_shutdown();
     for task in tasks {

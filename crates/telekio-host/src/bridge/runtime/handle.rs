@@ -8,8 +8,8 @@ use std::{
 
 use telekio_abi::{CallResult, Flavor, Future, NameResult, OwnedBytes, RawHandle, Status};
 
-use crate::owner::OwnerState;
-use crate::{host_panic, result};
+use crate::bridge::owner::OwnerState;
+use crate::bridge::{host_panic, result};
 
 #[cfg(tokio_unstable)]
 use super::metrics::WorkerObserver;
@@ -19,7 +19,7 @@ use super::{
 };
 
 pub(crate) struct HandleContext {
-    pub(super) handle: tokio::runtime::Handle,
+    pub(super) handle: crate::runtime::Handle,
     pub(crate) owner: Arc<OwnerState>,
     pub(super) flavor: Flavor,
     pub(super) local: Option<Arc<LocalSlot>>,
@@ -64,7 +64,7 @@ pub(super) unsafe extern "C" fn name(context: *const c_void) -> NameResult {
 }
 
 pub(super) fn handle_context(
-    handle: tokio::runtime::Handle,
+    handle: crate::runtime::Handle,
     owner: Arc<OwnerState>,
     local: Option<Arc<LocalSlot>>,
     flavor: Flavor,

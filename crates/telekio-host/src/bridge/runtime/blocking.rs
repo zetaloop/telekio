@@ -6,8 +6,8 @@ use std::{
 
 use telekio_abi::{Blocking, BlockingTask, CallResult, OwnedBytes, SourceLocation, Status};
 
-use crate::owner::{OwnerContext, TaskCleanup};
-use crate::{host_panic, result};
+use crate::bridge::owner::{OwnerContext, TaskCleanup};
+use crate::bridge::{host_panic, result};
 
 use super::{HandleContext, context::with_task_execution};
 
@@ -20,7 +20,7 @@ pub(super) unsafe extern "C" fn block_in_place(
         let context = unsafe { &*context.cast::<HandleContext>() };
         let activity = context.owner.activity()?;
         context.owner.wake_activities();
-        let status = tokio::task::block_in_place(|| unsafe { blocking.run() });
+        let status = crate::task::block_in_place(|| unsafe { blocking.run() });
         drop(activity);
         Ok(status)
     }));

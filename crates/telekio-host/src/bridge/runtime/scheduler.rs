@@ -6,8 +6,8 @@ use std::{
 
 use telekio_abi::{CallResult, OwnedBytes, Status, Waker};
 
-use crate::owner::CallbackCleanup;
-use crate::{host_panic, result};
+use crate::bridge::owner::CallbackCleanup;
+use crate::bridge::{host_panic, result};
 
 use super::HandleContext;
 
@@ -72,7 +72,7 @@ pub(super) unsafe extern "C" fn defer(context: *const c_void, waker: *const Wake
             return;
         };
         deferred.install(cleanup);
-        tokio::runtime::telekio::defer(&waker);
+        crate::runtime::telekio::defer(&waker);
     })) {
         Ok(()) => result(Status::Ok, OwnedBytes::empty()),
         Err(payload) => host_panic(&*payload),

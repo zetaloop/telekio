@@ -11,9 +11,9 @@ impl AsRawFd for RawIo {
 
 #[derive(Clone)]
 enum UnixIo {
-    Fd(Arc<tokio::runtime::telekio::AsyncFd<RawIo>>),
+    Fd(Arc<crate::runtime::telekio::AsyncFd<RawIo>>),
     #[cfg(all(target_os = "freebsd", feature = "net"))]
-    Aio(Arc<tokio::runtime::telekio::TelekioAio>),
+    Aio(Arc<crate::runtime::telekio::TelekioAio>),
 }
 
 pub(super) struct Registration {
@@ -35,7 +35,7 @@ pub(super) fn register_inner(
                 ));
             }
             let _guard = context.handle.enter();
-            UnixIo::Fd(Arc::new(tokio::runtime::telekio::AsyncFd::with_interest(
+            UnixIo::Fd(Arc::new(crate::runtime::telekio::AsyncFd::with_interest(
                 RawIo(raw),
                 host_interest(interest)?,
             )?))
@@ -73,7 +73,7 @@ impl Registration {
         &self,
         context: &mut std::task::Context<'_>,
         interest: IoInterest,
-    ) -> std::task::Poll<io::Result<(u8, tokio::runtime::telekio::Ready, bool)>> {
+    ) -> std::task::Poll<io::Result<(u8, crate::runtime::telekio::Ready, bool)>> {
         match &self.io {
             UnixIo::Fd(io) => match host_interest(interest) {
                 Ok(interest) => io.poll_telekio_ready(context, interest),

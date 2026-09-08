@@ -53,7 +53,7 @@ jobs:
       - name: Packages
         run: |
           patches=()
-          for package in telekio telekio-abi telekio-build telekio-tokio telekio-host; do
+          for package in telekio telekio-abi telekio-build telekio-host; do
             patches+=(--config "patch.crates-io.$package.path=\"crates/$package\"")
           done
           cargo package --workspace "${patches[@]}"
@@ -194,8 +194,6 @@ jobs:
           echo "source=$source" >> "$GITHUB_OUTPUT"
       - name: Feature combinations
         run: cargo hack check --manifest-path "${{ steps.tokio.outputs.source }}/Cargo.toml" --lib --feature-powerset --depth 2 --exclude-features "${{ matrix.exclude }}" --keep-going
-      - name: Backend features
-        run: cargo hack check -p telekio-tokio --each-feature --exclude-features "${{ matrix.exclude }}" --keep-going
       - name: Host features
         run: cargo hack check -p telekio-host --feature-powerset --depth 2 --exclude-features "${{ matrix.exclude }}" --keep-going
 

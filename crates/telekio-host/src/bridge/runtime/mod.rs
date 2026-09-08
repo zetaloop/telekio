@@ -59,8 +59,8 @@ use telekio_abi::{
     Shutdown, Status,
 };
 
-use crate::owner::{self, Owner, OwnerState, owner_state};
-use crate::{host_callback, host_panic, result};
+use crate::bridge::owner::{self, Owner, OwnerState, owner_state};
+use crate::bridge::{host_callback, host_panic, result};
 
 use self::{
     builder::build_runtime,
@@ -103,8 +103,10 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     observe_workers: metrics::observe_workers,
 };
 
+/// A host runtime used to create plugin owners.
+#[derive(Debug)]
 pub struct Runtime {
-    runtime: Arc<tokio::runtime::Runtime>,
+    runtime: Arc<crate::runtime::Runtime>,
     flavor: Flavor,
 }
 
@@ -116,14 +118,14 @@ pub(super) struct RuntimeOwner {
 }
 
 enum RuntimeKind {
-    Runtime(Option<tokio::runtime::Runtime>),
+    Runtime(Option<crate::runtime::Runtime>),
     Local(Arc<LocalSlot>),
     Closed,
 }
 
 struct LocalSlot {
     thread: ThreadId,
-    runtime: UnsafeCell<Option<tokio::runtime::LocalRuntime>>,
+    runtime: UnsafeCell<Option<crate::runtime::LocalRuntime>>,
 }
 
 // LocalRuntime stays in its originating thread. HandleContext only shares the slot's
@@ -132,16 +134,17 @@ unsafe impl Send for LocalSlot {}
 unsafe impl Sync for LocalSlot {}
 
 impl Runtime {
+    /// Creates a runtime with Tokio's default configuration.
     #[cfg(feature = "rt-multi-thread")]
     pub fn new() -> std::io::Result<Self> {
-        tokio::runtime::Runtime::new().map(Self::from_tokio)
+        crate::runtime::Runtime::new().map(Self::from_tokio)
     }
 
-    pub fn from_tokio(runtime: tokio::runtime::Runtime) -> Self {
+    /// Takes ownership of an existing Tokio runtime.
+    pub fn from_tokio(runtime: crate::runtime::Runtime) -> Self {
         let flavor = match runtime.handle().runtime_flavor() {
-            tokio::runtime::RuntimeFlavor::CurrentThread => Flavor::CurrentThread,
-            tokio::runtime::RuntimeFlavor::MultiThread => Flavor::MultiThread,
-            _ => unreachable!("unsupported Tokio runtime flavor"),
+            crate::runtime::RuntimeFlavor::CurrentThread => Flavor::CurrentThread,
+            crate::runtime::RuntimeFlavor::MultiThread => Flavor::MultiThread,
         };
         Self {
             runtime: Arc::new(runtime),
@@ -149,6 +152,7 @@ impl Runtime {
         }
     }
 
+    /// Creates an independent owner for plugin work.
     pub fn owner(&self) -> Owner {
         Owner {
             runtime: Arc::clone(&self.runtime),
@@ -161,7 +165,8 @@ impl Runtime {
         }
     }
 
-    pub fn tokio(&self) -> &tokio::runtime::Runtime {
+    /// Returns the underlying Tokio runtime.
+    pub fn tokio(&self) -> &crate::runtime::Runtime {
         &self.runtime
     }
 }
@@ -239,14 +244,14 @@ impl RuntimeOwner {
 }
 
 impl LocalSlot {
-    fn new(runtime: tokio::runtime::LocalRuntime) -> Self {
+    fn new(runtime: crate::runtime::LocalRuntime) -> Self {
         Self {
             thread: std::thread::current().id(),
             runtime: UnsafeCell::new(Some(runtime)),
         }
     }
 
-    fn with<R>(&self, call: impl FnOnce(&tokio::runtime::LocalRuntime) -> R) -> Result<R, String> {
+    fn with<R>(&self, call: impl FnOnce(&crate::runtime::LocalRuntime) -> R) -> Result<R, String> {
         if std::thread::current().id() != self.thread {
             return Err("LocalRuntime was used from another thread".to_owned());
         }
@@ -256,7 +261,7 @@ impl LocalSlot {
         Ok(call(runtime))
     }
 
-    fn take(&self) -> Result<Option<tokio::runtime::LocalRuntime>, String> {
+    fn take(&self) -> Result<Option<crate::runtime::LocalRuntime>, String> {
         if std::thread::current().id() != self.thread {
             return Err("LocalRuntime was used from another thread".to_owned());
         }
@@ -348,7 +353,7 @@ pub(super) unsafe extern "C" fn shutdown(
     }
 }
 
-fn shutdown_runtime(runtime: tokio::runtime::Runtime, mode: Shutdown, duration: Duration) {
+fn shutdown_runtime(runtime: crate::runtime::Runtime, mode: Shutdown, duration: Duration) {
     match mode {
         Shutdown::Wait => drop(runtime),
         Shutdown::Background => runtime.shutdown_background(),
@@ -356,7 +361,7 @@ fn shutdown_runtime(runtime: tokio::runtime::Runtime, mode: Shutdown, duration: 
     }
 }
 
-fn shutdown_local(runtime: tokio::runtime::LocalRuntime, mode: Shutdown, duration: Duration) {
+fn shutdown_local(runtime: crate::runtime::LocalRuntime, mode: Shutdown, duration: Duration) {
     match mode {
         Shutdown::Wait => drop(runtime),
         Shutdown::Background => runtime.shutdown_background(),

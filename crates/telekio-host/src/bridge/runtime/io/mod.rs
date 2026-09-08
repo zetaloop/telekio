@@ -17,9 +17,9 @@ use telekio_abi::{
 use telekio_abi::IoKind;
 
 use super::HandleContext;
-use crate::owner::HostResource;
+use crate::bridge::owner::HostResource;
 #[cfg(target_os = "linux")]
-use crate::{callback::CallbackOwner, host_callback};
+use crate::bridge::{callback::CallbackOwner, host_callback};
 
 #[cfg(unix)]
 #[path = "unix.rs"]
@@ -45,7 +45,7 @@ struct Operation {
 
 #[cfg(target_os = "linux")]
 struct DriverResource {
-    _registration: tokio::runtime::telekio::TelekioIo,
+    _registration: crate::runtime::telekio::TelekioIo,
     _callback: Arc<CallbackOwner>,
 }
 
@@ -88,7 +88,7 @@ pub(super) unsafe extern "C" fn register(
             registration: IoRegistration::empty(),
         },
         Err(payload) => IoResult {
-            call: crate::host_panic(&*payload),
+            call: crate::bridge::host_panic(&*payload),
             error: IoError::none(),
             registration: IoRegistration::empty(),
         },
@@ -152,7 +152,7 @@ pub(super) unsafe extern "C" fn register_driver(
             registration: IoDriverRegistration::empty(),
         },
         Err(payload) => IoDriverResult {
-            call: crate::host_panic(&*payload),
+            call: crate::bridge::host_panic(&*payload),
             error: IoError::none(),
             registration: IoDriverRegistration::empty(),
         },
@@ -178,7 +178,7 @@ pub(super) unsafe extern "C" fn register_driver(
             }
         }
         Err(payload) => IoDriverResult {
-            call: crate::host_panic(&*payload),
+            call: crate::bridge::host_panic(&*payload),
             error: IoError::none(),
             registration: IoDriverRegistration::empty(),
         },
@@ -194,28 +194,28 @@ unsafe extern "C" fn release_driver(data: *mut std::ffi::c_void) -> CallResult {
 }
 
 #[cfg(any(unix, windows))]
-fn host_interest(interest: IoInterest) -> io::Result<tokio::runtime::telekio::Interest> {
+fn host_interest(interest: IoInterest) -> io::Result<crate::runtime::telekio::Interest> {
     let mut result = None;
     if interest.contains(IoInterest::READABLE) {
-        add_interest(&mut result, tokio::runtime::telekio::Interest::READABLE);
+        add_interest(&mut result, crate::runtime::telekio::Interest::READABLE);
     }
     if interest.contains(IoInterest::WRITABLE) {
-        add_interest(&mut result, tokio::runtime::telekio::Interest::WRITABLE);
+        add_interest(&mut result, crate::runtime::telekio::Interest::WRITABLE);
     }
     if interest.contains(IoInterest::ERROR) {
-        add_interest(&mut result, tokio::runtime::telekio::Interest::ERROR);
+        add_interest(&mut result, crate::runtime::telekio::Interest::ERROR);
     }
     #[cfg(any(target_os = "android", target_os = "linux"))]
     if interest.contains(IoInterest::PRIORITY) {
-        add_interest(&mut result, tokio::runtime::telekio::Interest::PRIORITY);
+        add_interest(&mut result, crate::runtime::telekio::Interest::PRIORITY);
     }
     result.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "I/O interest is empty"))
 }
 
 #[cfg(any(unix, windows))]
 fn add_interest(
-    target: &mut Option<tokio::runtime::telekio::Interest>,
-    interest: tokio::runtime::telekio::Interest,
+    target: &mut Option<crate::runtime::telekio::Interest>,
+    interest: crate::runtime::telekio::Interest,
 ) {
     *target = Some(target.map_or(interest, |current| current | interest));
 }
@@ -286,7 +286,7 @@ unsafe extern "C" fn ready(data: *mut std::ffi::c_void, interest: IoInterest) ->
             operation: telekio_abi::IoOperation::empty(),
         },
         Err(payload) => IoOperationResult {
-            call: crate::host_panic(&*payload),
+            call: crate::bridge::host_panic(&*payload),
             operation: telekio_abi::IoOperation::empty(),
         },
     }
@@ -347,7 +347,7 @@ unsafe extern "C" fn release_operation(data: *mut std::ffi::c_void) -> CallResul
 }
 
 #[cfg(any(unix, windows))]
-fn host_ready((tick, ready, shutdown): (u8, tokio::runtime::telekio::Ready, bool)) -> HostReady {
+fn host_ready((tick, ready, shutdown): (u8, crate::runtime::telekio::Ready, bool)) -> HostReady {
     let mut ready = map_ready(ready);
     if shutdown {
         ready |= IoReady::SHUTDOWN;
@@ -357,7 +357,7 @@ fn host_ready((tick, ready, shutdown): (u8, tokio::runtime::telekio::Ready, bool
 
 #[cfg(any(unix, windows))]
 fn ready_poll(
-    result: std::task::Poll<io::Result<(u8, tokio::runtime::telekio::Ready, bool)>>,
+    result: std::task::Poll<io::Result<(u8, crate::runtime::telekio::Ready, bool)>>,
 ) -> IoPoll {
     match result {
         std::task::Poll::Pending => io_poll(Poll::Pending, call_ok(), IoReady::empty()),
@@ -367,7 +367,7 @@ fn ready_poll(
 }
 
 #[cfg(any(unix, windows))]
-fn map_ready(ready: tokio::runtime::telekio::Ready) -> IoReady {
+fn map_ready(ready: crate::runtime::telekio::Ready) -> IoReady {
     let mut result = IoReady::empty();
     if ready.is_readable() {
         result |= IoReady::READABLE;
@@ -392,26 +392,26 @@ fn map_ready(ready: tokio::runtime::telekio::Ready) -> IoReady {
 }
 
 #[cfg(any(unix, windows))]
-fn tokio_ready(ready: IoReady) -> tokio::runtime::telekio::Ready {
-    let mut result = tokio::runtime::telekio::Ready::EMPTY;
+fn tokio_ready(ready: IoReady) -> crate::runtime::telekio::Ready {
+    let mut result = crate::runtime::telekio::Ready::EMPTY;
     if ready.contains(IoReady::READABLE) {
-        result |= tokio::runtime::telekio::Ready::READABLE;
+        result |= crate::runtime::telekio::Ready::READABLE;
     }
     if ready.contains(IoReady::WRITABLE) {
-        result |= tokio::runtime::telekio::Ready::WRITABLE;
+        result |= crate::runtime::telekio::Ready::WRITABLE;
     }
     if ready.contains(IoReady::READ_CLOSED) {
-        result |= tokio::runtime::telekio::Ready::READ_CLOSED;
+        result |= crate::runtime::telekio::Ready::READ_CLOSED;
     }
     if ready.contains(IoReady::WRITE_CLOSED) {
-        result |= tokio::runtime::telekio::Ready::WRITE_CLOSED;
+        result |= crate::runtime::telekio::Ready::WRITE_CLOSED;
     }
     if ready.contains(IoReady::ERROR) {
-        result |= tokio::runtime::telekio::Ready::ERROR;
+        result |= crate::runtime::telekio::Ready::ERROR;
     }
     #[cfg(any(target_os = "android", target_os = "linux"))]
     if ready.contains(IoReady::PRIORITY) {
-        result |= tokio::runtime::telekio::Ready::PRIORITY;
+        result |= crate::runtime::telekio::Ready::PRIORITY;
     }
     result
 }
@@ -473,7 +473,7 @@ fn io_callback(call: impl FnOnce() -> IoPoll) -> IoPoll {
         Ok(result) => result,
         Err(payload) => io_poll(
             Poll::Panicked,
-            crate::host_panic(&*payload),
+            crate::bridge::host_panic(&*payload),
             IoReady::empty(),
         ),
     }
@@ -490,7 +490,7 @@ fn io_call(call: impl FnOnce() -> io::Result<()>) -> IoCallResult {
             call: call_error(error),
         },
         Err(payload) => IoCallResult {
-            call: crate::host_panic(&*payload),
+            call: crate::bridge::host_panic(&*payload),
             error: IoError::none(),
         },
     }

@@ -26,7 +26,7 @@ pub(super) unsafe extern "C" fn register_driver(
     _: IoResource,
     callback: Callback,
 ) -> IoDriverResult {
-    let call = crate::host_callback(|| drop(callback));
+    let call = crate::bridge::host_callback(|| drop(callback));
     let error = io::Error::new(
         io::ErrorKind::Unsupported,
         "Tokio host I/O driver registration is unavailable in this configuration",

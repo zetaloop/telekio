@@ -7,4 +7,3 @@ resolver = "3"
 telekio-abi = { path = "../crates/telekio-abi" }
 telekio-build = { path = "../crates/telekio-build" }
 telekio-host = { path = "../crates/telekio-host" }
-telekio-tokio = { path = "../crates/telekio-tokio" }

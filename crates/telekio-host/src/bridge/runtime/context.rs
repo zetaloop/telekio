@@ -8,15 +8,15 @@ use std::{
 
 use telekio_abi::{CallResult, ExecutionState, Future, OwnedBytes, Poll, Status, Waker};
 
-use crate::owner::{Activity, OwnerState};
-use crate::{host_panic, result};
+use crate::bridge::owner::{Activity, OwnerState};
+use crate::bridge::{host_panic, result};
 
 fn with_execution<R>(call: impl FnOnce(*mut ExecutionState) -> R) -> R {
-    tokio::runtime::telekio::with_execution(|state| call(state.cast()))
+    crate::runtime::telekio::with_execution(|state| call(state.cast()))
 }
 
 pub(super) fn with_task_execution<R>(call: impl FnOnce(*mut ExecutionState) -> R) -> R {
-    tokio::runtime::telekio::with_task_execution(|state| call(state.cast()))
+    crate::runtime::telekio::with_task_execution(|state| call(state.cast()))
 }
 
 pub(super) fn block_on_result(outcome: Result<Status, Box<dyn Any + Send>>) -> CallResult {
