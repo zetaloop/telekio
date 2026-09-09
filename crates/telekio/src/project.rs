@@ -271,10 +271,10 @@ fn reachable_packages<'a>(
 pub(super) fn init(manifest: &Path, role: Role, offline: bool) -> Result<(), Box<dyn Error>> {
     let root = manifest.parent().ok_or("manifest has no parent")?;
     let mut document = fs::read_to_string(manifest)?.parse::<DocumentMut>()?;
-    if let Some(path) = patch_path(&document)
-        && path != PATCH_PATH
+    if let Some(patch) = tokio_patch(&document)
+        && patch.get("path").and_then(Item::as_str) != Some(PATCH_PATH)
     {
-        return Err(format!("Tokio is already patched from `{path}`").into());
+        return Err(format!("Tokio already has a patch in {}", manifest.display()).into());
     }
     let directory = root.join(DIRECTORY);
     validate_destination(&directory)?;
@@ -300,11 +300,12 @@ pub(super) fn remove(manifest: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn tokio_patch(manifest: &DocumentMut) -> Option<&Item> {
+    manifest.get("patch")?.get("crates-io")?.get("tokio")
+}
+
 fn patch_path(manifest: &DocumentMut) -> Option<String> {
-    manifest
-        .get("patch")?
-        .get("crates-io")?
-        .get("tokio")?
+    tokio_patch(manifest)?
         .get("path")?
         .as_str()
         .map(str::to_owned)
