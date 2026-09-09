@@ -4,16 +4,7 @@ use std::cell::Cell;
 #[cfg(feature = "rt")]
 use std::ffi::c_void;
 
-#[repr(C)]
-struct State {
-    task_id: u64,
-    budget: u16,
-    rng_one: u32,
-    rng_two: u32,
-    rng_active: u8,
-    tracing: u8,
-    forced_yields: u64,
-}
+type State = ::telekio_abi::ExecutionState;
 
 thread_local! {
     static ACTIVE: Cell<*mut State> = const { Cell::new(std::ptr::null_mut()) };
@@ -36,12 +27,17 @@ impl Drop for Reset {
         _ = super::budget(|budget| {
             budget.set(crate::task::coop::Budget::from_telekio(state.budget));
         });
-        CONTEXT.with(|context| {
+        CONTEXT.with(access::runtime(|context| {
+            context
+                .runtime
+                .set(EnterRuntime::from_telekio(state.runtime));
+        }));
+        CONTEXT.with(access::rng(|context| {
             context.rng.set(
                 (state.rng_active != 0)
                     .then(|| FastRand::from_telekio(state.rng_one, state.rng_two)),
             );
-        });
+        }));
         crate::runtime::telekio::record_forced_yields(state.forced_yields);
     }
 }
@@ -64,9 +60,13 @@ pub(crate) fn with_task<R>(call: impl FnOnce(*mut c_void) -> R) -> R {
 fn enter<R>(call: impl FnOnce(*mut c_void) -> R) -> R {
     let task_id = current_task_id().map_or(0, |id| id.telekio_value());
     let budget = super::budget(|budget| budget.get().telekio_value()).unwrap_or(u16::MAX);
-    let rng = CONTEXT.with(|context| context.rng.get());
+    let runtime = CONTEXT.with(access::runtime(|context| {
+        context.runtime.get().telekio_value()
+    }));
+    let rng = CONTEXT.with(access::rng(|context| context.rng.get()));
     let (rng_one, rng_two) = rng.map_or((0, 0), FastRand::telekio_parts);
     let mut state = State {
+        runtime,
         task_id,
         budget,
         rng_one,
@@ -92,4 +92,4 @@ pub(super) use access::budget;
 #[cfg(any(feature = "macros", all(feature = "sync", feature = "rt")))]
 pub(super) use access::rng;
 #[cfg(feature = "rt")]
-pub(super) use access::task_id;
+pub(super) use access::{enter_runtime, runtime, task_id};

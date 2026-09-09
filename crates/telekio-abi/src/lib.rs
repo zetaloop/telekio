@@ -20,8 +20,8 @@ pub use io::{
 pub use runtime::{
     Blocking, BlockingTask, BuildResult, DumpOperation, DumpResult, ExecutionState, Flavor, Future,
     Handle, HistogramConfig, Metric, MetricResult, NameResult, RawHandle, RawRuntime, Runtime,
-    RuntimeConfig, Shutdown, SourceLocation, Task, TaskCallback, TaskEvent, TaskIdResult, TaskPoll,
-    WorkerCallback,
+    RuntimeConfig, RuntimeContext, Shutdown, SourceLocation, Task, TaskCallback, TaskEvent,
+    TaskIdResult, TaskPoll, WorkerCallback,
 };
 #[doc(hidden)]
 pub use runtime::{execution_state, with_execution_state};

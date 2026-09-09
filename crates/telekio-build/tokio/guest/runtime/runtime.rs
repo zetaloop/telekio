@@ -9,12 +9,7 @@ pub(crate) fn block_on<F: Future>(
     handle: &scheduler::Handle,
     future: F,
 ) -> F::Output {
-    let allow_block_in_place = match handle {
-        scheduler::Handle::CurrentThread(_) => false,
-        #[cfg(feature = "rt-multi-thread")]
-        scheduler::Handle::MultiThread(_) => true,
-    };
-    crate::runtime::context::enter_runtime(handle, allow_block_in_place, |_| {
+    crate::runtime::context::telekio::block_on(handle, false, |_| {
         let future = crate::runtime::context::telekio::active(future);
         #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
         let future = crate::runtime::metrics::telekio::root(handle.connection(), future);
@@ -34,19 +29,9 @@ impl Runtime {
     }
 
     #[cfg(not(test))]
-    pub(crate) fn enter_attached<R>(
-        &self,
-        flavor: ::telekio_abi::Flavor,
-        call: impl FnOnce() -> R,
-    ) -> R {
-        if Handle::try_current().is_ok() {
-            return call();
-        }
-        crate::runtime::context::enter_runtime(
-            &self.handle.inner,
-            flavor == ::telekio_abi::Flavor::MultiThread,
-            |_| crate::runtime::context::telekio::enter(call),
-        )
+    pub(crate) fn enter_attached<R>(&self, call: impl FnOnce() -> R) -> R {
+        let _guard = Handle::try_current().is_err().then(|| self.handle.enter());
+        crate::runtime::context::telekio::enter(call)
     }
 
     fn install(&self, connection: Arc<Connection>) {

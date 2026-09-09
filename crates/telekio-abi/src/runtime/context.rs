@@ -4,8 +4,16 @@ thread_local! {
     static EXECUTION: Cell<*mut ExecutionState> = const { Cell::new(std::ptr::null_mut()) };
 }
 
+#[derive(Clone, Copy)]
+#[repr(C, u8)]
+pub enum RuntimeContext {
+    NotEntered,
+    Entered { allow_block_in_place: bool },
+}
+
 #[repr(C)]
 pub struct ExecutionState {
+    pub runtime: RuntimeContext,
     pub task_id: u64,
     pub budget: u16,
     pub rng_one: u32,

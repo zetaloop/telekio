@@ -9,7 +9,7 @@ pub(crate) trait HostSchedule: task::Schedule + Clone + Send + Sync + 'static {
 }
 
 macro_rules! host_schedule {
-    ($variant:ident, $other:ident, $block_in_place:literal) => {
+    ($variant:ident, $other:ident) => {
         impl Handle {
             pub(crate) fn owned_id(&self) -> std::num::NonZeroU64 {
                 let _ = self.owned_id_inner();
@@ -62,9 +62,8 @@ macro_rules! host_schedule {
                 } else {
                     let handle =
                         crate::runtime::scheduler::Handle::$variant(std::sync::Arc::clone(self));
-                    crate::runtime::context::enter_runtime(&handle, $block_in_place, |_| {
-                        crate::runtime::context::telekio::enter(run)
-                    })
+                    let _guard = crate::runtime::context::try_set_current(&handle);
+                    crate::runtime::context::telekio::enter(run)
                 }
             }
 

@@ -197,6 +197,15 @@ pub(super) fn patch_context(path: &Path) -> Result<(), Box<dyn Error>> {
                 "block_on",
                 "block_on_host",
             )?;
+            edit::redirect_call(
+                source,
+                edit::Scope::Method {
+                    owner: "Handle",
+                    name: "block_on_inner",
+                },
+                "context::enter_runtime",
+                "crate::runtime::context::telekio::block_on",
+            )?;
             mount(
                 source,
                 Some("pub(crate)"),
@@ -239,6 +248,26 @@ pub(super) fn patch_defer(generated: &Path) -> Result<(), Box<dyn Error>> {
             &[],
         )
     })?;
+    patch_runtime_context(generated)?;
+    patch(&generated.join("src/runtime/context.rs"), |source| {
+        edit::retarget_use(source, "exit_runtime", "runtime_mt::telekio::exit_runtime")
+    })?;
+    patch(
+        &generated.join("src/runtime/context/runtime_mt.rs"),
+        |source| {
+            edit::add_attr(
+                source,
+                edit::AttrTarget::Function("exit_runtime"),
+                "#[expect(dead_code)]",
+            )?;
+            mount(
+                source,
+                Some("pub(crate)"),
+                "telekio",
+                "guest/runtime/context/runtime_mt.rs",
+            )
+        },
+    )?;
     patch(&generated.join("src/task/yield_now.rs"), |source| {
         edit::redirect_call(
             source,
@@ -280,6 +309,74 @@ pub(super) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
         )?;
     }
     fs::write(target, contents)?;
+    patch_runtime_context(source)
+}
 
+fn patch_runtime_context(source: &Path) -> Result<(), Box<dyn Error>> {
+    for (file, scopes, method, helper) in [
+        (
+            "context.rs",
+            &[edit::Scope::Function("with_scheduler")][..],
+            "try_with",
+            "runtime",
+        ),
+        (
+            "context/runtime.rs",
+            &[
+                edit::Scope::Function("enter_runtime"),
+                edit::Scope::Method {
+                    owner: "EnterRuntimeGuard",
+                    name: "drop",
+                },
+            ][..],
+            "with",
+            "enter_runtime",
+        ),
+        (
+            "context/runtime_mt.rs",
+            &[
+                edit::Scope::Function("current_enter_context"),
+                edit::Scope::Function("exit_runtime"),
+                edit::Scope::Method {
+                    owner: "Reset",
+                    name: "drop",
+                },
+            ][..],
+            "with",
+            "runtime",
+        ),
+        (
+            "context/blocking.rs",
+            &[
+                edit::Scope::Function("try_enter_blocking_region"),
+                edit::Scope::Function("disallow_block_in_place"),
+            ][..],
+            "try_with",
+            "runtime",
+        ),
+        (
+            "context/blocking.rs",
+            &[edit::Scope::Method {
+                owner: "DisallowBlockInPlaceGuard",
+                name: "drop",
+            }][..],
+            "with",
+            "runtime",
+        ),
+    ] {
+        patch(&source.join("src/runtime").join(file), |contents| {
+            for &scope in scopes {
+                edit::delegate_closure(
+                    contents,
+                    scope,
+                    edit::Call::Method(method),
+                    0,
+                    &format!("crate::runtime::context::telekio::{helper}"),
+                    &[],
+                )?;
+            }
+            Ok(())
+        })?;
+    }
     Ok(())
 }

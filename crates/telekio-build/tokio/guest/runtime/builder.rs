@@ -6,12 +6,6 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
 };
 
-#[cfg(not(test))]
-struct AttachedContext {
-    runtime: Runtime,
-    flavor: ::telekio_abi::Flavor,
-}
-
 impl Builder {
     pub(super) fn build_hosted_current_thread(&mut self) -> io::Result<Runtime> {
         let host = self.build_host(false)?;
@@ -36,18 +30,14 @@ impl Builder {
     }
 
     #[cfg(not(test))]
-    fn build_attached_context(
-        &mut self,
-        handle: ::telekio_abi::Handle,
-    ) -> io::Result<AttachedContext> {
-        let flavor = handle.flavor();
+    fn build_attached_context(&mut self, handle: ::telekio_abi::Handle) -> io::Result<Runtime> {
         if let Some(name) = handle.name() {
             self.name(name);
         }
         self.enable_all();
         let runtime = self.build_guest(Self::build_current_thread_runtime)?;
         runtime.install_attached_host(handle);
-        Ok(AttachedContext { runtime, flavor })
+        Ok(runtime)
     }
 
     fn build_guest<T>(&mut self, build: impl FnOnce(&mut Self) -> io::Result<T>) -> io::Result<T> {
@@ -218,10 +208,8 @@ unsafe extern "C" fn enter_guest_context(
 ) -> ::telekio_abi::CallResult {
     match catch_unwind(AssertUnwindSafe(|| unsafe {
         ::telekio_abi::with_execution_state(execution, || {
-            let context = &*data.cast::<AttachedContext>();
-            context
-                .runtime
-                .enter_attached(context.flavor, || call.invoke())
+            let context = &*data.cast::<Runtime>();
+            context.enter_attached(|| call.invoke())
         })
     })) {
         Ok(result) => result,
@@ -241,7 +229,7 @@ fn histogram(builder: Option<HistogramBuilder>) -> ::telekio_abi::HistogramConfi
 #[cfg(not(test))]
 unsafe extern "C" fn detach_guest_context(data: *mut c_void) -> ::telekio_abi::CallResult {
     match catch_unwind(AssertUnwindSafe(|| {
-        drop(unsafe { Box::from_raw(data.cast::<AttachedContext>()) });
+        drop(unsafe { Box::from_raw(data.cast::<Runtime>()) });
         unsafe { ::telekio_abi::detach_attached() }
     })) {
         Ok(result) => result,

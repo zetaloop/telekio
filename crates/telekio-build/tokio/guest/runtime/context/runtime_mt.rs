@@ -1,4 +1,4 @@
-use super::*;
+use crate::runtime::{context, scheduler};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
 struct BlockingState<F, R> {
@@ -6,7 +6,7 @@ struct BlockingState<F, R> {
     result: Option<Result<R, Box<dyn std::any::Any + Send>>>,
 }
 
-pub(super) fn exit_host_runtime<F, R>(function: F) -> R
+pub(crate) fn exit_runtime<F, R>(function: F) -> R
 where
     F: FnOnce() -> R,
 {
@@ -42,7 +42,7 @@ where
 {
     let state = unsafe { &mut *data.cast::<BlockingState<F, R>>() };
     match catch_unwind(AssertUnwindSafe(|| {
-        context::exit_runtime(|| state.function.take().expect("blocking function ran twice")())
+        state.function.take().expect("blocking function ran twice")()
     })) {
         Ok(output) => {
             state.result = Some(Ok(output));

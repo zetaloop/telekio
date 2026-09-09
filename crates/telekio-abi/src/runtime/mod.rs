@@ -10,7 +10,7 @@ mod task_hooks;
 
 pub use blocking::{Blocking, BlockingTask};
 pub use builder::{BuildResult, RuntimeConfig};
-pub use context::{ExecutionState, execution_state, with_execution_state};
+pub use context::{ExecutionState, RuntimeContext, execution_state, with_execution_state};
 pub use dump::{DumpOperation, DumpResult};
 pub use handle::{Handle, NameResult, RawHandle};
 pub use metrics::{HistogramConfig, Metric, MetricResult, WorkerCallback};

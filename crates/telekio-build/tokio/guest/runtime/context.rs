@@ -18,7 +18,7 @@ pub(super) use access::budget;
 #[cfg(any(feature = "macros", all(feature = "sync", feature = "rt")))]
 pub(super) use access::rng;
 #[cfg(feature = "rt")]
-pub(super) use access::task_id;
+pub(super) use access::{enter_runtime, runtime, task_id};
 
 #[cfg(feature = "rt")]
 thread_local! {
@@ -53,6 +53,25 @@ pub(crate) fn enter<R>(call: impl FnOnce() -> R) -> R {
     ACTIVE.set(ACTIVE.get() + 1);
     let _guard = Guard;
     call()
+}
+
+#[cfg(feature = "rt")]
+#[track_caller]
+pub(crate) fn block_on<F, R>(
+    handle: &crate::runtime::scheduler::Handle,
+    allow_block_in_place: bool,
+    call: F,
+) -> R
+where
+    F: FnOnce(&mut super::BlockingRegionGuard) -> R,
+{
+    match super::try_enter_blocking_region() {
+        Some(mut blocking) => {
+            let _guard = super::try_set_current(handle);
+            call(&mut blocking)
+        }
+        None => super::enter_runtime(handle, allow_block_in_place, call),
+    }
 }
 
 #[cfg(feature = "rt-multi-thread")]

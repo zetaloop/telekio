@@ -4,7 +4,7 @@
 
 ## Execution and ownership
 
-Host Tokio owns the runtime services, scheduler, and real task identities. Guest `UnownedTask` retains the artifact-local future, output, panic payload, and join state required by Rust's types. `LocalSet` retains Tokio's local scheduler. Shared `ExecutionState` carries the current task identity, cooperative budget, and RNG across artifact calls.
+Host Tokio owns the runtime services, scheduler, and real task identities. Guest `UnownedTask` retains the artifact-local future, output, panic payload, and join state required by Rust's types. `LocalSet` retains Tokio's local scheduler. Shared `ExecutionState` carries the execution context, current task identity, cooperative budget, and RNG across artifact calls.
 
 Guest `Runtime` and `LocalRuntime` own their `telekio_abi::Runtime` through `BlockingPool`, preserving Tokio's shutdown sequence. Handles share only `Connection` state. Organize task, scheduler, hooks, metrics, dump, I/O, and time code around their corresponding Tokio services.
 

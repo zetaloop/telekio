@@ -161,18 +161,7 @@ pub(super) fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             "coop::stop",
             "crate::runtime::context::telekio::stop",
         )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Function("block_in_place"),
-            "crate::runtime::context::exit_runtime",
-            "telekio::exit_host_runtime",
-        )?;
-        mount(
-            source,
-            None,
-            "telekio",
-            "guest/runtime/scheduler/multi_thread/worker.rs",
-        )
+        Ok(())
     })?;
     patch(&path.join("handle/metrics.rs"), |source| {
         for name in [

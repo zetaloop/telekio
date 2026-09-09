@@ -1,5 +1,5 @@
 use super::super::Context;
-#[cfg(any(feature = "macros", all(feature = "sync", feature = "rt")))]
+#[cfg(any(feature = "macros", feature = "rt"))]
 use super::super::FastRand;
 use super::{execution_state, State};
 
@@ -38,7 +38,7 @@ where
     }
 }
 
-#[cfg(any(feature = "macros", all(feature = "sync", feature = "rt")))]
+#[cfg(any(feature = "macros", feature = "rt"))]
 pub(in crate::runtime::context) fn rng<F, R>(local: F) -> impl FnOnce(&Context) -> R
 where
     F: FnOnce(&Context) -> R,
@@ -78,6 +78,74 @@ where
         };
         local(context)
     }
+}
+
+#[cfg(feature = "rt")]
+impl super::super::EnterRuntime {
+    pub(in crate::runtime::context) fn from_telekio(value: ::telekio_abi::RuntimeContext) -> Self {
+        match value {
+            ::telekio_abi::RuntimeContext::NotEntered => Self::NotEntered,
+            ::telekio_abi::RuntimeContext::Entered {
+                allow_block_in_place,
+            } => Self::Entered {
+                allow_block_in_place,
+            },
+        }
+    }
+
+    pub(in crate::runtime::context) fn telekio_value(self) -> ::telekio_abi::RuntimeContext {
+        match self {
+            Self::NotEntered => ::telekio_abi::RuntimeContext::NotEntered,
+            Self::Entered {
+                allow_block_in_place,
+            } => ::telekio_abi::RuntimeContext::Entered {
+                allow_block_in_place,
+            },
+        }
+    }
+}
+
+#[cfg(feature = "rt")]
+pub(in crate::runtime::context) fn runtime<F, R>(local: F) -> impl FnOnce(&Context) -> R
+where
+    F: FnOnce(&Context) -> R,
+{
+    move |context| {
+        let state = execution_state();
+        if state.is_null() {
+            return local(context);
+        }
+        struct Reset<'a> {
+            context: &'a Context,
+            state: *mut State,
+            previous: super::super::EnterRuntime,
+        }
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                unsafe { (*self.state).runtime = self.context.runtime.get().telekio_value() };
+                self.context.runtime.set(self.previous);
+            }
+        }
+        let previous = context
+            .runtime
+            .replace(super::super::EnterRuntime::from_telekio(unsafe {
+                (*state).runtime
+            }));
+        let _reset = Reset {
+            context,
+            state,
+            previous,
+        };
+        local(context)
+    }
+}
+
+#[cfg(feature = "rt")]
+pub(in crate::runtime::context) fn enter_runtime<F, R>(local: F) -> impl FnOnce(&Context) -> R
+where
+    F: FnOnce(&Context) -> R,
+{
+    runtime(rng(local))
 }
 
 #[cfg(feature = "rt")]
