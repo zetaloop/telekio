@@ -259,7 +259,7 @@ fn patch(
     path: &Path,
     transform: impl FnOnce(&mut String) -> Result<(), Box<dyn Error>>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut source = fs::read_to_string(path)?;
+    let mut source = fs::read_to_string(path)?.replace("\r\n", "\n");
     transform(&mut source).map_err(|error| format!("{}: {error}", path.display()))?;
     fs::write(path, source)?;
     Ok(())
