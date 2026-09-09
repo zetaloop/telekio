@@ -192,6 +192,7 @@ pub(super) fn metadata(
 pub(super) fn manifest(
     cargo: &OsStr,
     arguments: &[OsString],
+    workspace: bool,
 ) -> Result<Option<PathBuf>, Box<dyn Error>> {
     if operation(arguments) == Some("install") && !has_option(arguments, "--path") {
         return Ok(None);
@@ -199,7 +200,8 @@ pub(super) fn manifest(
     let mut command = Command::new(cargo);
     command
         .args(global_options(arguments))
-        .args(["locate-project", "--message-format", "plain"]);
+        .args(["locate-project", "--message-format", "plain"])
+        .args(workspace.then_some("--workspace"));
     if let Some(path) = option(arguments, &["--manifest-path", "-m"]) {
         command.arg("--manifest-path").arg(path);
     } else if let Some(path) = option(arguments, &["--path"]) {

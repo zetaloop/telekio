@@ -37,7 +37,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let cargo = OsString::from("cargo");
     if matches!(command.as_str(), "init" | "remove") {
         arguments.remove(0);
-        let manifest = cargo::manifest(&cargo, &arguments)?.ok_or("Cargo.toml was not found")?;
+        let manifest =
+            cargo::manifest(&cargo, &arguments, true)?.ok_or("Cargo.toml was not found")?;
         if command == "init" {
             let mut workspace = arguments.clone();
             workspace.push(OsString::from("--workspace"));
@@ -62,7 +63,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     {
         return exit(cargo::status(&cargo, &arguments, None)?);
     }
-    let manifest = cargo::manifest(&cargo, &interpreted)?;
+    let manifest = cargo::manifest(&cargo, &interpreted, false)?;
     let Some(manifest) = manifest else {
         let config = prepare_config(Role::Host, false)?;
         return exit(cargo::status(&cargo, &arguments, Some(&config))?);
