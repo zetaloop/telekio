@@ -51,6 +51,7 @@ pub struct RuntimeApi {
     pub id: unsafe extern "C" fn(*const c_void) -> u64,
     pub name: unsafe extern "C" fn(*const c_void) -> NameResult,
     pub observe_workers: unsafe extern "C" fn(*const c_void, WorkerCallback) -> CallResult,
+    pub can_spawn_local: unsafe extern "C" fn(*const c_void) -> BoolResult,
 }
 
 #[repr(C)]

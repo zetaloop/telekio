@@ -8,7 +8,7 @@ Host Tokio owns the runtime services, scheduler, and real task identities. Guest
 
 Guest `Runtime` and `LocalRuntime` own their `telekio_abi::Runtime` through `BlockingPool`, preserving Tokio's shutdown sequence. Handles share only `Connection` state. Organize task, scheduler, hooks, metrics, dump, I/O, and time code around their corresponding Tokio services.
 
-`Owner` and `Attachment` provide per-plugin lifetime management. Detachment closes work, drains active calls, and reclaims host references abandoned by guest destructors. Resources can outlive the runtime wrapper that created them; incoming callback ownership must also be released when registration fails.
+`Attachment` retains a native Handle and internal per-plugin ownership state; the application owns its Runtime. Detachment closes plugin work, drains active calls, and reclaims host references abandoned by guest destructors. Child-runtime shutdown uses the detach caller's blocking pool. Resources can outlive their creating Runtime; incoming callback ownership must also be released when registration fails.
 
 Source locations outlive tasks because Tokio exposes them as `&'static Location`. The host retains foreign locations at task creation; hooks read the location already associated with the task. The representation adapters in `telekio-host/src/bridge/runtime/location.rs` and `telekio-abi/src/runtime/location.rs` depend on the local standard library's private layout and require review when changing the supported toolchain.
 

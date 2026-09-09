@@ -4,14 +4,14 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
     pin::Pin,
-    sync::{Arc, mpsc},
+    sync::Arc,
     task::{Context, Poll},
     thread::JoinHandle,
     time::Duration,
 };
 
 use libloading::Library;
-use telekio_host::{Attach, Attachment, Runtime};
+use telekio_host::{Attach, Attachment};
 
 #[path = "../../api.rs"]
 mod api;
@@ -50,10 +50,10 @@ impl Drop for Request {
     }
 }
 
-fn serve(response: bool) -> (String, mpsc::Receiver<()>, JoinHandle<()>) {
+fn serve(response: bool) -> (String, tokio::sync::oneshot::Receiver<()>, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    let (accepted, waiting) = mpsc::channel();
+    let (accepted, waiting) = tokio::sync::oneshot::channel();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         stream
@@ -86,13 +86,9 @@ fn serve(response: bool) -> (String, mpsc::Receiver<()>, JoinHandle<()>) {
     (format!("http://{address}"), waiting, server)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let path = std::env::args_os().nth(1).expect("expected plugin path");
-    let runtime = Runtime::from_tokio(
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?,
-    );
     for _ in 0..10 {
         let library = unsafe { Library::new(&path)? };
         let attach = unsafe { *library.get::<Attach>(b"telekio_attach")? };
@@ -100,24 +96,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             *library.get::<unsafe extern "C" fn(*const u8, usize) -> PluginFuture>(b"request")?
         };
         let released = unsafe { *library.get::<unsafe extern "C" fn() -> usize>(b"released")? };
-        let owner = runtime.owner();
-        let attachment = Arc::new(unsafe { owner.attach(attach)? });
+        let attachment = Arc::new(unsafe { telekio_host::attach(attach)? });
         let releases = attachment.enter(|| unsafe { released() });
 
         for response in [true, false] {
             let (url, accepted, server) = serve(response);
             let future = attachment.enter(|| unsafe { request(url.as_ptr(), url.len()) });
-            let task = runtime.tokio().spawn(Request {
+            let task = tokio::spawn(Request {
                 future,
                 attachment: Arc::clone(&attachment),
             });
             let id = task.id().to_string().parse::<u64>()?;
-            accepted.recv_timeout(Duration::from_secs(10))?;
+            tokio::time::timeout(Duration::from_secs(10), accepted).await??;
             if response {
-                assert_eq!(runtime.tokio().block_on(task)?, (42, id));
+                assert_eq!(task.await?, (42, id));
             } else {
                 task.abort();
-                assert!(runtime.tokio().block_on(task).unwrap_err().is_cancelled());
+                assert!(task.await.unwrap_err().is_cancelled());
             }
             server.join().unwrap();
         }
@@ -125,7 +120,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut attachment = Arc::try_unwrap(attachment).unwrap_or_else(|_| {
             panic!("plugin requests still hold their attachment");
         });
-        runtime.tokio().block_on(owner.detach(&mut attachment))?;
+        attachment.detach().await?;
         library.close()?;
     }
     println!("10 plugin call, cancellation, detach, and unload cycles passed");

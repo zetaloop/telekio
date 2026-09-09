@@ -101,12 +101,13 @@ pub(super) unsafe extern "C" fn spawn_local(
                 id,
             },
         };
-        let local = context
-            .local
-            .as_ref()
-            .ok_or_else(|| "spawn_local requires a LocalRuntime".to_owned())?;
-        let handle = local
-            .with(|runtime| unsafe { runtime.handle().telekio_spawn_local(task, id, location) })?;
+        if !context.handle.inner.is_local() {
+            return Err("spawn_local requires a LocalRuntime".to_owned());
+        }
+        if !context.handle.inner.can_spawn_local_on_local_runtime() {
+            return Err("LocalRuntime was used from another thread".to_owned());
+        }
+        let handle = unsafe { context.handle.telekio_spawn_local(task, id, location) };
         context.owner.register_task(id, handle.abort_handle());
         drop(handle);
         Ok::<_, String>(())

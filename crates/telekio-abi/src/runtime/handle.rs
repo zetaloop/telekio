@@ -71,6 +71,15 @@ impl Handle {
     }
 
     #[doc(hidden)]
+    pub fn can_spawn_local(&self) -> bool {
+        let result = unsafe { ((*self.raw.api).can_spawn_local)(self.raw.context) };
+        result
+            .call
+            .resume("failed to read Tokio local runtime context");
+        result.value
+    }
+
+    #[doc(hidden)]
     pub fn id(&self) -> u64 {
         unsafe { ((*self.raw.api).id)(self.raw.context) }
     }

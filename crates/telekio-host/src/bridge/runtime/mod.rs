@@ -40,7 +40,7 @@ mod signal;
 mod task;
 mod time;
 
-pub(crate) use handle::{HandleContext, raw_handle};
+pub(crate) use handle::{HandleContext, handle_context, raw_handle};
 #[cfg(all(unix, feature = "process"))]
 pub use process::reap_process;
 pub use task::next_task_id;
@@ -55,17 +55,16 @@ use std::{
 };
 
 use telekio_abi::{
-    BuildResult, CallResult, Flavor, Future, OwnedBytes, RawRuntime, RuntimeApi, RuntimeConfig,
-    Shutdown, Status,
+    BuildResult, CallResult, Future, OwnedBytes, RawRuntime, RuntimeApi, RuntimeConfig, Shutdown,
+    Status,
 };
 
-use crate::bridge::owner::{self, Owner, OwnerState, owner_state};
+use crate::bridge::owner::{self, OwnerState, owner_state};
 use crate::bridge::{host_callback, host_panic, result};
 
 use self::{
     builder::build_runtime,
     context::{GuestFuture, block_on_result},
-    handle::handle_context,
 };
 
 static RUNTIME_API: RuntimeApi = RuntimeApi {
@@ -101,14 +100,8 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     id: handle::id,
     name: handle::name,
     observe_workers: metrics::observe_workers,
+    can_spawn_local: handle::can_spawn_local,
 };
-
-/// A host runtime used to create plugin owners.
-#[derive(Debug)]
-pub struct Runtime {
-    runtime: Arc<crate::runtime::Runtime>,
-    flavor: Flavor,
-}
 
 pub(super) struct RuntimeOwner {
     id: OnceLock<u64>,
@@ -132,44 +125,6 @@ struct LocalSlot {
 // address and checks that thread before every access to the contained runtime.
 unsafe impl Send for LocalSlot {}
 unsafe impl Sync for LocalSlot {}
-
-impl Runtime {
-    /// Creates a runtime with Tokio's default configuration.
-    #[cfg(feature = "rt-multi-thread")]
-    pub fn new() -> std::io::Result<Self> {
-        crate::runtime::Runtime::new().map(Self::from_tokio)
-    }
-
-    /// Takes ownership of an existing Tokio runtime.
-    pub fn from_tokio(runtime: crate::runtime::Runtime) -> Self {
-        let flavor = match runtime.handle().runtime_flavor() {
-            crate::runtime::RuntimeFlavor::CurrentThread => Flavor::CurrentThread,
-            crate::runtime::RuntimeFlavor::MultiThread => Flavor::MultiThread,
-        };
-        Self {
-            runtime: Arc::new(runtime),
-            flavor,
-        }
-    }
-
-    /// Creates an independent owner for plugin work.
-    pub fn owner(&self) -> Owner {
-        Owner {
-            runtime: Arc::clone(&self.runtime),
-            handle: handle_context(
-                self.runtime.handle().clone(),
-                owner_state(),
-                None,
-                self.flavor,
-            ),
-        }
-    }
-
-    /// Returns the underlying Tokio runtime.
-    pub fn tokio(&self) -> &crate::runtime::Runtime {
-        &self.runtime
-    }
-}
 
 #[doc(hidden)]
 pub fn build_root(config: RuntimeConfig) -> BuildResult {
@@ -303,10 +258,15 @@ pub(super) unsafe extern "C" fn build(
                 let id = match context.owner.register_runtime(Arc::clone(&runtime)) {
                     Ok(id) => id,
                     Err(error) => {
-                        let closed = std::thread::spawn(move || {
-                            runtime.close(Shutdown::Wait, Duration::ZERO)
-                        })
-                        .join();
+                        let closed = if runtime.local_open() {
+                            // A newly built LocalRuntime has no blocking threads to join.
+                            Ok(runtime.close(Shutdown::Background, Duration::ZERO))
+                        } else {
+                            std::thread::spawn(move || {
+                                runtime.close(Shutdown::Wait, Duration::ZERO)
+                            })
+                            .join()
+                        };
                         return BuildResult::error(match closed {
                             Ok(Ok(())) => result(Status::Error, OwnedBytes::from_string(error)),
                             Ok(Err(error)) => {

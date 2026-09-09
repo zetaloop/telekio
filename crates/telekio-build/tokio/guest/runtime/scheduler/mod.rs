@@ -81,6 +81,14 @@ macro_rules! host_schedule {
 pub(crate) use host_schedule;
 
 impl Handle {
+    pub(crate) fn is_local(&self) -> bool {
+        self.connection().handle.flavor() == ::telekio_abi::Flavor::Local
+    }
+
+    pub(crate) fn can_spawn_local_on_local_runtime(&self) -> bool {
+        self.connection().handle.can_spawn_local()
+    }
+
     pub(crate) fn connection(&self) -> &Arc<Connection> {
         match self {
             Handle::CurrentThread(handle) => handle.connection(),

@@ -70,7 +70,7 @@ impl RawAttachment {
     /// The plugin defining these callbacks must remain loaded, and its owner
     /// must have completed shutdown.
     #[doc(hidden)]
-    pub unsafe fn detach(&self) -> CallResult {
+    pub unsafe fn detach(self) -> CallResult {
         unsafe { (self.detach)(self.data) }
     }
 }

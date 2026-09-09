@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use telekio_abi::{CallResult, Flavor, Future, NameResult, OwnedBytes, RawHandle, Status};
+use telekio_abi::{BoolResult, CallResult, Flavor, Future, NameResult, OwnedBytes, RawHandle, Status};
 
 use crate::bridge::owner::OwnerState;
 use crate::bridge::{host_panic, result};
@@ -14,21 +14,45 @@ use crate::bridge::{host_panic, result};
 #[cfg(tokio_unstable)]
 use super::metrics::WorkerObserver;
 use super::{
-    LocalSlot, RUNTIME_API,
+    RUNTIME_API,
     context::{GuestFuture, block_on_result},
 };
 
 pub(crate) struct HandleContext {
     pub(super) handle: crate::runtime::Handle,
     pub(crate) owner: Arc<OwnerState>,
-    pub(super) flavor: Flavor,
-    pub(super) local: Option<Arc<LocalSlot>>,
     #[cfg(tokio_unstable)]
     pub(super) worker_observer: Mutex<Option<WorkerObserver>>,
 }
 
 pub(super) unsafe extern "C" fn flavor(context: *const c_void) -> Flavor {
-    unsafe { &*context.cast::<HandleContext>() }.flavor
+    let handle = &unsafe { &*context.cast::<HandleContext>() }.handle;
+    if handle.inner.is_local() {
+        Flavor::Local
+    } else {
+        match handle.runtime_flavor() {
+            crate::runtime::RuntimeFlavor::CurrentThread => Flavor::CurrentThread,
+            crate::runtime::RuntimeFlavor::MultiThread => Flavor::MultiThread,
+        }
+    }
+}
+
+pub(super) unsafe extern "C" fn can_spawn_local(context: *const c_void) -> BoolResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        unsafe { &*context.cast::<HandleContext>() }
+            .handle
+            .inner
+            .can_spawn_local_on_local_runtime()
+    })) {
+        Ok(value) => BoolResult {
+            call: CallResult::ok(),
+            value,
+        },
+        Err(payload) => BoolResult {
+            call: host_panic(&*payload),
+            value: false,
+        },
+    }
 }
 
 pub(super) unsafe extern "C" fn id(context: *const c_void) -> u64 {
@@ -63,17 +87,13 @@ pub(super) unsafe extern "C" fn name(context: *const c_void) -> NameResult {
     }
 }
 
-pub(super) fn handle_context(
+pub(crate) fn handle_context(
     handle: crate::runtime::Handle,
     owner: Arc<OwnerState>,
-    local: Option<Arc<LocalSlot>>,
-    flavor: Flavor,
 ) -> Arc<HandleContext> {
     Arc::new(HandleContext {
         handle,
         owner,
-        local,
-        flavor,
         #[cfg(tokio_unstable)]
         worker_observer: Mutex::new(None),
     })

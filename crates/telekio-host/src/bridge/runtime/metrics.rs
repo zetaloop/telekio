@@ -5,8 +5,6 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
-#[cfg(tokio_unstable)]
-use telekio_abi::Flavor;
 use telekio_abi::{CallResult, Metric, MetricResult, OwnedBytes, Status, WorkerCallback};
 
 use crate::bridge::{host_panic, result};
@@ -207,7 +205,10 @@ pub(super) unsafe extern "C" fn observe_workers(
             if observer.is_some() {
                 return Err("Tokio worker observer is already installed".to_owned());
             }
-            if !matches!(context.flavor, Flavor::MultiThread) {
+            if !matches!(
+                context.handle.runtime_flavor(),
+                crate::runtime::RuntimeFlavor::MultiThread
+            ) {
                 drop(callback);
                 return Ok(());
             }

@@ -51,7 +51,7 @@ Commit the generated `.telekio` directory together with the manifest change. `ca
 
 ## Host and plugin
 
-Each plugin is attached to an Owner on the host. The resulting Attachment provides the Tokio runtime context for calls into the plugin.
+Each plugin is attached to the host's current Tokio runtime. The resulting Attachment provides the runtime context for calls into the plugin.
 
 Create a workspace containing `host` and `plugin`:
 
@@ -105,7 +105,7 @@ edition = "2024"
 [dependencies]
 libloading = "0.9"
 telekio-host = "0.1"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
 `host/src/main.rs`:
@@ -114,9 +114,10 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 use std::{env, error::Error};
 
 use libloading::Library;
-use telekio_host::{Attach, Runtime};
+use telekio_host::Attach;
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let path = env::args_os()
         .nth(1)
         .expect("expected a plugin library path");
@@ -124,14 +125,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let attach = unsafe { *library.get::<Attach>(b"telekio_attach")? };
     let workers = unsafe { *library.get::<unsafe extern "C" fn() -> usize>(b"workers")? };
 
-    let runtime = Runtime::new()?;
-    let owner = runtime.owner();
-    let mut attachment = unsafe { owner.attach(attach)? };
+    let mut attachment = unsafe { telekio_host::attach(attach)? };
 
     let count = attachment.enter(|| unsafe { workers() });
     println!("Host workers: {count}");
 
-    runtime.tokio().block_on(owner.detach(&mut attachment))?;
+    attachment.detach().await?;
     library.close()?;
     Ok(())
 }
@@ -150,7 +149,18 @@ Use `target/debug/plugin.dll` on Windows or `target/debug/libplugin.dylib` on ma
 
 For an async plugin interface, the interface adapter enters the Attachment around plugin calls, future polling, and future destruction. Business code can then use Tokio normally.
 
-To unload a plugin, release its returned futures and other callable objects, await `owner.detach(&mut attachment)` from outside the plugin call, then unload the library. Detachment stops the plugin's Tokio work and waits for active calls to finish.
+To unload a plugin, release its returned futures and other callable objects, await `attachment.detach()` from outside the plugin call, then unload the library. Detachment stops the plugin's Tokio work and waits for active calls to finish.
+
+In synchronous host code, select an existing runtime with Tokio's `Handle::enter()` while attaching:
+
+```rust
+let mut attachment = {
+    let _guard = handle.enter();
+    unsafe { telekio_host::attach(entry)? }
+};
+```
+
+The application owns the Runtime and determines when it shuts down; Attachment retains a Handle.
 
 ## Workspaces
 

@@ -252,12 +252,7 @@ pub(super) fn build_runtime(
         Flavor::CurrentThread | Flavor::MultiThread => {
             let runtime = builder.build()?;
             let workers = runtime.handle().metrics().num_workers();
-            let handle = handle_context(
-                runtime.handle().clone(),
-                Arc::clone(&owner),
-                None,
-                config.flavor,
-            );
+            let handle = handle_context(runtime.handle().clone(), Arc::clone(&owner));
             Ok((RuntimeKind::Runtime(Some(runtime)), handle, workers))
         }
         Flavor::Local => {
@@ -265,7 +260,7 @@ pub(super) fn build_runtime(
             let handle = runtime.handle().clone();
             let workers = handle.metrics().num_workers();
             let local = Arc::new(LocalSlot::new(runtime));
-            let handle = handle_context(handle, owner, Some(Arc::clone(&local)), config.flavor);
+            let handle = handle_context(handle, owner);
             Ok((RuntimeKind::Local(local), handle, workers))
         }
     }

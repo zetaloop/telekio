@@ -34,7 +34,7 @@ cfg_rt! {
     cfg_sync! {
         mod bridge;
 
-        pub use bridge::{Attach, Attachment, Owner, Runtime};
+        pub use bridge::{Attach, Attachment, attach};
         #[doc(hidden)]
         pub use bridge::{build_root, next_task_id};
 

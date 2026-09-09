@@ -248,6 +248,17 @@ pub(super) fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
 
 pub(super) fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
+        for name in ["is_local", "can_spawn_local_on_local_runtime"] {
+            edit::add_attr(
+                source,
+                edit::AttrTarget::Method {
+                    owner: "Handle",
+                    name,
+                },
+                "#[expect(dead_code)]",
+            )?;
+            edit::rename_method(source, "Handle", name, &format!("{name}_inner"))?;
+        }
         edit::add_attr(
             source,
             edit::AttrTarget::Method {
