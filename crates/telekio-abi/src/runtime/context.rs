@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::{cell::Cell, ffi::c_void};
 
 thread_local! {
     static EXECUTION: Cell<*mut ExecutionState> = const { Cell::new(std::ptr::null_mut()) };
@@ -21,6 +21,38 @@ pub struct ExecutionState {
     pub rng_active: u8,
     pub tracing: u8,
     pub forced_yields: u64,
+    pub panic: *const c_void,
+}
+
+#[repr(C)]
+struct PanicContext {
+    previous: *const c_void,
+    panicking: extern "C" fn() -> bool,
+}
+
+extern "C" fn panicking() -> bool {
+    std::thread::panicking()
+}
+
+impl ExecutionState {
+    /// # Safety
+    ///
+    /// The borrowed panic records must remain valid on the current thread.
+    #[doc(hidden)]
+    pub unsafe fn is_panicking(&self) -> bool {
+        if std::thread::panicking() {
+            return true;
+        }
+        let mut current = self.panic;
+        while !current.is_null() {
+            let context = unsafe { &*current.cast::<PanicContext>() };
+            if (context.panicking)() {
+                return true;
+            }
+            current = context.previous;
+        }
+        false
+    }
 }
 
 #[doc(hidden)]
@@ -34,16 +66,29 @@ pub fn execution_state() -> *mut ExecutionState {
 /// duration of `call`.
 #[doc(hidden)]
 pub unsafe fn with_execution_state<R>(state: *mut ExecutionState, call: impl FnOnce() -> R) -> R {
-    struct Reset(*mut ExecutionState);
+    struct Reset {
+        state: *mut ExecutionState,
+        previous: *mut ExecutionState,
+        panic: *const c_void,
+    }
 
     impl Drop for Reset {
         fn drop(&mut self) {
-            EXECUTION.set(self.0);
+            unsafe { (*self.state).panic = self.panic };
+            EXECUTION.set(self.previous);
         }
     }
 
     assert!(!state.is_null(), "Tokio execution state is missing");
-    let previous = EXECUTION.replace(state);
-    let _reset = Reset(previous);
+    let context = PanicContext {
+        previous: unsafe { (*state).panic },
+        panicking,
+    };
+    let _reset = Reset {
+        state,
+        previous: EXECUTION.replace(state),
+        panic: context.previous,
+    };
+    unsafe { (*state).panic = (&raw const context).cast() };
     call()
 }

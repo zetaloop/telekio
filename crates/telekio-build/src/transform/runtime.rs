@@ -3,6 +3,64 @@ use std::{error::Error, fs, path::Path};
 use super::{mount, patch};
 use crate::edit;
 
+pub(super) fn patch_panicking(root: &Path) -> Result<(), Box<dyn Error>> {
+    for (file, scope) in [
+        (
+            "runtime/blocking/shutdown.rs",
+            edit::Scope::Method {
+                owner: "Receiver",
+                name: "wait",
+            },
+        ),
+        (
+            "runtime/context/current.rs",
+            edit::Scope::MethodArgument {
+                owner: "SetCurrentGuard",
+                name: "drop",
+                call: edit::Call::Method("with"),
+            },
+        ),
+        (
+            "runtime/scheduler/current_thread/mod.rs",
+            edit::Scope::Method {
+                owner: "CurrentThread",
+                name: "shutdown",
+            },
+        ),
+        (
+            "runtime/scheduler/multi_thread/queue.rs",
+            edit::Scope::Method {
+                owner: "Local<T>",
+                name: "drop",
+            },
+        ),
+        (
+            "runtime/scheduler/multi_thread/worker.rs",
+            edit::Scope::Method {
+                owner: "AbortOnPanic",
+                name: "drop",
+            },
+        ),
+        (
+            "util/idle_notified_set.rs",
+            edit::Scope::Method {
+                owner: "IdleNotifiedSet<T>",
+                name: "drop",
+            },
+        ),
+    ] {
+        patch(&root.join("src").join(file), |source| {
+            edit::redirect_call(
+                source,
+                scope,
+                "std::thread::panicking",
+                "crate::runtime::context::telekio::panicking",
+            )
+        })?;
+    }
+    Ok(())
+}
+
 pub(super) fn patch_builder(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
         edit::redirect_call(

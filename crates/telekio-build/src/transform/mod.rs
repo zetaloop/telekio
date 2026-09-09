@@ -14,6 +14,7 @@ use crate::edit;
 
 pub(crate) fn guest(generated: &Path) -> Result<(), Box<dyn Error>> {
     watch("guest");
+    runtime::patch_panicking(generated)?;
     patch_guest_root(&generated.join("src/lib.rs"))?;
     task::patch_task_id(&generated.join("src/runtime/task/id.rs"))?;
     task::patch_task(&generated.join("src/runtime/task/mod.rs"))?;
@@ -62,6 +63,7 @@ pub(crate) fn guest(generated: &Path) -> Result<(), Box<dyn Error>> {
 
 pub(crate) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
     watch("host");
+    runtime::patch_panicking(source)?;
     for (module, visibility, attribute) in [
         ("runtime/builder.rs", None, None),
         ("runtime/context.rs", Some("pub(crate)"), None),

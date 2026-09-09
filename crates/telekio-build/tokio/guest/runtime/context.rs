@@ -15,6 +15,8 @@ fn execution_state() -> *mut State {
 #[path = "../../shared/runtime/context.rs"]
 mod access;
 pub(super) use access::budget;
+#[cfg(feature = "rt")]
+pub(crate) use access::panicking;
 #[cfg(any(feature = "macros", all(feature = "sync", feature = "rt")))]
 pub(super) use access::rng;
 #[cfg(feature = "rt")]

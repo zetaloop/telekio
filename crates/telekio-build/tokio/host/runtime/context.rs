@@ -65,6 +65,7 @@ fn enter<R>(call: impl FnOnce(*mut c_void) -> R) -> R {
     }));
     let rng = CONTEXT.with(access::rng(|context| context.rng.get()));
     let (rng_one, rng_two) = rng.map_or((0, 0), FastRand::telekio_parts);
+    let previous = ACTIVE.get();
     let mut state = State {
         runtime,
         task_id,
@@ -74,12 +75,17 @@ fn enter<R>(call: impl FnOnce(*mut c_void) -> R) -> R {
         rng_active: rng.is_some().into(),
         tracing: crate::runtime::telekio::is_tracing().into(),
         forced_yields: 0,
+        panic: if previous.is_null() {
+            std::ptr::null()
+        } else {
+            unsafe { (*previous).panic }
+        },
     };
     let _reset = Reset {
         state: &raw mut state,
         previous: ACTIVE.replace(&raw mut state),
     };
-    call((&raw mut state).cast())
+    unsafe { ::telekio_abi::with_execution_state(&raw mut state, || call((&raw mut state).cast())) }
 }
 
 fn execution_state() -> *mut State {
@@ -89,6 +95,8 @@ fn execution_state() -> *mut State {
 #[path = "../../shared/runtime/context.rs"]
 mod access;
 pub(super) use access::budget;
+#[cfg(feature = "rt")]
+pub(crate) use access::panicking;
 #[cfg(any(feature = "macros", all(feature = "sync", feature = "rt")))]
 pub(super) use access::rng;
 #[cfg(feature = "rt")]

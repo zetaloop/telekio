@@ -3,6 +3,16 @@ use super::super::Context;
 use super::super::FastRand;
 use super::{execution_state, State};
 
+#[cfg(feature = "rt")]
+pub(crate) fn panicking() -> bool {
+    let state = execution_state();
+    if state.is_null() {
+        std::thread::panicking()
+    } else {
+        unsafe { (*state).is_panicking() }
+    }
+}
+
 pub(in crate::runtime::context) fn budget<F, R>(local: F) -> impl FnOnce(&Context) -> R
 where
     F: FnOnce(&Context) -> R,
