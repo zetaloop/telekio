@@ -226,11 +226,28 @@ pub fn rename_method(
     name: &str,
     replacement: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let (editor, root) = open(source)?;
-    let method = method(&root, owner, name)?;
-    let name = method.name().ok_or("method has no name")?;
-    editor.replace(name.syntax(), make::name(replacement).syntax().clone());
-    commit(source, editor)
+    let scope = Scope::Method { owner, name };
+    let count = count_targets(
+        source,
+        scope,
+        &|root, scope| Ok(usize::from(scope.resolve(root)?.is_some())),
+        &|scope, tree, inner| scope.inside(tree).map(|scope| (scope, inner)),
+    )?;
+    match count {
+        0 => return Err(format!("no method `{owner}::{name}`").into()),
+        1 => {}
+        _ => return Err(format!("more than one method `{owner}::{name}`").into()),
+    }
+    if edit_scope(source, scope, &|editor, scope| {
+        let method = ast::Fn::cast(scope.clone()).ok_or("scope is not a method")?;
+        let name = method.name().ok_or("method has no name")?;
+        editor.replace(name.syntax(), make::name(replacement).syntax().clone());
+        Ok(true)
+    })? {
+        Ok(())
+    } else {
+        Err(format!("no method `{owner}::{name}`").into())
+    }
 }
 
 pub fn set_method_visibility(
