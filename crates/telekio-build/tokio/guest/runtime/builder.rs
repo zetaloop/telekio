@@ -153,9 +153,6 @@ impl Builder {
                 }
             },
         };
-        #[cfg(any(telekio_host, feature = "telekio-test"))]
-        let result = ::telekio_host::build_root(config);
-        #[cfg(not(any(telekio_host, feature = "telekio-test")))]
         let result = ::telekio_abi::attached().build(config);
         // Tokio's LocalRuntime keeps this value on its originating thread.
         unsafe { result.into_runtime() }.map(|(runtime, _)| runtime)

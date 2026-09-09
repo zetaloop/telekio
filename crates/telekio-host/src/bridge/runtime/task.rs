@@ -18,13 +18,8 @@ use crate::bridge::{host_panic, result};
 
 use super::{HandleContext, context::with_task_execution};
 
-#[doc(hidden)]
-pub fn next_task_id() -> u64 {
-    crate::runtime::telekio::next_task_id()
-}
-
 pub(super) unsafe extern "C" fn task_id(_: *const c_void) -> TaskIdResult {
-    match catch_unwind(next_task_id) {
+    match catch_unwind(crate::runtime::telekio::next_task_id) {
         Ok(value) => TaskIdResult {
             call: CallResult::ok(),
             value,

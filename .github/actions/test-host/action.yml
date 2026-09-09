@@ -1,0 +1,53 @@
+name: Build the test host
+description: Build the native Host library loaded by upstream Guest tests.
+
+inputs:
+  workspace:
+    description: Prepared upstream workspace.
+    required: true
+  features:
+    description: Additional Tokio features provided by the host.
+    default: ""
+  target:
+    description: Cargo target for the host library.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - id: features
+      shell: bash
+      env:
+        TOKIO_WORKSPACE: ${{ inputs.workspace }}
+        EXTRA_FEATURES: ${{ inputs.features }}
+      run: |
+        python - <<'PY' >> "$GITHUB_OUTPUT"
+        import os
+        import tomllib
+        from pathlib import Path
+
+        with (Path(os.environ["TOKIO_WORKSPACE"]) / "tokio/Cargo.toml").open("rb") as source:
+            features = tomllib.load(source)["features"]["full"]
+        features += ["test-util"]
+        features += filter(None, os.environ["EXTRA_FEATURES"].split(","))
+        print("features=" + ",".join("tokio/" + feature for feature in features))
+        PY
+    - shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        HOST_FEATURES: ${{ steps.features.outputs.features }}
+        HOST_TARGET: ${{ inputs.target }}
+      run: |
+        args=()
+        directory="$CARGO_TARGET_DIR/debug"
+        if [ -n "$HOST_TARGET" ]; then
+          args+=(--target "$HOST_TARGET")
+          directory="$CARGO_TARGET_DIR/$HOST_TARGET/debug"
+        fi
+        cargo run -p telekio -- cargo build --manifest-path tests/Cargo.toml -p telekio-test-host --features "$HOST_FEATURES" "${args[@]}"
+        case "$RUNNER_OS" in
+          Windows) library=telekio_test_host.dll ;;
+          macOS) library=libtelekio_test_host.dylib ;;
+          Linux) library=libtelekio_test_host.so ;;
+        esac
+        echo "TELEKIO_TEST_HOST=$directory/$library" >> "$GITHUB_ENV"

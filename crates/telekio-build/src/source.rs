@@ -29,6 +29,40 @@ pub(crate) fn prepare_tokio_in(
     prepare_package(output, "tokio", TOKIO_VERSION, offline, emit)
 }
 
+pub(crate) fn prepare_tokio_workspace(offline: bool) -> Result<PathBuf, Box<dyn Error>> {
+    let output = output_directory()?;
+    let source = output.join(format!("tokio-workspace-source-{TOKIO_VERSION}"));
+    if !source.exists() {
+        if offline {
+            return Err("Tokio workspace source is unavailable offline".into());
+        }
+        let status = Command::new("git")
+            .args([
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                &format!("tokio-{TOKIO_VERSION}"),
+                "https://github.com/tokio-rs/tokio.git",
+            ])
+            .arg(&source)
+            .status()?;
+        if !status.success() {
+            return Err(format!("git clone failed with {status}").into());
+        }
+    }
+    let destination = output.join(format!("tokio-workspace-{TOKIO_VERSION}"));
+    if destination.is_dir() {
+        fs::remove_dir_all(&destination)?;
+    }
+    copy_directory(&source, &destination)?;
+    println!(
+        "cargo:rerun-if-changed={}",
+        source.join("Cargo.toml").display()
+    );
+    Ok(destination)
+}
+
 fn output_directory() -> Result<PathBuf, Box<dyn Error>> {
     env::var_os("OUT_DIR")
         .map(PathBuf::from)
@@ -149,6 +183,9 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), Box<dyn Error
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
         let target = destination.join(entry.file_name());
         let kind = entry.file_type()?;
         if kind.is_dir() {

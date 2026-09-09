@@ -41,9 +41,6 @@ mod task;
 mod time;
 
 pub(crate) use handle::{HandleContext, handle_context, raw_handle};
-#[cfg(all(unix, feature = "process"))]
-pub use process::reap_process;
-pub use task::next_task_id;
 
 use std::{
     cell::UnsafeCell,
@@ -59,7 +56,7 @@ use telekio_abi::{
     Status,
 };
 
-use crate::bridge::owner::{self, OwnerState, owner_state};
+use crate::bridge::owner::{self, OwnerState};
 use crate::bridge::{host_callback, host_panic, result};
 
 use self::{
@@ -106,7 +103,6 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
 pub(super) struct RuntimeOwner {
     id: OnceLock<u64>,
     owner: Weak<OwnerState>,
-    root_owner: Option<Arc<OwnerState>>,
     kind: RwLock<RuntimeKind>,
 }
 
@@ -126,45 +122,7 @@ struct LocalSlot {
 unsafe impl Send for LocalSlot {}
 unsafe impl Sync for LocalSlot {}
 
-#[doc(hidden)]
-pub fn build_root(config: RuntimeConfig) -> BuildResult {
-    match catch_unwind(AssertUnwindSafe(|| {
-        let owner = owner_state();
-        match build_runtime(config, Arc::clone(&owner)) {
-            Ok((kind, handle, workers)) => {
-                let runtime = Arc::new(RuntimeOwner {
-                    id: OnceLock::new(),
-                    owner: Arc::downgrade(&owner),
-                    root_owner: Some(owner),
-                    kind: RwLock::new(kind),
-                });
-                let raw_handle = raw_handle(handle);
-                BuildResult::success(
-                    unsafe {
-                        RawRuntime::from_raw(Arc::into_raw(runtime).cast_mut().cast(), raw_handle)
-                    },
-                    workers,
-                )
-            }
-            Err(error) => BuildResult::error(result(
-                Status::Error,
-                OwnedBytes::from_string(error.to_string()),
-            )),
-        }
-    })) {
-        Ok(result) => result,
-        Err(payload) => BuildResult::error(host_panic(&*payload)),
-    }
-}
-
 impl RuntimeOwner {
-    fn owner(&self) -> Option<Arc<OwnerState>> {
-        self.root_owner
-            .as_ref()
-            .cloned()
-            .or_else(|| self.owner.upgrade())
-    }
-
     pub(super) fn is_closed(&self) -> bool {
         matches!(&*self.kind.read().unwrap(), RuntimeKind::Closed)
     }
@@ -227,9 +185,7 @@ impl LocalSlot {
 pub(super) unsafe extern "C" fn release_runtime(owner: *mut c_void) -> CallResult {
     host_callback(|| {
         let runtime = unsafe { &*owner.cast::<RuntimeOwner>() };
-        if runtime.root_owner.is_some() {
-            drop(unsafe { Arc::from_raw(owner.cast::<RuntimeOwner>()) });
-        } else if let Some(owner) = runtime.owner.upgrade() {
+        if let Some(owner) = runtime.owner.upgrade() {
             let _runtime = owner.unregister_runtime(*runtime.id.get().unwrap());
         }
     })
@@ -252,7 +208,6 @@ pub(super) unsafe extern "C" fn build(
                 let runtime = Arc::new(RuntimeOwner {
                     id: OnceLock::new(),
                     owner: Arc::downgrade(&context.owner),
-                    root_owner: None,
                     kind: RwLock::new(kind),
                 });
                 let id = match context.owner.register_runtime(Arc::clone(&runtime)) {
@@ -333,7 +288,8 @@ pub(super) unsafe extern "C" fn runtime_block_on(owner: *mut c_void, future: Fut
     let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<Status, String> {
         let runtime = unsafe { &*owner.cast::<RuntimeOwner>() };
         let owner = runtime
-            .owner()
+            .owner
+            .upgrade()
             .ok_or_else(|| "Tokio owner has gone away".to_owned())?;
         let activity = owner.activity()?;
         let kind = runtime.kind.read().unwrap();

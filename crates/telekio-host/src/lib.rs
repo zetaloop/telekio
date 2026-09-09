@@ -35,13 +35,5 @@ cfg_rt! {
         mod bridge;
 
         pub use bridge::{Attach, Attachment, attach};
-        #[doc(hidden)]
-        pub use bridge::{build_root, next_task_id};
-
-        cfg_process! {
-            #[cfg(unix)]
-            #[doc(hidden)]
-            pub use bridge::reap_process;
-        }
     }
 }

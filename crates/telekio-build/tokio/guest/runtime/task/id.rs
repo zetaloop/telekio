@@ -10,9 +10,6 @@ impl Id {
     }
 
     pub(crate) fn next() -> Self {
-        #[cfg(any(telekio_host, feature = "telekio-test"))]
-        let value = ::telekio_host::next_task_id();
-        #[cfg(not(any(telekio_host, feature = "telekio-test")))]
         let value = ::telekio_abi::attached().next_task_id();
         Self::from_telekio(value)
     }

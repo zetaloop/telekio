@@ -7,15 +7,9 @@ use telekio_abi::CallResult;
 #[cfg(all(unix, feature = "process"))]
 use crate::bridge::host_panic;
 
-#[cfg(all(unix, feature = "process"))]
-#[doc(hidden)]
-pub fn reap_process(id: u32) {
-    crate::runtime::telekio::reap_process(id);
-}
-
 pub(super) unsafe extern "C" fn reap_process_abi(_: *const c_void, id: u32) -> CallResult {
     #[cfg(all(unix, feature = "process"))]
-    return match catch_unwind(AssertUnwindSafe(|| reap_process(id))) {
+    return match catch_unwind(AssertUnwindSafe(|| crate::runtime::telekio::reap_process(id))) {
         Ok(()) => CallResult::ok(),
         Err(payload) => host_panic(&*payload),
     };

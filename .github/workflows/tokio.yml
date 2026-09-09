@@ -1,0 +1,488 @@
+# Tokio 1.53.1: https://github.com/tokio-rs/tokio/blob/tokio-1.53.1/.github/workflows/ci.yml
+name: Tokio
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  RUSTFLAGS: -Dwarnings
+  RUST_BACKTRACE: 1
+  RUSTUP_WINDOWS_PATH_ADD_BIN: 1
+  TOKIO_STABLE_FEATURES: full,test-util
+
+jobs:
+  test-tokio-full:
+    name: test tokio full (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+      - uses: ./.github/actions/prepare-tokio
+        id: tokio
+      - uses: ./.github/actions/test-host
+        with:
+          workspace: ${{ steps.tokio.outputs.workspace }}
+      - name: test tokio full
+        working-directory: ${{ steps.tokio.outputs.workspace }}/tokio
+        run: |
+          cargo nextest run --features full
+          cargo test --doc --features full
+      - name: Test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ steps.tokio.outputs.workspace }}/target/nextest/default/junit.xml
+
+  test-workspace-all-features:
+    name: test all crates in the workspace with all features (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+      - uses: ./.github/actions/prepare-tokio
+        id: tokio
+      - uses: ./.github/actions/test-host
+        with:
+          workspace: ${{ steps.tokio.outputs.workspace }}
+      - name: test workspace
+        working-directory: ${{ steps.tokio.outputs.workspace }}
+        run: |
+          cargo nextest run --workspace --features "$TOKIO_STABLE_FEATURES"
+          perl -0 -i -pe 's/\[patch\.crates-io\].+\n\[/[/s' Cargo.toml
+          cargo nextest run --workspace --exclude tokio --exclude examples --features "$TOKIO_STABLE_FEATURES"
+          cargo test --doc --workspace --features "$TOKIO_STABLE_FEATURES"
+      - name: Test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ steps.tokio.outputs.workspace }}/target/nextest/default/junit.xml
+
+  test-workspace-all-features-panic-abort:
+    name: test workspace panic=abort (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      # Telekio requires a newer compiler than Tokio's pinned nightly.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+      - uses: ./.github/actions/prepare-tokio
+        id: tokio
+      - uses: ./.github/actions/test-host
+        with:
+          workspace: ${{ steps.tokio.outputs.workspace }}
+        env:
+          RUSTFLAGS: -Dwarnings -C panic=abort -Zpanic-abort-tests
+      - name: test workspace panic=abort
+        working-directory: ${{ steps.tokio.outputs.workspace }}
+        run: RUSTFLAGS="$RUSTFLAGS -C panic=abort -Zpanic-abort-tests" cargo nextest run --workspace --exclude tokio-macros --exclude tests-build --features "$TOKIO_STABLE_FEATURES" --tests
+      - name: Test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ steps.tokio.outputs.workspace }}/target/nextest/default/junit.xml
+
+  test-integration-tests-per-feature:
+    name: Run integration tests for each feature (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+      - uses: ./.github/actions/prepare-tokio
+        id: tokio
+      - uses: ./.github/actions/test-host
+        with:
+          workspace: ${{ steps.tokio.outputs.workspace }}
+      - name: test tests-integration --each-feature
+        working-directory: ${{ steps.tokio.outputs.workspace }}/tests-integration
+        run: cargo hack test --each-feature
+      - name: test tests-build --each-feature
+        working-directory: ${{ steps.tokio.outputs.workspace }}/tests-build
+        run: cargo hack test --each-feature
+      - name: Check benches
+        if: startsWith(matrix.os, 'ubuntu')
+        working-directory: ${{ steps.tokio.outputs.workspace }}/benches
+        run: cargo check --benches
+
+  test-unstable:
+    name: test tokio full --unstable (${{ matrix.os }}, ${{ matrix.extra_features }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - { os: windows-latest, extra_features: "" }
+          - { os: ubuntu-latest, extra_features: "" }
+          - { os: ubuntu-latest, extra_features: io-uring }
+          - { os: macos-latest, extra_features: "" }
+    env:
+      RUSTFLAGS: --cfg tokio_unstable -Dwarnings
+      RUSTDOCFLAGS: --cfg tokio_unstable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+      - uses: ./.github/actions/prepare-tokio
+        id: tokio
+      - uses: ./.github/actions/test-host
+        with:
+          workspace: ${{ steps.tokio.outputs.workspace }}
+          features: ${{ matrix.extra_features }}
+      - name: test tokio full --cfg unstable
+        working-directory: ${{ steps.tokio.outputs.workspace }}/tokio
+        run: |
+          cargo nextest run --features "$TOKIO_STABLE_FEATURES,${{ matrix.extra_features }}"
+          cargo test --doc --features "$TOKIO_STABLE_FEATURES,${{ matrix.extra_features }}"
+      - name: Test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ steps.tokio.outputs.workspace }}/target/nextest/default/junit.xml
+
+  test-unstable-taskdump:
+    name: test tokio full --unstable --taskdump
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg tokio_unstable -Dwarnings
+      RUSTDOCFLAGS: --cfg tokio_unstable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+      - uses: ./.github/actions/prepare-tokio
+        id: tokio
+      - uses: ./.github/actions/test-host
+        with:
+          workspace: ${{ steps.tokio.outputs.workspace }}
+          features: taskdump
+      - name: test tokio full --cfg unstable --cfg taskdump
+        working-directory: ${{ steps.tokio.outputs.workspace }}/tokio
+        run: |
+          cargo nextest run --features "$TOKIO_STABLE_FEATURES,taskdump"
+          cargo test --doc --features "$TOKIO_STABLE_FEATURES"
+      - name: Test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.job }}
+          path: ${{ steps.tokio.outputs.workspace }}/target/nextest/default/junit.xml
+
+  check-unstable-mt-counters:
+    name: check tokio full --internal-mt-counters
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg tokio_unstable --cfg tokio_internal_mt_counters -Dwarnings
+      RUSTDOCFLAGS: --cfg tokio_unstable --cfg tokio_internal_mt_counters
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+      - uses: ./.github/actions/prepare-tokio
+        id: tokio
+      - uses: ./.github/actions/test-host
+        with:
+          workspace: ${{ steps.tokio.outputs.workspace }}
+          features: tracing,schedule-latency,taskdump,io-uring
+      - name: check tokio full --cfg unstable --cfg internal-mt-counters
+        working-directory: ${{ steps.tokio.outputs.workspace }}/tokio
+        run: |
+          cargo nextest run --all-features
+          cargo test --doc --all-features
+      - name: Test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.job }}
+          path: ${{ steps.tokio.outputs.workspace }}/target/nextest/default/junit.xml
+
+  loom-compile:
+    name: build loom tests
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg loom --cfg tokio_unstable -Dwarnings
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+      - uses: ./.github/actions/prepare-tokio
+        id: tokio
+      - name: build --cfg loom
+        working-directory: ${{ steps.tokio.outputs.workspace }}/tokio
+        run: cargo test --no-run --lib --features full
+
+  features:
+    name: features exclude ${{ matrix.exclude_features }} (${{ matrix.os }}, ${{ matrix.rustflags }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rustflags: ""
+            exclude_features: io-uring,taskdump,schedule-latency
+          - os: ubuntu-latest
+            rustflags: --cfg tokio_unstable -Dwarnings
+            exclude_features: io-uring,taskdump,schedule-latency
+          - os: ubuntu-latest
+            rustflags: --cfg tokio_unstable -Dwarnings
+            exclude_features: ""
+          - os: windows-latest
+            rustflags: ""
+            exclude_features: io-uring,taskdump,schedule-latency
+          - os: windows-latest
+            rustflags: --cfg tokio_unstable -Dwarnings
+            exclude_features: io-uring,taskdump
+          - os: macos-latest
+            rustflags: ""
+            exclude_features: io-uring,taskdump,schedule-latency
+          - os: macos-latest
+            rustflags: --cfg tokio_unstable -Dwarnings
+            exclude_features: io-uring,taskdump
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+      - uses: ./.github/actions/prepare-tokio
+        id: tokio
+      - name: check --feature-powerset
+        working-directory: ${{ steps.tokio.outputs.workspace }}
+        run: cargo hack check --all --feature-powerset --exclude-features "${{ matrix.exclude_features }}" --depth 2 --keep-going
+      - name: Host features
+        run: cargo hack check -p telekio-host --feature-powerset --exclude-features "${{ matrix.exclude_features }}" --depth 2 --keep-going
+
+  cross-test-with-parking_lot:
+    name: cross-test-with-parking_lot (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            extra_features: io-uring,taskdump
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            extra_features: ""
+    env:
+      RUST_TEST_THREADS: 1
+      RUSTFLAGS: --cfg tokio_unstable -Dwarnings --cfg tokio_no_tuning_tests
+      RUSTDOCFLAGS: --cfg tokio_unstable -Dwarnings
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+      - uses: ./.github/actions/prepare-tokio
+        id: tokio
+      - uses: ./.github/actions/test-host
+        with:
+          workspace: ${{ steps.tokio.outputs.workspace }}
+          features: ${{ matrix.extra_features }}
+          target: ${{ matrix.target }}
+      - name: Tests run with all features (including parking_lot)
+        working-directory: ${{ steps.tokio.outputs.workspace }}
+        run: |
+          cargo nextest run -p tokio --features "$TOKIO_STABLE_FEATURES,${{ matrix.extra_features }}" --target "${{ matrix.target }}"
+          cargo test --doc -p tokio --features "$TOKIO_STABLE_FEATURES,${{ matrix.extra_features }}" --target "${{ matrix.target }}"
+      - name: Test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ steps.tokio.outputs.workspace }}/target/nextest/default/junit.xml
+
+  cross-check:
+    name: cross-check (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [powerpc-unknown-linux-gnu, powerpc64-unknown-linux-gnu, arm-linux-androideabi]
+    env:
+      RUSTFLAGS: --cfg tokio_unstable -Dwarnings
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+      - uses: ./.github/actions/prepare-tokio
+        id: tokio
+      - name: Check workspace
+        working-directory: ${{ steps.tokio.outputs.workspace }}
+        run: cargo check --workspace --features "$TOKIO_STABLE_FEATURES" --target "${{ matrix.target }}"
+      - name: Host target features
+        run: cargo run -p telekio -- cargo check --manifest-path tests/Cargo.toml -p feature-check --target "${{ matrix.target }}" --features tokio/full
+
+  # Cross-artifact observability and the native standard-lock configuration.
+  test-observability:
+    name: test observability (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    env:
+      RUSTFLAGS: --cfg tokio_unstable -Dwarnings
+      RUSTDOCFLAGS: --cfg tokio_unstable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+      - uses: ./.github/actions/prepare-tokio
+        id: tokio
+      - uses: ./.github/actions/test-host
+        with:
+          workspace: ${{ steps.tokio.outputs.workspace }}
+          features: tracing,schedule-latency
+      - name: Tests and doctests
+        working-directory: ${{ steps.tokio.outputs.workspace }}/tokio
+        run: |
+          cargo nextest run --features "$TOKIO_STABLE_FEATURES,tracing,schedule-latency"
+          cargo test --doc --features "$TOKIO_STABLE_FEATURES,tracing,schedule-latency"
+      - name: Test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ steps.tokio.outputs.workspace }}/target/nextest/default/junit.xml
+
+  test-without-parking_lot:
+    name: test without parking_lot
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg tokio_unstable -Dwarnings --cfg tokio_no_parking_lot
+      RUSTDOCFLAGS: --cfg tokio_unstable -Dwarnings
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+      - uses: ./.github/actions/prepare-tokio
+        id: tokio
+      - name: Remove parking_lot from full
+        working-directory: ${{ steps.tokio.outputs.workspace }}
+        run: sed -i '0,/parking_lot/{/parking_lot/d;}' tokio/Cargo.toml
+      - uses: ./.github/actions/test-host
+        with:
+          workspace: ${{ steps.tokio.outputs.workspace }}
+          features: tracing,schedule-latency
+      - name: Tests and doctests
+        working-directory: ${{ steps.tokio.outputs.workspace }}/tokio
+        run: |
+          cargo nextest run --features "$TOKIO_STABLE_FEATURES,tracing,schedule-latency"
+          cargo test --doc --features "$TOKIO_STABLE_FEATURES,tracing,schedule-latency"
+      - name: Test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.job }}
+          path: ${{ steps.tokio.outputs.workspace }}/target/nextest/default/junit.xml

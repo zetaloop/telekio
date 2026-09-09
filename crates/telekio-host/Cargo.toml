@@ -73,7 +73,6 @@ sync = []
 taskdump = ["dep:backtrace"]
 test-util = ["rt", "sync", "time"]
 time = []
-tracing = ["dep:tracing"]
 
 [dependencies]
 telekio-abi = { version = "=0.1.0", path = "../telekio-abi" }

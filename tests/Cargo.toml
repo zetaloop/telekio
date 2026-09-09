@@ -1,5 +1,5 @@
 [workspace]
-members = ["features", "host", "plugin", "upstream"]
+members = ["features", "host", "plugin", "support", "support-host", "upstream"]
 default-members = ["upstream"]
 resolver = "3"
 

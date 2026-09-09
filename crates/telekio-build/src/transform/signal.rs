@@ -85,16 +85,6 @@ pub(super) fn patch_signal(generated: &Path) -> Result<(), Box<dyn Error>> {
         )?;
         mount(source, Some("pub(crate)"), "telekio", "guest/signal.rs")
     })?;
-    patch(&generated.join("src/process/unix/orphan.rs"), |source| {
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Impl {
-                owner: "OrphanQueueImpl<T>",
-                method: "push_orphan",
-            },
-            "#[cfg_attr(all(not(test), any(telekio_host, feature = \"telekio-test\")), expect(dead_code))]",
-        )
-    })?;
     patch(&generated.join("src/process/unix/mod.rs"), |source| {
         edit::redirect_call(
             source,

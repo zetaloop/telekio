@@ -1,0 +1,16 @@
+[package]
+name = "telekio-test-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+telekio-abi = { path = "../../crates/telekio-abi" }
+telekio-host = { path = "../../crates/telekio-host" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }

@@ -4,7 +4,7 @@
 
 ## Execution and ownership
 
-Host Tokio owns the runtime services, scheduler, and real task identities. Guest `UnownedTask` retains the artifact-local future, output, panic payload, and join state required by Rust's types. `LocalSet` retains Tokio's local scheduler. Shared `ExecutionState` carries the execution context, current task identity, cooperative budget, and RNG across artifact calls.
+Host Tokio owns the runtime services, scheduler, and real task identities. Guest `UnownedTask` retains the artifact-local future, output, panic payload, and join state required by Rust's types. `LocalSet` retains Tokio's local scheduler. Shared `ExecutionState` carries the execution context, current task identity, cooperative budget, RNG, and panic queries across artifact calls.
 
 Guest `Runtime` and `LocalRuntime` own their `telekio_abi::Runtime` through `BlockingPool`, preserving Tokio's shutdown sequence. Handles share only `Connection` state. Organize task, scheduler, hooks, metrics, dump, I/O, and time code around their corresponding Tokio services.
 
@@ -32,7 +32,11 @@ Cargo root patches select the generated Tokio package. Publication strips applic
 
 ## Validation
 
-`tests/upstream` generates Tokio's original suite through `prepare_tests()`. These tests cover the transformed Tokio API; `tests/host` and `tests/plugin` exercise independently compiled artifacts and their invocation, cancellation, detach, and unload lifecycle. Both forms of validation are needed for cross-artifact behavior.
+`tests/upstream` prepares the complete Tokio workspace through `prepare_tests()`. Guest tests connect through `tests/support` to the separately compiled `tests/support-host` library using normal attachment. `tests/host` and `tests/plugin` exercise invocation, cancellation, detach, and unload lifecycle.
+
+[Tokio CI](.github/workflows/tokio.yml) follows the selected upstream version's job structure, commands, features, and Rust flags. When updating Tokio, compare its CI changes and update the corresponding jobs and toolchain adaptations. The composite actions prepare source and the test host; source checks and plugin/CLI checks live in `check.yml`.
+
+Execute the prepared workspace outside `CARGO_TARGET_DIR`: trybuild treats paths beneath build output as generated source and normalizes away their line numbers.
 
 Run the complete upstream suites. Compare failures with unmodified Tokio under the same configuration and preserve upstream-equivalent behavior. Native systems provide execution evidence; other targets receive source review and cross-compilation.
 

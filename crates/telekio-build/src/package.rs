@@ -9,7 +9,7 @@ use toml::{Table, Value};
 
 use crate::{
     prepare_tokio,
-    source::{prepare_tokio_artifact, prepare_tokio_in},
+    source::{prepare_tokio_in, prepare_tokio_workspace},
     transform::{self, crate_preamble, include_source},
 };
 
@@ -28,52 +28,21 @@ impl Role {
     }
 }
 
-pub fn prepare_tests() -> Result<PathBuf, Box<dyn Error>> {
-    let (source, features) = prepare_tokio_artifact(crate::invocation::offline()?)?;
-    let generated = prepare_guest_with(source, package_dependency("telekio-abi", true))?;
-    let path = generated.join("Cargo.toml");
-    let mut manifest: Value = toml::from_str(&fs::read_to_string(&path)?)?;
-    manifest["features"] = Value::try_from(features)?;
-    let features = manifest
-        .get_mut("features")
-        .and_then(Value::as_table_mut)
-        .ok_or("Tokio manifest has no features")?;
-    features.insert(
-        "telekio-test".to_owned(),
-        Value::Array(vec![Value::String("dep:telekio-host".to_owned())]),
-    );
-    forward_features(features, true)?;
-    let mut host_dependency = package_dependency("telekio-host", false);
-    host_dependency
-        .as_table_mut()
-        .ok_or("generated host dependency is not a table")?
-        .insert("optional".to_owned(), Value::Boolean(true));
-    manifest
-        .get_mut("dependencies")
-        .and_then(Value::as_table_mut)
-        .ok_or("Tokio manifest has no dependencies")?
-        .insert("telekio-host".to_owned(), host_dependency);
-    let root = manifest
-        .as_table_mut()
-        .ok_or("Tokio manifest is not a table")?;
-    root.insert("workspace".to_owned(), Value::Table(Table::new()));
-    root.entry("patch")
-        .or_insert_with(|| Value::Table(Table::new()))
-        .as_table_mut()
-        .ok_or("Tokio patches are not a table")?
-        .entry("crates-io")
-        .or_insert_with(|| Value::Table(Table::new()))
-        .as_table_mut()
-        .ok_or("Tokio crates.io patches are not a table")?
-        .insert(
-            "tokio".to_owned(),
-            Value::Table(Table::from_iter([(
-                "path".to_owned(),
-                Value::String(".".to_owned()),
-            )])),
-        );
-    fs::write(path, toml::to_string(&manifest)?)?;
-    Ok(generated)
+pub fn prepare_tests(support: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let workspace = prepare_tokio_workspace(crate::invocation::offline()?)?;
+    let source = workspace.join("tokio");
+    let abi = Value::Table(Table::from_iter([
+        (
+            "package".to_owned(),
+            Value::String("telekio-test-support".to_owned()),
+        ),
+        (
+            "path".to_owned(),
+            Value::String(support.to_string_lossy().into_owned()),
+        ),
+    ]));
+    prepare_guest_with(source, abi)?;
+    Ok(workspace)
 }
 
 pub fn prepare_guest() -> Result<PathBuf, Box<dyn Error>> {
@@ -151,7 +120,6 @@ fn patch_current(
     let host_features = features.is_some_and(|features| {
         features.iter().all(|(name, values)| {
             name == "default"
-                || name == "telekio-test"
                 || values.as_array().is_some_and(|values| {
                     values.contains(&Value::String(format!("telekio-host/{name}")))
                         == (dependency_role == Role::Host)
@@ -160,7 +128,7 @@ fn patch_current(
     });
     Ok(version == Some(concat!("=", env!("CARGO_PKG_VERSION")))
         && rust_version == Some(env!("CARGO_PKG_RUST_VERSION"))
-        && features.is_some_and(|features| features.contains_key("telekio-test"))
+        && features.is_some_and(|features| !features.contains_key("telekio-test"))
         && dependencies
             .get("telekio-abi")
             .and_then(|dependency| dependency.get("features"))
@@ -251,9 +219,8 @@ fn write_patch(
         .get_mut("features")
         .and_then(Value::as_table_mut)
         .ok_or("Tokio manifest has no features")?;
-    features.insert("telekio-test".to_owned(), Value::Array(Vec::new()));
     if dependency_role == Role::Host {
-        forward_features(features, false)?;
+        forward_features(features)?;
     }
 
     let dependencies = manifest
@@ -332,20 +299,15 @@ fn write_patch(
     Ok(())
 }
 
-fn forward_features(features: &mut Table, optional: bool) -> Result<(), Box<dyn Error>> {
-    let dependency = if optional {
-        "telekio-host?"
-    } else {
-        "telekio-host"
-    };
+fn forward_features(features: &mut Table) -> Result<(), Box<dyn Error>> {
     for (name, values) in features {
-        if name == "default" || name == "telekio-test" {
+        if name == "default" {
             continue;
         }
         values
             .as_array_mut()
             .ok_or("Tokio feature is not an array")?
-            .push(Value::String(format!("{dependency}/{name}")));
+            .push(Value::String(format!("telekio-host/{name}")));
     }
     Ok(())
 }
@@ -432,28 +394,11 @@ pub fn prepare_tokio_host() -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn patch_manifest(path: &Path, abi: Value) -> Result<(), Box<dyn Error>> {
-    let mut manifest: Value = toml::from_str(&fs::read_to_string(path)?)?;
-    let dependencies = manifest
-        .get_mut("dependencies")
-        .and_then(Value::as_table_mut)
-        .ok_or("Tokio manifest has no dependencies")?;
-    dependencies.insert("telekio-abi".to_owned(), abi);
-    manifest
-        .get_mut("features")
-        .and_then(Value::as_table_mut)
-        .ok_or("Tokio manifest has no features")?
-        .insert("telekio-test".to_owned(), Value::Array(Vec::new()));
-    let check_cfg = manifest
-        .get_mut("lints")
-        .and_then(|lints| lints.get_mut("rust"))
-        .and_then(|rust| rust.get_mut("unexpected_cfgs"))
-        .and_then(|lint| lint.get_mut("check-cfg"))
-        .and_then(Value::as_array_mut)
-        .ok_or("Tokio manifest has no unexpected_cfgs check-cfg list")?;
-    let telekio_host = Value::String("cfg(telekio_host)".to_owned());
-    if !check_cfg.contains(&telekio_host) {
-        check_cfg.push(telekio_host);
-    }
-    fs::write(path, toml::to_string(&manifest)?)?;
+    let manifest = fs::read_to_string(path)?;
+    let dependency = toml::to_string(&abi)?;
+    fs::write(
+        path,
+        format!("{manifest}\n[dependencies.telekio-abi]\n{dependency}"),
+    )?;
     Ok(())
 }
