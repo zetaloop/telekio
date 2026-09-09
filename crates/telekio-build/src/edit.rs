@@ -456,11 +456,36 @@ fn retarget_use_in(source: &mut String, name: &str, path: &str) -> Result<bool, 
                 editor.replace(tree.syntax(), replacement.syntax().clone());
                 commit(source, editor)?;
             } else {
+                let item = tree
+                    .syntax()
+                    .ancestors()
+                    .find_map(ast::Use::cast)
+                    .ok_or("use tree has no use item")?;
+                let (declaration, root) = SyntaxEditor::new(item.syntax().clone());
+                let root = ast::Use::cast(root)
+                    .and_then(|item| item.use_tree())
+                    .ok_or("use item has no tree")?;
+                declaration.replace(
+                    root.syntax(),
+                    make::use_tree(make::path_from_text(path), None, None, false)
+                        .syntax()
+                        .clone(),
+                );
+                editor.insert_all(
+                    Position::before(item.syntax()),
+                    vec![
+                        declaration.finish().new_root().clone().into(),
+                        make::tokens::whitespace(&format!(
+                            "\n{}",
+                            IndentLevel::from_node(item.syntax())
+                        ))
+                        .into(),
+                    ],
+                );
                 for element in removal {
                     editor.delete(element);
                 }
                 commit(source, editor)?;
-                add_use(source, path)?;
             }
             return Ok(true);
         }
@@ -1149,27 +1174,6 @@ fn retain_outermost(
         !(range.start() <= existing.start() && range.end() >= existing.end())
     });
     replacements.push((source, replacement));
-}
-
-fn add_use(source: &mut String, path: &str) -> Result<(), Box<dyn Error>> {
-    let item = make::use_(
-        std::iter::empty(),
-        None,
-        make::use_tree(make::path_from_text(path), None, None, false),
-    );
-    let (editor, root) = open(source)?;
-    let anchor = root
-        .children()
-        .find(|node| ast::Item::can_cast(node.kind()))
-        .ok_or("source has no items")?;
-    editor.insert_all(
-        Position::before(&anchor),
-        vec![
-            item.syntax().clone().into(),
-            make::tokens::whitespace("\n").into(),
-        ],
-    );
-    commit(source, editor)
 }
 
 fn use_tree_removal(tree: &ast::UseTree) -> Vec<SyntaxElement> {
