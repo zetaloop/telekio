@@ -106,7 +106,10 @@ impl fmt::Debug for Attachment {
 ///
 /// `entry` must belong to a loaded plugin that remains loaded until its attachment is detached and all calls into the plugin have finished.
 pub unsafe fn attach(entry: Attach) -> io::Result<Attachment> {
-    let handle = crate::runtime::Handle::try_current().map_err(io::Error::other)?;
+    let handle = crate::runtime::Handle::try_current().map_err(|error| {
+        telekio_abi::require_package("This application");
+        io::Error::other(error)
+    })?;
     let owner = owner_state();
     let context = handle_context(handle, Arc::clone(&owner));
     let result = unsafe { entry(raw_handle(context)) };
