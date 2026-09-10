@@ -4,7 +4,7 @@ use std::{
     sync::OnceLock,
 };
 
-use telekio_abi::CallResult;
+use telekio_abi::{CallResult, OwnedBytes};
 use telekio_host::{Attach, Attachment};
 use tokio::runtime::{Builder, Runtime};
 
@@ -12,12 +12,20 @@ use tokio::runtime::{Builder, Runtime};
 ///
 /// # Safety
 ///
-/// The Guest entry and its code must remain loaded for the process lifetime.
+/// The Guest entry and callback must remain valid for the process lifetime.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn prepare(entry: Attach) -> CallResult {
+pub unsafe extern "C" fn prepare(
+    entry: Attach,
+    on_panic: Option<unsafe extern "C" fn(OwnedBytes) -> !>,
+) -> CallResult {
     static HOST: OnceLock<io::Result<(Runtime, Attachment)>> = OnceLock::new();
     match catch_unwind(AssertUnwindSafe(|| {
         match HOST.get_or_init(|| {
+            if let Some(on_panic) = on_panic {
+                std::panic::set_hook(Box::new(move |info| unsafe {
+                    on_panic(CallResult::panicked(info.payload()).payload)
+                }));
+            }
             let runtime = Builder::new_current_thread().enable_all().build()?;
             let attachment = {
                 let _guard = runtime.enter();
