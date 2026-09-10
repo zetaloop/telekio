@@ -17,6 +17,7 @@ env:
   RUST_BACKTRACE: 1
   RUSTUP_WINDOWS_PATH_ADD_BIN: 1
   TOKIO_STABLE_FEATURES: full,test-util
+  RUST_NIGHTLY: nightly-2026-07-01
 
 jobs:
   test-tokio-full:
@@ -97,8 +98,9 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
-      # Telekio requires a newer compiler than Tokio's pinned nightly.
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -303,23 +305,13 @@ jobs:
           - os: ubuntu-latest
             rustflags: --cfg tokio_unstable -Dwarnings
             exclude_features: ""
-          - os: windows-latest
-            rustflags: ""
-            exclude_features: io-uring,taskdump,schedule-latency
-          - os: windows-latest
-            rustflags: --cfg tokio_unstable -Dwarnings
-            exclude_features: io-uring,taskdump
-          - os: macos-latest
-            rustflags: ""
-            exclude_features: io-uring,taskdump,schedule-latency
-          - os: macos-latest
-            rustflags: --cfg tokio_unstable -Dwarnings
-            exclude_features: io-uring,taskdump
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-hack

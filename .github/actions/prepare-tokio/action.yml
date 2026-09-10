@@ -13,7 +13,7 @@ runs:
       shell: bash
       working-directory: ${{ github.workspace }}
       run: |
-        source=$(cargo run --quiet --manifest-path tests/Cargo.toml -p upstream-tests)
+        source=$(cargo run --manifest-path tests/Cargo.toml -p upstream-tests)
         cp -R "$source" "$RUNNER_TEMP/tokio"
         mkdir -p "$RUNNER_TEMP/tokio/.config"
         cp .config/nextest.toml "$RUNNER_TEMP/tokio/.config/nextest.toml"
