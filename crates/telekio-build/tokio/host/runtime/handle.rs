@@ -190,12 +190,6 @@ impl Handle {
         }
     }
 
-    #[cfg(feature = "rt-multi-thread")]
-    #[doc(hidden)]
-    pub fn telekio_record_poll(actual: u64, guest: u64) {
-        crate::runtime::scheduler::multi_thread::telekio::record_poll(actual, guest);
-    }
-
     #[cfg(tokio_unstable)]
     #[doc(hidden)]
     pub fn telekio_add_worker_observer(&self, observer: Observer) -> Option<u64> {

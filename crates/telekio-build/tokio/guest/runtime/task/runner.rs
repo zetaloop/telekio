@@ -388,7 +388,7 @@ impl<S: HostSchedule> Runner<S> {
         }
     }
 
-    fn run(&self, runnable: Runnable<S>) -> u64 {
+    fn run(&self, runnable: Runnable<S>) {
         self.schedule.run(|| match runnable {
             Runnable::Initial(task) => task.run(),
             Runnable::Notified(task) => task.run_host(),
@@ -429,7 +429,7 @@ unsafe extern "C" fn poll_runner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
     execution: *mut ::telekio_abi::ExecutionState,
     waker: *const ::telekio_abi::Waker,
-) -> ::telekio_abi::TaskPoll {
+) -> ::telekio_abi::Poll {
     match catch_unwind(AssertUnwindSafe(|| unsafe {
         ::telekio_abi::with_execution_state(execution, || poll_runner_inner::<S>(data, waker))
     })) {
@@ -437,7 +437,7 @@ unsafe extern "C" fn poll_runner<S: HostSchedule>(
         Err(_) => {
             let runner = unsafe { &*data.cast::<Runner<S>>() };
             runner.abort.get().unwrap().abort();
-            ::telekio_abi::TaskPoll::unmeasured(::telekio_abi::Poll::Panicked)
+            ::telekio_abi::Poll::Panicked
         }
     }
 }
@@ -445,7 +445,7 @@ unsafe extern "C" fn poll_runner<S: HostSchedule>(
 unsafe fn poll_runner_inner<S: HostSchedule>(
     data: *mut std::ffi::c_void,
     waker: *const ::telekio_abi::Waker,
-) -> ::telekio_abi::TaskPoll {
+) -> ::telekio_abi::Poll {
     struct Polling<'a>(&'a AtomicBool);
 
     impl Drop for Polling<'_> {
@@ -462,9 +462,8 @@ unsafe fn poll_runner_inner<S: HostSchedule>(
     let _polling = Polling(&runner.polling);
     *runner.waker.lock().unwrap() = Some(unsafe { (*waker).clone_rust_waker() });
     if runner.complete.load(Ordering::Acquire) {
-        return ::telekio_abi::TaskPoll::unmeasured(::telekio_abi::Poll::Ready);
+        return ::telekio_abi::Poll::Ready;
     }
-    let mut duration = None;
     let runnable = if unsafe { (*::telekio_abi::execution_state()).tracing } != 0 {
         #[cfg(feature = "taskdump")]
         {
@@ -478,20 +477,16 @@ unsafe fn poll_runner_inner<S: HostSchedule>(
         runner.runnable.lock().unwrap().take()
     };
     if let Some(runnable) = runnable {
-        duration = Some(runner.run(runnable));
+        runner.run(runnable);
     }
-    let state = if runner.complete.load(Ordering::Acquire) {
+    if runner.complete.load(Ordering::Acquire) {
         ::telekio_abi::Poll::Ready
     } else {
         if runner.runnable.lock().unwrap().is_some() {
             runner.wake();
         }
         ::telekio_abi::Poll::Pending
-    };
-    duration.map_or_else(
-        || ::telekio_abi::TaskPoll::unmeasured(state),
-        |duration| ::telekio_abi::TaskPoll::new(state, duration),
-    )
+    }
 }
 
 unsafe extern "C" fn cancel_runner<S: HostSchedule>(

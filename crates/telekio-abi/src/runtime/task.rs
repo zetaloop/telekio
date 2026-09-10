@@ -25,16 +25,8 @@ pub struct TaskIdResult {
 #[repr(C)]
 pub struct Task {
     resource: Resource,
-    poll: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, *const Waker) -> TaskPoll,
+    poll: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, *const Waker) -> Poll,
     cancel: unsafe extern "C" fn(*mut c_void, *mut ExecutionState) -> CallResult,
-}
-
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct TaskPoll {
-    state: Poll,
-    duration_nanos: u64,
-    measured: u8,
 }
 
 impl SourceLocation {
@@ -74,40 +66,6 @@ impl SourceLocation {
     }
 }
 
-impl TaskPoll {
-    #[doc(hidden)]
-    pub const fn new(state: Poll, duration_nanos: u64) -> Self {
-        Self {
-            state,
-            duration_nanos,
-            measured: 1,
-        }
-    }
-
-    #[doc(hidden)]
-    pub const fn unmeasured(state: Poll) -> Self {
-        Self {
-            state,
-            duration_nanos: 0,
-            measured: 0,
-        }
-    }
-
-    #[doc(hidden)]
-    pub const fn state(self) -> Poll {
-        self.state
-    }
-
-    #[doc(hidden)]
-    pub const fn duration_nanos(self) -> Option<u64> {
-        if self.measured == 0 {
-            None
-        } else {
-            Some(self.duration_nanos)
-        }
-    }
-}
-
 impl Task {
     /// # Safety
     ///
@@ -118,7 +76,7 @@ impl Task {
     #[doc(hidden)]
     pub const unsafe fn from_raw(
         data: *mut c_void,
-        poll: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, *const Waker) -> TaskPoll,
+        poll: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, *const Waker) -> Poll,
         cancel: unsafe extern "C" fn(*mut c_void, *mut ExecutionState) -> CallResult,
         release: unsafe extern "C" fn(*mut c_void) -> CallResult,
     ) -> Self {
@@ -130,7 +88,7 @@ impl Task {
     }
 
     #[doc(hidden)]
-    pub fn poll(&mut self, state: &mut ExecutionState, waker: &Waker) -> TaskPoll {
+    pub fn poll(&mut self, state: &mut ExecutionState, waker: &Waker) -> Poll {
         unsafe { (self.poll)(self.resource.data(), state, waker) }
     }
 

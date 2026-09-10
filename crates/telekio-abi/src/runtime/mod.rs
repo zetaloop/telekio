@@ -14,7 +14,7 @@ pub use context::{ExecutionState, RuntimeContext, execution_state, with_executio
 pub use dump::{DumpOperation, DumpResult};
 pub use handle::{Handle, NameResult, RawHandle};
 pub use metrics::{HistogramConfig, Metric, MetricResult, WorkerCallback};
-pub use task::{SourceLocation, Task, TaskIdResult, TaskPoll};
+pub use task::{SourceLocation, Task, TaskIdResult};
 pub use task_hooks::{TaskCallback, TaskEvent};
 
 use std::{

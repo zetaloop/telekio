@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 pub(crate) trait HostSchedule: task::Schedule + Clone + Send + Sync + 'static {
     fn connection(&self) -> &Arc<Connection>;
-    fn run(&self, call: impl FnOnce()) -> u64;
+    fn run(&self, call: impl FnOnce());
     fn enter<R>(&self, call: impl FnOnce() -> R) -> R;
 }
 
@@ -41,13 +41,11 @@ macro_rules! host_schedule {
                 Handle::connection(self)
             }
 
-            fn run(&self, call: impl FnOnce()) -> u64 {
+            fn run(&self, call: impl FnOnce()) {
                 let run = || {
                     #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
                     crate::runtime::metrics::telekio::record_worker(self.connection());
-                    let started = std::time::Instant::now();
                     call();
-                    started.elapsed().as_nanos().min(u64::MAX.into()) as u64
                 };
                 let current = crate::runtime::context::with_current(|handle| match handle {
                     crate::runtime::scheduler::Handle::$variant(handle) => {

@@ -88,11 +88,6 @@ pub(crate) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
             Some("#[cfg(unix)]"),
         ),
         (
-            "runtime/scheduler/multi_thread/mod.rs",
-            Some("pub(crate)"),
-            None,
-        ),
-        (
             "runtime/metrics/histogram.rs",
             None,
             Some("#[cfg(tokio_unstable)]"),

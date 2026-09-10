@@ -305,34 +305,6 @@ pub(super) fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 pub(super) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
-    let target = source.join("src/runtime/scheduler/multi_thread/stats.rs");
-    let mut contents = fs::read_to_string(&target)?;
-    mount(
-        &mut contents,
-        Some("pub(super)"),
-        "telekio",
-        "host/runtime/scheduler/multi_thread/stats.rs",
-    )?;
-    edit::redirect_call(
-        &mut contents,
-        edit::Scope::Method {
-            owner: "Stats",
-            name: "start_processing_scheduled_tasks",
-        },
-        "Instant::now",
-        "telekio::start_poll_batch",
-    )?;
-    edit::redirect_call(
-        &mut contents,
-        edit::Scope::Method {
-            owner: "Stats",
-            name: "end_processing_scheduled_tasks",
-        },
-        "Instant::now",
-        "telekio::finish_poll_batch",
-    )?;
-    fs::write(target, contents)?;
-
     if std::env::var_os("CARGO_CFG_TOKIO_UNSTABLE").is_none() {
         return Ok(());
     }

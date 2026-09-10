@@ -1,5 +1,3 @@
-#[cfg(feature = "rt-multi-thread")]
-use std::time::Instant;
 use std::{
     ffi::c_void,
     future::Future as RustFuture,
@@ -140,15 +138,7 @@ impl RustFuture for GuestTask {
 
     fn poll(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> RustPoll<()> {
         let waker = unsafe { Waker::from_ref(context.waker()) };
-        #[cfg(feature = "rt-multi-thread")]
-        let started = Instant::now();
-        let poll = with_task_execution(|state| self.task.poll(unsafe { &mut *state }, &waker));
-        #[cfg(feature = "rt-multi-thread")]
-        if let Some(guest) = poll.duration_nanos() {
-            let actual = started.elapsed().as_nanos().min(u64::MAX.into()) as u64;
-            crate::runtime::Handle::telekio_record_poll(actual, guest);
-        }
-        match poll.state() {
+        match with_task_execution(|state| self.task.poll(unsafe { &mut *state }, &waker)) {
             Poll::Pending => RustPoll::Pending,
             Poll::Ready => {
                 self.complete = true;
