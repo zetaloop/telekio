@@ -18,10 +18,7 @@ pub unsafe extern "C" fn prepare(entry: Attach) -> CallResult {
     static HOST: OnceLock<io::Result<(Runtime, Attachment)>> = OnceLock::new();
     match catch_unwind(AssertUnwindSafe(|| {
         match HOST.get_or_init(|| {
-            let runtime = Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .build()?;
+            let runtime = Builder::new_current_thread().enable_all().build()?;
             let attachment = {
                 let _guard = runtime.enter();
                 unsafe { telekio_host::attach(entry)? }
