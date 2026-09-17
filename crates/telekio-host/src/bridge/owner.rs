@@ -42,7 +42,7 @@ pub(super) struct OwnerState {
 
 struct OwnerStatus {
     handles: HashMap<usize, HandleRecord>,
-    tasks: HashMap<u64, TaskRecord>,
+    tasks: HashMap<u64, Option<crate::task::AbortHandle>>,
     activities: HashMap<u64, Option<std::task::Waker>>,
     runtimes: HashMap<u64, Arc<RuntimeOwner>>,
     resources: HashMap<u64, Arc<dyn OwnerResource>>,
@@ -52,10 +52,6 @@ struct OwnerStatus {
 struct HandleRecord {
     context: Arc<HandleContext>,
     references: usize,
-}
-
-struct TaskRecord {
-    handle: Option<crate::task::AbortHandle>,
 }
 
 trait OwnerResource: Send + Sync {
@@ -290,7 +286,7 @@ impl OwnerState {
         }
         match state.tasks.entry(id) {
             std::collections::hash_map::Entry::Vacant(task) => {
-                task.insert(TaskRecord { handle: None });
+                task.insert(None);
                 Ok(())
             }
             std::collections::hash_map::Entry::Occupied(_) => {
@@ -305,7 +301,7 @@ impl OwnerState {
             handle.abort();
         }
         if let Some(task) = state.tasks.get_mut(&id) {
-            task.handle = Some(handle);
+            *task = Some(handle);
         }
     }
 
@@ -316,7 +312,7 @@ impl OwnerState {
             .unwrap()
             .tasks
             .get(&id)
-            .and_then(|task| task.handle.clone());
+            .and_then(Clone::clone);
         if let Some(handle) = handle {
             handle.abort();
         }
@@ -524,7 +520,7 @@ async fn shutdown_owner(owner: &Arc<OwnerState>) -> io::Result<()> {
         let tasks = state
             .tasks
             .values()
-            .filter_map(|task| task.handle.clone())
+            .filter_map(Clone::clone)
             .collect::<Vec<_>>();
         let resources = state.resources.values().cloned().collect::<Vec<_>>();
         let activities = state
