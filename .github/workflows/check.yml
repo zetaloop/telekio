@@ -1,150 +1,20 @@
-name: check
-
-on:
-  push:
-    branches: ["**"]
-  pull_request:
-  workflow_dispatch:
-  workflow_call:
-
+name: ARM preparation
+on: push
 permissions:
   contents: read
-
-concurrency:
-  group: check-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 defaults:
   run:
     shell: bash
-
-env:
-  CARGO_TARGET_DIR: ${{ github.workspace }}/target
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
 jobs:
-  source:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install Rust
-        run: |
-          rustup update --no-self-update stable
-          rustup component add rustfmt clippy
-      - name: Install actionlint
-        run: |
-          mkdir "$RUNNER_TEMP/actionlint"
-          curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash -o "$RUNNER_TEMP/download-actionlint.bash"
-          bash "$RUNNER_TEMP/download-actionlint.bash" latest "$RUNNER_TEMP/actionlint"
-          echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
-      - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: |
-          cargo fmt --check
-          cargo fmt --manifest-path tests/Cargo.toml --all --check
-          git ls-files -z crates/telekio-build/tokio | xargs -0 rustfmt --check --edition 2021
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --features guest,full -- -D warnings
-      - name: Documentation
-        run: cargo doc --workspace --no-deps
-      - name: Workflows
-        run: actionlint -verbose
-      - name: Packages
-        run: |
-          patches=()
-          for package in telekio telekio-abi telekio-build telekio-host; do
-            patches+=(--config "patch.crates-io.$package.path=\"crates/$package\"")
-          done
-          cargo package --workspace "${patches[@]}"
-
-  tokio:
-    uses: ./.github/workflows/tokio.yml
-
-  integration:
-    name: Plugins and Cargo (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            library: libplugin.so
-          - os: windows-latest
-            library: plugin.dll
-          - os: macos-latest
-            library: libplugin.dylib
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install Rust
-        run: |
-          rustup update --no-self-update stable
-          rustup component add clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            tests -> ../target
-      - name: Mixed workspace
-        run: |
-          cargo run -p telekio -- cargo check --workspace --locked
-          cargo run -p telekio -- cargo check --manifest-path tests/Cargo.toml --workspace
-          cargo run -p telekio -- cargo clippy --manifest-path tests/Cargo.toml --workspace --all-targets --locked -- -D warnings
-          cargo run -p telekio -- cargo build --manifest-path tests/Cargo.toml --workspace --locked
-          cargo run -p telekio -- cargo check --manifest-path tests/Cargo.toml -p feature-check --features tokio/full --frozen
-      - name: Cargo aliases
-        working-directory: tests
-        run: |
-          "$CARGO_TARGET_DIR/debug/telekio${{ runner.os == 'Windows' && '.exe' || '' }}" cargo check-all --locked
-      - name: Plugin lifecycle
-        run: |
-          telekio="$CARGO_TARGET_DIR/debug/telekio${{ runner.os == 'Windows' && '.exe' || '' }}"
-          host="$CARGO_TARGET_DIR/debug/plugin-host${{ runner.os == 'Windows' && '.exe' || '' }}"
-          for host_flags in "" "--cfg tokio_unstable"; do
-            RUSTFLAGS="$host_flags" "$telekio" cargo build --manifest-path tests/Cargo.toml -p plugin-host --locked
-            for guest_flags in "" "--cfg tokio_unstable"; do
-              printf 'host: %s; guest: %s\n' "${host_flags:-stable}" "${guest_flags:-stable}"
-              RUSTFLAGS="$guest_flags" "$telekio" cargo build --manifest-path tests/Cargo.toml -p plugin --locked
-              "$host" "$CARGO_TARGET_DIR/debug/${{ matrix.library }}"
-            done
-          done
-
-  cross:
-    name: Cross-check (${{ matrix.target }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: i686-unknown-linux-gnu
-            features: tokio/full
-          - target: aarch64-unknown-linux-gnu
-            features: tokio/full
-          - target: x86_64-unknown-freebsd
-            features: tokio/full
-          - target: i686-unknown-freebsd
-            features: tokio/full
-          - target: wasm32-unknown-unknown
-            features: tokio/rt,tokio/sync,tokio/time,tokio/macros
-          - target: wasm32-wasip1
-            features: tokio/rt,tokio/sync,tokio/time,tokio/macros,tokio/io-util
-          - target: x86_64-fortanix-unknown-sgx
-            features: tokio/rt,tokio/sync
+  prepare:
+    runs-on: windows-11-arm
+    timeout-minutes: 8
     env:
-      RUSTFLAGS: --cfg tokio_unstable -Dwarnings
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: --cfg tokio_unstable -Dwarnings --cfg tokio_no_tuning_tests
     steps:
       - uses: actions/checkout@v7
-      - name: Install Rust
-        run: |
-          rustup update --no-self-update stable
-          rustup target add ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: cross-${{ matrix.target }}
-          workspaces: |
-            . -> target
-            tests -> ../target
-      - name: Target features
-        run: cargo run -p telekio -- cargo check --manifest-path tests/Cargo.toml -p feature-check --target "${{ matrix.target }}" --features "${{ matrix.features }}"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare Tokio
+        run: cargo run -vv --manifest-path tests/Cargo.toml -p upstream-tests

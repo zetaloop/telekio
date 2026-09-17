@@ -36,6 +36,7 @@ pub(crate) fn prepare_tokio_workspace(offline: bool) -> Result<PathBuf, Box<dyn 
         if offline {
             return Err("Tokio workspace source is unavailable offline".into());
         }
+        eprintln!("prepare: clone workspace");
         let status = Command::new("git")
             .args([
                 "clone",
@@ -55,7 +56,9 @@ pub(crate) fn prepare_tokio_workspace(offline: bool) -> Result<PathBuf, Box<dyn 
     if destination.is_dir() {
         fs::remove_dir_all(&destination)?;
     }
+    eprintln!("prepare: copy workspace");
     copy_directory(&source, &destination)?;
+    eprintln!("prepare: workspace copied");
     println!(
         "cargo:rerun-if-changed={}",
         source.join("Cargo.toml").display()

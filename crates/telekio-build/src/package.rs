@@ -41,7 +41,9 @@ pub fn prepare_tests(support: &Path) -> Result<PathBuf, Box<dyn Error>> {
             Value::String(support.to_string_lossy().into_owned()),
         ),
     ]));
+    eprintln!("prepare: transform guest");
     prepare_guest_with(source, abi)?;
+    eprintln!("prepare: complete");
     Ok(workspace)
 }
 
