@@ -8,7 +8,7 @@ use std::{
 };
 
 use telekio_abi::{
-    CallResult, OwnedBytes, Poll, SourceLocation, Status, Task, TaskIdResult, Waker,
+    CallResult, OwnedBytes, Poll, SourceLocation, Status, Task, Waker,
 };
 
 use crate::bridge::owner::{OwnerContext, TaskCleanup};
@@ -16,17 +16,8 @@ use crate::bridge::{host_panic, result};
 
 use super::{HandleContext, context::with_task_execution};
 
-pub(super) unsafe extern "C" fn task_id(_: *const c_void) -> TaskIdResult {
-    match catch_unwind(crate::runtime::telekio::next_task_id) {
-        Ok(value) => TaskIdResult {
-            call: CallResult::ok(),
-            value,
-        },
-        Err(payload) => TaskIdResult {
-            call: host_panic(&*payload),
-            value: 0,
-        },
-    }
+pub(super) unsafe extern "C" fn task_id(_: *const c_void) -> u64 {
+    crate::runtime::telekio::next_task_id()
 }
 
 pub(super) unsafe extern "C" fn abort(context: *const c_void, id: u64) -> CallResult {

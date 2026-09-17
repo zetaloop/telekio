@@ -17,12 +17,6 @@ unsafe impl Send for SourceLocation {}
 unsafe impl Sync for SourceLocation {}
 
 #[repr(C)]
-pub struct TaskIdResult {
-    pub call: CallResult,
-    pub value: u64,
-}
-
-#[repr(C)]
 pub struct Task {
     resource: Resource,
     poll: unsafe extern "C" fn(*mut c_void, *mut ExecutionState, *const Waker) -> Poll,
@@ -104,9 +98,7 @@ impl Task {
 impl Handle {
     #[doc(hidden)]
     pub fn next_task_id(&self) -> u64 {
-        let result = unsafe { ((*self.raw.api).task_id)(self.raw.context) };
-        result.call.resume("failed to allocate Tokio task ID");
-        result.value
+        unsafe { ((*self.raw.api).task_id)(self.raw.context) }
     }
 
     #[doc(hidden)]

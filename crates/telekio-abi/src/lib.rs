@@ -21,7 +21,7 @@ pub use runtime::{
     Blocking, BlockingTask, BuildResult, DumpOperation, DumpResult, ExecutionState, Flavor, Future,
     Handle, HistogramConfig, Metric, MetricResult, NameResult, RawHandle, RawRuntime, Runtime,
     RuntimeConfig, RuntimeContext, Shutdown, SourceLocation, Task, TaskCallback, TaskEvent,
-    TaskIdResult, WorkerCallback,
+    WorkerCallback,
 };
 #[doc(hidden)]
 pub use runtime::{execution_state, with_execution_state};

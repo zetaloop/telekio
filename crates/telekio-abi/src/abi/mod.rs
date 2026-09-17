@@ -12,7 +12,7 @@ use crate::{
     Blocking, BlockingTask, BuildResult, ClockResult, DumpResult, DurationParts, Future,
     InstantOffset, IoDriverResult, IoInterest, IoResource, IoResult, Metric, MetricResult,
     NameResult, RuntimeConfig, Shutdown, SignalRequest, SignalResult, SourceLocation, Task,
-    TaskIdResult, TimerResult, WorkerCallback,
+    TimerResult, WorkerCallback,
 };
 
 #[repr(C)]
@@ -23,7 +23,7 @@ pub struct RuntimeApi {
     pub release_handle: unsafe extern "C" fn(*const c_void) -> CallResult,
     pub release_runtime: unsafe extern "C" fn(*mut c_void) -> CallResult,
     pub detach: unsafe extern "C" fn(*const c_void) -> CallResult,
-    pub task_id: unsafe extern "C" fn(*const c_void) -> TaskIdResult,
+    pub task_id: unsafe extern "C" fn(*const c_void) -> u64,
     pub abort: unsafe extern "C" fn(*const c_void, u64) -> CallResult,
     pub spawn: unsafe extern "C" fn(*const c_void, Task, u64, SourceLocation) -> CallResult,
     pub spawn_local: unsafe extern "C" fn(*const c_void, Task, u64, SourceLocation) -> CallResult,
