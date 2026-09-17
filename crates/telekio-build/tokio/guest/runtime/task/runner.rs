@@ -460,7 +460,6 @@ unsafe fn poll_runner_inner<S: HostSchedule>(
         "Tokio task is already being polled"
     );
     let _polling = Polling(&runner.polling);
-    *runner.waker.lock().unwrap() = Some(unsafe { (*waker).clone_rust_waker() });
     if runner.complete.load(Ordering::Acquire) {
         return ::telekio_abi::Poll::Ready;
     }
@@ -482,6 +481,7 @@ unsafe fn poll_runner_inner<S: HostSchedule>(
     if runner.complete.load(Ordering::Acquire) {
         ::telekio_abi::Poll::Ready
     } else {
+        *runner.waker.lock().unwrap() = Some(unsafe { (*waker).clone_rust_waker() });
         if runner.runnable.lock().unwrap().is_some() {
             runner.wake();
         }
