@@ -69,7 +69,7 @@ pub unsafe extern "C" fn request(url: *const u8, length: usize) -> PluginFuture 
 unsafe extern "C" fn poll(data: *mut c_void, waker: *const telekio_abi::Waker) -> PluginPoll {
     match catch_unwind(AssertUnwindSafe(|| {
         let request = unsafe { &mut *data.cast::<Request>() };
-        let waker = unsafe { (*waker).clone_rust_waker() };
+        let waker = unsafe { (*waker).borrow() };
         request.0.as_mut().poll(&mut Context::from_waker(&waker))
     })) {
         Ok(Poll::Pending) => PluginPoll {

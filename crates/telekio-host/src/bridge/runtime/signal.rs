@@ -149,7 +149,7 @@ unsafe extern "C" fn poll(data: *mut c_void, waker: *const Waker) -> OperationPo
     match catch_unwind(AssertUnwindSafe(|| {
         let signal = unsafe { &*data.cast::<HostResource<Signal>>() };
         signal.update_waker(unsafe { &*waker });
-        let waker = unsafe { (*waker).clone_rust_waker() };
+        let waker = unsafe { (*waker).borrow() };
         let mut context = Context::from_waker(&waker);
         match signal.with_mut(|signal| signal.receiver.poll_recv(&mut context)) {
             Ok(state) => OperationPoll {

@@ -193,7 +193,7 @@ unsafe extern "C" fn poll_future<F: RustFuture>(
     let state = unsafe { &mut *data.cast::<FutureState<F>>() };
     let result = catch_unwind(AssertUnwindSafe(|| unsafe {
         with_execution_state(execution, || {
-            let waker = (*waker).clone_rust_waker();
+            let waker = (*waker).borrow();
             let mut context = Context::from_waker(&waker);
             let poll = state
                 .future

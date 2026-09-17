@@ -229,7 +229,7 @@ unsafe extern "C" fn poll_registration(
     io_callback(|| {
         let registration = unsafe { &*data.cast::<HostResource<Registration>>() };
         registration.update_waker(unsafe { &*waker });
-        let waker = unsafe { (*waker).clone_rust_waker() };
+        let waker = unsafe { (*waker).borrow() };
         let mut context = std::task::Context::from_waker(&waker);
         registration
             .with(|registration| registration.poll_ready(&mut context, interest))
@@ -308,7 +308,7 @@ fn poll_completion(
     future: Pin<&mut (dyn Future<Output = io::Result<HostReady>> + Send)>,
     waker: *const Waker,
 ) -> IoPoll {
-    let waker = unsafe { (*waker).clone_rust_waker() };
+    let waker = unsafe { (*waker).borrow() };
     let mut context = std::task::Context::from_waker(&waker);
     completion_poll(future.poll(&mut context))
 }

@@ -69,7 +69,7 @@ mod imp {
         match catch_unwind(AssertUnwindSafe(|| {
             let dump = unsafe { &*data.cast::<HostResource<Dump>>() };
             dump.update_waker(unsafe { &*waker });
-            let waker = unsafe { (*waker).clone_rust_waker() };
+            let waker = unsafe { (*waker).borrow() };
             let mut context = Context::from_waker(&waker);
             match dump.with_mut(|dump| dump.future.as_mut().poll(&mut context)) {
                 Ok(RustPoll::Pending) => OperationPoll {

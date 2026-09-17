@@ -169,7 +169,7 @@ unsafe extern "C" fn poll_time_timer(data: *mut c_void, waker: *const Waker) -> 
     match catch_unwind(AssertUnwindSafe(|| {
         let timer = unsafe { &*data.cast::<HostResource<TimeTimer>>() };
         timer.update_waker(unsafe { &*waker });
-        let waker = unsafe { (*waker).clone_rust_waker() };
+        let waker = unsafe { (*waker).borrow() };
         let mut context = TaskContext::from_waker(&waker);
         timer.with_mut(|timer| {
             timer

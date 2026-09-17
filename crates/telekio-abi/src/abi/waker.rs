@@ -1,6 +1,7 @@
 use std::{
     ffi::c_void,
-    mem::MaybeUninit,
+    mem::{ManuallyDrop, MaybeUninit},
+    ops::Deref,
     panic::{AssertUnwindSafe, catch_unwind},
     task::{RawWaker, RawWakerVTable, Waker as RustWaker},
 };
@@ -11,10 +12,11 @@ use crate::CallResult;
 #[repr(C)]
 pub struct Waker {
     data: *const c_void,
-    clone: unsafe extern "C" fn(*const c_void, *mut Waker) -> CallResult,
-    wake: unsafe extern "C" fn(*const c_void) -> CallResult,
-    wake_by_ref: unsafe extern "C" fn(*const c_void) -> CallResult,
-    release: unsafe extern "C" fn(*const c_void) -> CallResult,
+    vtable: *const c_void,
+    clone: unsafe extern "C" fn(*const Waker, *mut Waker) -> CallResult,
+    wake: unsafe extern "C" fn(*const Waker) -> CallResult,
+    wake_by_ref: unsafe extern "C" fn(*const Waker) -> CallResult,
+    release: unsafe extern "C" fn(*const Waker) -> CallResult,
 }
 
 unsafe impl Send for Waker {}
@@ -26,12 +28,16 @@ impl Waker {
     /// `waker` must outlive every use of the returned borrowed descriptor.
     #[doc(hidden)]
     pub unsafe fn from_ref(waker: &RustWaker) -> Self {
+        if std::ptr::eq(waker.vtable(), &RAW_WAKER_VTABLE) {
+            return unsafe { *waker.data().cast::<Self>() };
+        }
         Self {
-            data: (waker as *const RustWaker).cast(),
-            clone: clone_borrowed,
-            wake: wake_borrowed,
-            wake_by_ref: wake_borrowed,
-            release: release_borrowed,
+            data: waker.data().cast(),
+            vtable: (waker.vtable() as *const RawWakerVTable).cast(),
+            clone,
+            wake,
+            wake_by_ref,
+            release,
         }
     }
 
@@ -40,57 +46,46 @@ impl Waker {
     /// This descriptor must contain valid waker callbacks and state.
     #[doc(hidden)]
     pub unsafe fn clone_rust_waker(&self) -> RustWaker {
-        let mut owned = MaybeUninit::uninit();
-        unsafe { (self.clone)(self.data, owned.as_mut_ptr()) }
-            .resume("failed to clone Tokio waker");
-        let owned = unsafe { owned.assume_init() };
-        let raw = RawWaker::new(Box::into_raw(Box::new(owned)).cast(), &RAW_WAKER_VTABLE);
-        unsafe { RustWaker::from_raw(raw) }
+        unsafe { self.borrow() }.clone()
+    }
+
+    /// # Safety
+    ///
+    /// The descriptor and originating waker must remain valid throughout the borrow.
+    #[doc(hidden)]
+    pub unsafe fn borrow(&self) -> impl Deref<Target = RustWaker> + '_ {
+        ManuallyDrop::new(unsafe {
+            RustWaker::new((self as *const Self).cast(), &RAW_WAKER_VTABLE)
+        })
+    }
+
+    // The originating artifact alone interprets its Rust vtable.
+    unsafe fn native(&self) -> RustWaker {
+        unsafe { RustWaker::new(self.data.cast(), &*self.vtable.cast()) }
     }
 }
 
-unsafe extern "C" fn clone_borrowed(data: *const c_void, output: *mut Waker) -> CallResult {
+unsafe extern "C" fn clone(data: *const Waker, output: *mut Waker) -> CallResult {
     callback(|| {
-        let waker = unsafe { &*data.cast::<RustWaker>() };
-        unsafe { output.write(owned_waker(waker.clone())) };
+        let waker = ManuallyDrop::new(unsafe { (*data).native() });
+        let cloned = ManuallyDrop::new(RustWaker::clone(&waker));
+        let mut descriptor = unsafe { *data };
+        descriptor.data = cloned.data().cast();
+        descriptor.vtable = (cloned.vtable() as *const RawWakerVTable).cast();
+        unsafe { output.write(descriptor) };
     })
 }
 
-unsafe extern "C" fn wake_borrowed(data: *const c_void) -> CallResult {
-    callback(|| unsafe { &*data.cast::<RustWaker>() }.wake_by_ref())
+unsafe extern "C" fn wake(data: *const Waker) -> CallResult {
+    callback(|| unsafe { (*data).native() }.wake())
 }
 
-unsafe extern "C" fn release_borrowed(_: *const c_void) -> CallResult {
-    CallResult::ok()
+unsafe extern "C" fn wake_by_ref(data: *const Waker) -> CallResult {
+    callback(|| ManuallyDrop::new(unsafe { (*data).native() }).wake_by_ref())
 }
 
-fn owned_waker(waker: RustWaker) -> Waker {
-    Waker {
-        data: Box::into_raw(Box::new(waker)).cast(),
-        clone: clone_owned,
-        wake: wake_owned,
-        wake_by_ref: wake_by_ref_owned,
-        release: release_owned,
-    }
-}
-
-unsafe extern "C" fn clone_owned(data: *const c_void, output: *mut Waker) -> CallResult {
-    callback(|| {
-        let waker = unsafe { &*data.cast::<RustWaker>() };
-        unsafe { output.write(owned_waker(waker.clone())) };
-    })
-}
-
-unsafe extern "C" fn wake_owned(data: *const c_void) -> CallResult {
-    callback(|| unsafe { Box::from_raw(data.cast_mut().cast::<RustWaker>()) }.wake())
-}
-
-unsafe extern "C" fn wake_by_ref_owned(data: *const c_void) -> CallResult {
-    callback(|| unsafe { &*data.cast::<RustWaker>() }.wake_by_ref())
-}
-
-unsafe extern "C" fn release_owned(data: *const c_void) -> CallResult {
-    callback(|| drop(unsafe { Box::from_raw(data.cast_mut().cast::<RustWaker>()) }))
+unsafe extern "C" fn release(data: *const Waker) -> CallResult {
+    callback(|| drop(unsafe { (*data).native() }))
 }
 
 static RAW_WAKER_VTABLE: RawWakerVTable =
@@ -99,24 +94,24 @@ static RAW_WAKER_VTABLE: RawWakerVTable =
 unsafe fn raw_clone(data: *const ()) -> RawWaker {
     let waker = unsafe { &*data.cast::<Waker>() };
     let mut cloned = MaybeUninit::uninit();
-    unsafe { (waker.clone)(waker.data, cloned.as_mut_ptr()) }.resume("failed to clone Tokio waker");
+    unsafe { (waker.clone)(waker, cloned.as_mut_ptr()) }.resume("failed to clone Tokio waker");
     let cloned = unsafe { cloned.assume_init() };
     RawWaker::new(Box::into_raw(Box::new(cloned)).cast(), &RAW_WAKER_VTABLE)
 }
 
 unsafe fn raw_wake(data: *const ()) {
     let waker = unsafe { Box::from_raw(data.cast_mut().cast::<Waker>()) };
-    unsafe { (waker.wake)(waker.data) }.resume("failed to wake Tokio task");
+    unsafe { (waker.wake)(&*waker) }.resume("failed to wake Tokio task");
 }
 
 unsafe fn raw_wake_by_ref(data: *const ()) {
     let waker = unsafe { &*data.cast::<Waker>() };
-    unsafe { (waker.wake_by_ref)(waker.data) }.resume("failed to wake Tokio task");
+    unsafe { (waker.wake_by_ref)(waker) }.resume("failed to wake Tokio task");
 }
 
 unsafe fn raw_drop(data: *const ()) {
     let waker = unsafe { Box::from_raw(data.cast_mut().cast::<Waker>()) };
-    unsafe { (waker.release)(waker.data) }.resume("failed to release Tokio waker");
+    unsafe { (waker.release)(&*waker) }.resume("failed to release Tokio waker");
 }
 
 fn callback(call: impl FnOnce()) -> CallResult {
