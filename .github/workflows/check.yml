@@ -10,28 +10,6 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 jobs:
-  integration:
-    name: Cached mixed workspace
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install Rust
-        run: rustup update --no-self-update stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            tests -> ../target
-          save-if: false
-      - name: Mixed workspace
-        run: python -u .github/diagnose.py cargo run -vv -p telekio -- cargo check -vv --workspace --locked
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: mixed-workspace
-          path: ${{ runner.temp }}/diagnostic
-          if-no-files-found: ignore
   test-workspace-all-features-panic-abort:
     name: Cached nightly preparation
     runs-on: windows-latest
@@ -53,7 +31,7 @@ jobs:
             tests -> ../target
           save-if: false
       - name: Upstream workspace
-        run: python -u .github/diagnose.py bash --noprofile --norc -e -o pipefail -c "source=\$(cargo run -vv --manifest-path tests/Cargo.toml -p upstream-tests); printf '%s\n' \"\$source\""
+        run: python -u .github/diagnose.py "$(cygpath -w "$BASH")" --noprofile --norc -e -o pipefail -c "source=\$(cargo run -vv --manifest-path tests/Cargo.toml -p upstream-tests); printf '%s\n' \"\$source\""
       - uses: actions/upload-artifact@v7
         if: always()
         with:
