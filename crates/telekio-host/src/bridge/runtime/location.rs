@@ -16,8 +16,8 @@ pub(super) fn intern(source: SourceLocation) -> Option<&'static Location<'static
 
 #[cfg(tokio_unstable)]
 mod imp {
+    use rustc_hash::FxHashMap as HashMap;
     use std::{
-        collections::HashMap,
         marker::PhantomData,
         ptr::NonNull,
         sync::{Mutex, OnceLock},
@@ -55,7 +55,7 @@ mod imp {
             column: source.column(),
         };
         let mut locations = LOCATIONS
-            .get_or_init(|| Mutex::new(HashMap::new()))
+            .get_or_init(|| Mutex::new(HashMap::default()))
             .lock()
             .unwrap();
         if let Some(location) = locations.get(&key) {

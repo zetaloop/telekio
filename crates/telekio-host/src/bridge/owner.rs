@@ -1,6 +1,5 @@
 use std::{
     cell::Cell,
-    collections::HashMap,
     ffi::c_void,
     fmt, io,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -11,6 +10,7 @@ use std::{
     time::Duration,
 };
 
+use rustc_hash::FxHashMap as HashMap;
 use telekio_abi::{
     AttachResult, CallResult, GuestCall, OwnedBytes, RawAttachment, RawHandle, Shutdown, Status,
     Waker,
@@ -169,11 +169,11 @@ pub(super) fn owner_state() -> Arc<OwnerState> {
     Arc::new(OwnerState {
         accepting: AtomicBool::new(true),
         state: Mutex::new(OwnerStatus {
-            handles: HashMap::new(),
-            tasks: HashMap::new(),
-            activities: HashMap::new(),
-            runtimes: HashMap::new(),
-            resources: HashMap::new(),
+            handles: HashMap::default(),
+            tasks: HashMap::default(),
+            activities: HashMap::default(),
+            runtimes: HashMap::default(),
+            resources: HashMap::default(),
             next_id: 1,
         }),
         notify: crate::sync::Notify::const_new(),

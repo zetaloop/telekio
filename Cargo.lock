@@ -613,6 +613,7 @@ dependencies = [
  "mio",
  "parking_lot",
  "pin-project-lite",
+ "rustc-hash 2.1.3",
  "signal-hook-registry",
  "slab",
  "socket2",
