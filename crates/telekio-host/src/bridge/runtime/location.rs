@@ -17,7 +17,6 @@ pub(super) fn intern(source: SourceLocation) -> Option<&'static Location<'static
 #[cfg(tokio_unstable)]
 mod imp {
     use std::{
-        borrow::Cow,
         collections::HashMap,
         marker::PhantomData,
         ptr::NonNull,
@@ -28,7 +27,7 @@ mod imp {
 
     #[derive(Eq, Hash, PartialEq)]
     struct Key<'a> {
-        file: Cow<'a, str>,
+        file: &'a str,
         line: u32,
         column: u32,
     }
@@ -51,7 +50,7 @@ mod imp {
             OnceLock::new();
 
         let key = Key {
-            file: Cow::Borrowed(unsafe { source.file() }),
+            file: unsafe { source.file() },
             line: source.line(),
             column: source.column(),
         };
@@ -82,7 +81,7 @@ mod imp {
         assert_eq!(location.column(), key.column);
         locations.insert(
             Key {
-                file: Cow::Owned(key.file.into_owned()),
+                file: location.file(),
                 ..key
             },
             location,

@@ -19,51 +19,51 @@ pub(super) unsafe extern "C" fn metric(
 ) -> MetricResult {
     match catch_unwind(AssertUnwindSafe(|| {
         let context = unsafe { &*context.cast::<HandleContext>() };
-        let metrics = context.handle.metrics();
+        let metrics = || context.handle.metrics();
         #[cfg(not(target_has_atomic = "64"))]
         let _ = (worker, bucket);
         #[cfg(not(tokio_unstable))]
         let _ = bucket;
         let value = match metric {
-            Metric::GlobalQueueDepth => metrics.global_queue_depth() as u64,
-            Metric::NumAliveTasks => metrics.num_alive_tasks() as u64,
-            Metric::NumWorkers => metrics.num_workers() as u64,
+            Metric::GlobalQueueDepth => metrics().global_queue_depth() as u64,
+            Metric::NumAliveTasks => metrics().num_alive_tasks() as u64,
+            Metric::NumWorkers => metrics().num_workers() as u64,
             #[cfg(target_has_atomic = "64")]
             Metric::WorkerTotalBusyDuration => {
-                metrics.worker_total_busy_duration(worker).as_nanos() as u64
+                metrics().worker_total_busy_duration(worker).as_nanos() as u64
             }
             #[cfg(target_has_atomic = "64")]
-            Metric::WorkerParkCount => metrics.worker_park_count(worker),
+            Metric::WorkerParkCount => metrics().worker_park_count(worker),
             #[cfg(target_has_atomic = "64")]
-            Metric::WorkerParkUnparkCount => metrics.worker_park_unpark_count(worker),
+            Metric::WorkerParkUnparkCount => metrics().worker_park_unpark_count(worker),
             _ => {
                 #[cfg(tokio_unstable)]
                 {
                     match metric {
                         #[cfg(target_has_atomic = "64")]
-                        Metric::SpawnedTasksCount => metrics.spawned_tasks_count(),
+                        Metric::SpawnedTasksCount => metrics().spawned_tasks_count(),
                         #[cfg(target_has_atomic = "64")]
-                        Metric::BudgetForcedYieldCount => metrics.budget_forced_yield_count(),
-                        Metric::NumBlockingThreads => metrics.num_blocking_threads() as u64,
+                        Metric::BudgetForcedYieldCount => metrics().budget_forced_yield_count(),
+                        Metric::NumBlockingThreads => metrics().num_blocking_threads() as u64,
                         Metric::NumIdleBlockingThreads => {
-                            metrics.num_idle_blocking_threads() as u64
+                            metrics().num_idle_blocking_threads() as u64
                         }
                         Metric::WorkerLocalQueueDepth => {
-                            metrics.worker_local_queue_depth(worker) as u64
+                            metrics().worker_local_queue_depth(worker) as u64
                         }
-                        Metric::BlockingQueueDepth => metrics.blocking_queue_depth() as u64,
+                        Metric::BlockingQueueDepth => metrics().blocking_queue_depth() as u64,
                         Metric::PollTimeHistogramEnabled => {
-                            metrics.poll_time_histogram_enabled().into()
+                            metrics().poll_time_histogram_enabled().into()
                         }
                         Metric::PollTimeHistogramNumBuckets => {
-                            metrics.poll_time_histogram_num_buckets() as u64
+                            metrics().poll_time_histogram_num_buckets() as u64
                         }
-                        Metric::PollTimeHistogramRangeStart => metrics
+                        Metric::PollTimeHistogramRangeStart => metrics()
                             .poll_time_histogram_bucket_range(bucket)
                             .start
                             .as_nanos()
                             as u64,
-                        Metric::PollTimeHistogramRangeEnd => metrics
+                        Metric::PollTimeHistogramRangeEnd => metrics()
                             .poll_time_histogram_bucket_range(bucket)
                             .end
                             .as_nanos()
@@ -72,46 +72,46 @@ pub(super) unsafe extern "C" fn metric(
                             .map(|worker| worker as u64 + 1)
                             .unwrap_or_default(),
                         #[cfg(target_has_atomic = "64")]
-                        Metric::RemoteScheduleCount => metrics.remote_schedule_count(),
+                        Metric::RemoteScheduleCount => metrics().remote_schedule_count(),
                         #[cfg(target_has_atomic = "64")]
-                        Metric::WorkerNoopCount => metrics.worker_noop_count(worker),
+                        Metric::WorkerNoopCount => metrics().worker_noop_count(worker),
                         #[cfg(target_has_atomic = "64")]
-                        Metric::WorkerStealCount => metrics.worker_steal_count(worker),
+                        Metric::WorkerStealCount => metrics().worker_steal_count(worker),
                         #[cfg(target_has_atomic = "64")]
-                        Metric::WorkerStealOperations => metrics.worker_steal_operations(worker),
+                        Metric::WorkerStealOperations => metrics().worker_steal_operations(worker),
                         #[cfg(target_has_atomic = "64")]
-                        Metric::WorkerPollCount => metrics.worker_poll_count(worker),
+                        Metric::WorkerPollCount => metrics().worker_poll_count(worker),
                         #[cfg(target_has_atomic = "64")]
                         Metric::WorkerLocalScheduleCount => {
-                            metrics.worker_local_schedule_count(worker)
+                            metrics().worker_local_schedule_count(worker)
                         }
                         #[cfg(target_has_atomic = "64")]
-                        Metric::WorkerOverflowCount => metrics.worker_overflow_count(worker),
+                        Metric::WorkerOverflowCount => metrics().worker_overflow_count(worker),
                         #[cfg(target_has_atomic = "64")]
                         Metric::PollTimeHistogramBucketCount => {
-                            metrics.poll_time_histogram_bucket_count(worker, bucket)
+                            metrics().poll_time_histogram_bucket_count(worker, bucket)
                         }
                         #[cfg(target_has_atomic = "64")]
                         Metric::WorkerMeanPollTime => {
-                            metrics.worker_mean_poll_time(worker).as_nanos() as u64
+                            metrics().worker_mean_poll_time(worker).as_nanos() as u64
                         }
                         #[cfg(all(feature = "net", any(unix, windows), target_has_atomic = "64"))]
                         Metric::IoDriverFdRegisteredCount => {
-                            metrics.io_driver_fd_registered_count()
+                            metrics().io_driver_fd_registered_count()
                         }
                         #[cfg(all(feature = "net", any(unix, windows), target_has_atomic = "64"))]
                         Metric::IoDriverFdDeregisteredCount => {
-                            metrics.io_driver_fd_deregistered_count()
+                            metrics().io_driver_fd_deregistered_count()
                         }
                         #[cfg(all(feature = "net", any(unix, windows), target_has_atomic = "64"))]
-                        Metric::IoDriverReadyCount => metrics.io_driver_ready_count(),
+                        Metric::IoDriverReadyCount => metrics().io_driver_ready_count(),
                         #[cfg(all(
                             feature = "schedule-latency",
                             any(unix, windows),
                             target_pointer_width = "64"
                         ))]
                         Metric::ScheduleLatencyHistogramEnabled => {
-                            metrics.schedule_latency_histogram_enabled().into()
+                            metrics().schedule_latency_histogram_enabled().into()
                         }
                         #[cfg(all(
                             feature = "schedule-latency",
@@ -119,14 +119,14 @@ pub(super) unsafe extern "C" fn metric(
                             target_pointer_width = "64"
                         ))]
                         Metric::ScheduleLatencyHistogramNumBuckets => {
-                            metrics.schedule_latency_histogram_num_buckets() as u64
+                            metrics().schedule_latency_histogram_num_buckets() as u64
                         }
                         #[cfg(all(
                             feature = "schedule-latency",
                             any(unix, windows),
                             target_pointer_width = "64"
                         ))]
-                        Metric::ScheduleLatencyHistogramRangeStart => metrics
+                        Metric::ScheduleLatencyHistogramRangeStart => metrics()
                             .schedule_latency_histogram_bucket_range(bucket)
                             .start
                             .as_nanos()
@@ -136,7 +136,7 @@ pub(super) unsafe extern "C" fn metric(
                             any(unix, windows),
                             target_pointer_width = "64"
                         ))]
-                        Metric::ScheduleLatencyHistogramRangeEnd => metrics
+                        Metric::ScheduleLatencyHistogramRangeEnd => metrics()
                             .schedule_latency_histogram_bucket_range(bucket)
                             .end
                             .as_nanos()
@@ -147,7 +147,7 @@ pub(super) unsafe extern "C" fn metric(
                             target_pointer_width = "64"
                         ))]
                         Metric::ScheduleLatencyHistogramBucketCount => {
-                            metrics.schedule_latency_histogram_bucket_count(worker, bucket)
+                            metrics().schedule_latency_histogram_bucket_count(worker, bucket)
                         }
                         _ => return Err("Tokio host metric is unavailable in this configuration"),
                     }
