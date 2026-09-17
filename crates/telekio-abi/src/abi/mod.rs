@@ -140,10 +140,10 @@ impl CallResult {
     }
 
     #[doc(hidden)]
-    pub fn error(message: &str) -> Self {
+    pub fn error(message: impl Into<String>) -> Self {
         Self {
             status: Status::Error,
-            payload: OwnedBytes::from_string(message.to_owned()),
+            payload: OwnedBytes::from_string(message.into()),
         }
     }
 

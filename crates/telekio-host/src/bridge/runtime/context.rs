@@ -1,15 +1,13 @@
 use std::{
-    any::Any,
     future::Future as RustFuture,
     pin::Pin,
     sync::Arc,
     task::{Context as TaskContext, Poll as RustPoll},
 };
 
-use telekio_abi::{CallResult, ExecutionState, Future, OwnedBytes, Poll, Status, Waker};
+use telekio_abi::{CallResult, ExecutionState, Future, Poll, Status, Waker};
 
 use crate::bridge::owner::{Activity, OwnerState};
-use crate::bridge::{host_panic, result};
 
 fn with_execution<R>(call: impl FnOnce(*mut ExecutionState) -> R) -> R {
     crate::runtime::telekio::with_execution(|state| call(state.cast()))
@@ -19,14 +17,13 @@ pub(super) fn with_task_execution<R>(call: impl FnOnce(*mut ExecutionState) -> R
     crate::runtime::telekio::with_task_execution(|state| call(state.cast()))
 }
 
-pub(super) fn block_on_result(outcome: Result<Status, Box<dyn Any + Send>>) -> CallResult {
-    match outcome {
-        Ok(Status::Error) => result(
-            Status::Error,
-            OwnedBytes::from_string("Tokio owner is shutting down".to_owned()),
-        ),
-        Ok(status) => result(status, OwnedBytes::empty()),
-        Err(payload) => host_panic(&*payload),
+pub(super) fn block_on_result(status: Status) -> CallResult {
+    match status {
+        Status::Error => CallResult::error("Tokio owner is shutting down"),
+        status => CallResult {
+            status,
+            ..CallResult::ok()
+        },
     }
 }
 

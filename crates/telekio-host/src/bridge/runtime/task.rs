@@ -7,12 +7,10 @@ use std::{
     task::{Context as TaskContext, Poll as RustPoll},
 };
 
-use telekio_abi::{
-    CallResult, OwnedBytes, Poll, SourceLocation, Status, Task, Waker,
-};
+use telekio_abi::{CallResult, Poll, SourceLocation, Task, Waker};
 
 use crate::bridge::owner::{OwnerContext, TaskCleanup};
-use crate::bridge::{host_panic, result};
+use crate::bridge::{host_callback, host_panic};
 
 use super::{HandleContext, context::with_task_execution};
 
@@ -22,20 +20,12 @@ pub(super) unsafe extern "C" fn task_id(_: *const c_void) -> u64 {
 
 pub(super) unsafe extern "C" fn abort(context: *const c_void, id: u64) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
-    match catch_unwind(AssertUnwindSafe(|| context.owner.abort_task(id))) {
-        Ok(()) => CallResult::ok(),
-        Err(payload) => host_panic(&*payload),
-    }
+    host_callback(|| context.owner.abort_task(id))
 }
 
 pub(super) unsafe extern "C" fn panicked(context: *const c_void) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
-    match catch_unwind(AssertUnwindSafe(|| {
-        context.handle.telekio_unhandled_panic();
-    })) {
-        Ok(()) => CallResult::ok(),
-        Err(payload) => host_panic(&*payload),
-    }
+    host_callback(|| context.handle.telekio_unhandled_panic())
 }
 
 pub(super) unsafe extern "C" fn spawn(
@@ -61,8 +51,8 @@ pub(super) unsafe extern "C" fn spawn(
         drop(handle);
         Ok::<_, String>(())
     })) {
-        Ok(Ok(())) => result(Status::Ok, OwnedBytes::empty()),
-        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
+        Ok(Ok(())) => CallResult::ok(),
+        Ok(Err(error)) => CallResult::error(error),
         Err(payload) => host_panic(&*payload),
     }
 }
@@ -97,8 +87,8 @@ pub(super) unsafe extern "C" fn spawn_local(
         Ok::<_, String>(())
     }));
     match spawned {
-        Ok(Ok(())) => result(Status::Ok, OwnedBytes::empty()),
-        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
+        Ok(Ok(())) => CallResult::ok(),
+        Ok(Err(error)) => CallResult::error(error),
         Err(payload) => host_panic(&*payload),
     }
 }

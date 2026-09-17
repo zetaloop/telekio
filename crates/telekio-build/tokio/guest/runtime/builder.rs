@@ -187,7 +187,7 @@ pub(super) unsafe extern "C" fn telekio_guest_context(
             attachment,
         },
         Ok(Err(error)) => ::telekio_abi::AttachResult {
-            call: ::telekio_abi::CallResult::error(&error),
+            call: ::telekio_abi::CallResult::error(error),
             attachment: ::telekio_abi::RawAttachment::empty(),
         },
         Err(payload) => ::telekio_abi::AttachResult {

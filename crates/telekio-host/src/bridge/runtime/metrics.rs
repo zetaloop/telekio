@@ -5,9 +5,9 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
-use telekio_abi::{CallResult, Metric, MetricResult, OwnedBytes, Status, WorkerCallback};
+use telekio_abi::{CallResult, Metric, MetricResult, WorkerCallback};
 
-use crate::bridge::{host_panic, result};
+use crate::bridge::host_panic;
 
 use super::HandleContext;
 
@@ -159,7 +159,7 @@ pub(super) unsafe extern "C" fn metric(
         Ok(value)
     })) {
         Ok(Ok(value)) => MetricResult {
-            call: result(Status::Ok, OwnedBytes::empty()),
+            call: CallResult::ok(),
             value,
         },
         Ok(Err(error)) => MetricResult {
@@ -232,7 +232,7 @@ pub(super) unsafe extern "C" fn observe_workers(
         }
     })) {
         Ok(Ok(())) => CallResult::ok(),
-        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
+        Ok(Err(error)) => CallResult::error(error),
         Err(payload) => host_panic(&*payload),
     }
 }

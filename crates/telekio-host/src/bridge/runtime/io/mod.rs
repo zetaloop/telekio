@@ -9,8 +9,7 @@ use std::{future::Future, pin::Pin};
 
 use telekio_abi::{
     CallResult, Callback, IoCallResult, IoDriverRegistration, IoDriverResult, IoError, IoInterest,
-    IoOperationResult, IoPoll, IoReady, IoRegistration, IoRequest, IoResource, IoResult,
-    OwnedBytes, Poll, Status, Waker,
+    IoOperationResult, IoPoll, IoReady, IoRegistration, IoRequest, IoResource, IoResult, Poll, Waker,
 };
 
 #[cfg(any(unix, windows))]
@@ -59,7 +58,7 @@ pub(super) unsafe extern "C" fn register(
         let error = io::Error::other(telekio_abi::IO_DRIVER_DISABLED_ERROR);
         return IoResult {
             error: IoError::from_error(&error),
-            call: call_error(error),
+            call: CallResult::error(error.to_string()),
             registration: IoRegistration::empty(),
         };
     }
@@ -68,7 +67,7 @@ pub(super) unsafe extern "C" fn register(
         HostResource::new(&context.owner, registration).map_err(io::Error::other)
     })) {
         Ok(Ok(registration)) => IoResult {
-            call: call_ok(),
+            call: CallResult::ok(),
             error: IoError::none(),
             registration: unsafe {
                 IoRegistration::from_raw(
@@ -84,7 +83,7 @@ pub(super) unsafe extern "C" fn register(
         },
         Ok(Err(error)) => IoResult {
             error: IoError::from_error(&error),
-            call: call_error(error),
+            call: CallResult::error(error.to_string()),
             registration: IoRegistration::empty(),
         },
         Err(payload) => IoResult {
@@ -142,13 +141,13 @@ pub(super) unsafe extern "C" fn register_driver(
         })
     })) {
         Ok(Ok(registration)) => IoDriverResult {
-            call: call_ok(),
+            call: CallResult::ok(),
             error: IoError::none(),
             registration,
         },
         Ok(Err(error)) => IoDriverResult {
             error: IoError::from_error(&error),
-            call: call_error(error),
+            call: CallResult::error(error.to_string()),
             registration: IoDriverRegistration::empty(),
         },
         Err(payload) => IoDriverResult {
@@ -173,7 +172,7 @@ pub(super) unsafe extern "C" fn register_driver(
             );
             IoDriverResult {
                 error: IoError::from_error(&error),
-                call: call_error(error),
+                call: CallResult::error(error.to_string()),
                 registration: IoDriverRegistration::empty(),
             }
         }
@@ -279,10 +278,7 @@ unsafe extern "C" fn ready(data: *mut std::ffi::c_void, interest: IoInterest) ->
             operation,
         },
         Ok(Err(error)) => IoOperationResult {
-            call: CallResult {
-                status: Status::Error,
-                payload: OwnedBytes::from_string(error),
-            },
+            call: CallResult::error(error),
             operation: telekio_abi::IoOperation::empty(),
         },
         Err(payload) => IoOperationResult {
@@ -316,9 +312,9 @@ fn poll_completion(
 #[cfg(any(unix, windows))]
 fn completion_poll(result: std::task::Poll<io::Result<HostReady>>) -> IoPoll {
     match result {
-        std::task::Poll::Pending => io_poll(Poll::Pending, call_ok(), IoReady::empty()),
+        std::task::Poll::Pending => io_poll(Poll::Pending, CallResult::ok(), IoReady::empty()),
         std::task::Poll::Ready(Ok(ready)) => {
-            io_poll_event(Poll::Ready, call_ok(), ready.tick, ready.ready)
+            io_poll_event(Poll::Ready, CallResult::ok(), ready.tick, ready.ready)
         }
         std::task::Poll::Ready(Err(error)) => io_poll_error(Poll::Ready, error, IoReady::SHUTDOWN),
     }
@@ -327,9 +323,9 @@ fn completion_poll(result: std::task::Poll<io::Result<HostReady>>) -> IoPoll {
 #[cfg(any(unix, windows))]
 fn ready_now(ready: HostReady) -> IoPoll {
     if ready.ready.bits() == 0 {
-        io_poll(Poll::Pending, call_ok(), IoReady::empty())
+        io_poll(Poll::Pending, CallResult::ok(), IoReady::empty())
     } else {
-        io_poll_event(Poll::Ready, call_ok(), ready.tick, ready.ready)
+        io_poll_event(Poll::Ready, CallResult::ok(), ready.tick, ready.ready)
     }
 }
 
@@ -360,7 +356,7 @@ fn ready_poll(
     result: std::task::Poll<io::Result<(u8, crate::runtime::telekio::Ready, bool)>>,
 ) -> IoPoll {
     match result {
-        std::task::Poll::Pending => io_poll(Poll::Pending, call_ok(), IoReady::empty()),
+        std::task::Poll::Pending => io_poll(Poll::Pending, CallResult::ok(), IoReady::empty()),
         std::task::Poll::Ready(Ok(ready)) => ready_now(host_ready(ready)),
         std::task::Poll::Ready(Err(error)) => io_poll_error(Poll::Ready, error, IoReady::SHUTDOWN),
     }
@@ -446,7 +442,7 @@ fn io_poll_error(state: Poll, error: io::Error, ready: IoReady) -> IoPoll {
     IoPoll {
         state,
         error: IoError::from_error(&error),
-        call: call_error(error),
+        call: CallResult::error(error.to_string()),
         ready,
         tick: 0,
         value: 0,
@@ -482,30 +478,16 @@ fn io_callback(call: impl FnOnce() -> IoPoll) -> IoPoll {
 fn io_call(call: impl FnOnce() -> io::Result<()>) -> IoCallResult {
     match catch_unwind(AssertUnwindSafe(call)) {
         Ok(Ok(())) => IoCallResult {
-            call: call_ok(),
+            call: CallResult::ok(),
             error: IoError::none(),
         },
         Ok(Err(error)) => IoCallResult {
             error: IoError::from_error(&error),
-            call: call_error(error),
+            call: CallResult::error(error.to_string()),
         },
         Err(payload) => IoCallResult {
             call: crate::bridge::host_panic(&*payload),
             error: IoError::none(),
         },
-    }
-}
-
-fn call_ok() -> CallResult {
-    CallResult {
-        status: Status::Ok,
-        payload: OwnedBytes::empty(),
-    }
-}
-
-fn call_error(error: io::Error) -> CallResult {
-    CallResult {
-        status: Status::Error,
-        payload: OwnedBytes::from_string(error.to_string()),
     }
 }

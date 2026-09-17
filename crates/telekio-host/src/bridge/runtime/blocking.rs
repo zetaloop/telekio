@@ -4,10 +4,12 @@ use std::{
     sync::Arc,
 };
 
-use telekio_abi::{Blocking, BlockingTask, CallResult, OwnedBytes, SourceLocation, Status};
+#[cfg(feature = "rt-multi-thread")]
+use telekio_abi::Status;
+use telekio_abi::{Blocking, BlockingTask, CallResult, SourceLocation};
 
 use crate::bridge::owner::{OwnerContext, TaskCleanup};
-use crate::bridge::{host_panic, result};
+use crate::bridge::host_panic;
 
 use super::{HandleContext, context::with_task_execution};
 
@@ -25,8 +27,11 @@ pub(super) unsafe extern "C" fn block_in_place(
         Ok(status)
     }));
     match outcome {
-        Ok(Ok(status)) => result(status, OwnedBytes::empty()),
-        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
+        Ok(Ok(status)) => CallResult {
+            status,
+            ..CallResult::ok()
+        },
+        Ok(Err(error)) => CallResult::error(error),
         Err(payload) => host_panic(&*payload),
     }
 }
@@ -62,8 +67,8 @@ pub(super) unsafe extern "C" fn spawn_blocking(
         Ok::<_, String>(())
     }));
     match spawned {
-        Ok(Ok(())) => result(Status::Ok, OwnedBytes::empty()),
-        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
+        Ok(Ok(())) => CallResult::ok(),
+        Ok(Err(error)) => CallResult::error(error),
         Err(payload) => host_panic(&*payload),
     }
 }

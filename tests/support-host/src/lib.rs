@@ -34,7 +34,7 @@ pub unsafe extern "C" fn prepare(
             Ok((runtime, attachment))
         }) {
             Ok(_) => CallResult::ok(),
-            Err(error) => CallResult::error(&error.to_string()),
+            Err(error) => CallResult::error(error.to_string()),
         }
     })) {
         Ok(result) => result,

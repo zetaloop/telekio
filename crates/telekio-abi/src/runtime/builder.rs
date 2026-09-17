@@ -1,6 +1,6 @@
 use crate::{
-    Bytes, CallResult, Callback, Flavor, Handle, HistogramConfig, OwnedBytes, RawRuntime, Runtime,
-    Status, StringCallback, TaskCallback,
+    Bytes, CallResult, Callback, Flavor, Handle, HistogramConfig, RawRuntime, Runtime,
+    StringCallback, TaskCallback,
 };
 
 #[repr(C)]
@@ -48,10 +48,7 @@ impl BuildResult {
     pub fn success(runtime: RawRuntime, workers: usize) -> Self {
         assert!(!runtime.is_empty(), "host returned an empty Tokio runtime");
         Self {
-            call: CallResult {
-                status: Status::Ok,
-                payload: OwnedBytes::empty(),
-            },
+            call: CallResult::ok(),
             runtime,
             workers,
         }

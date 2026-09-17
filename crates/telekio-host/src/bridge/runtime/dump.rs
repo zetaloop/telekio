@@ -5,7 +5,7 @@ use std::{
 
 use telekio_abi::{CallResult, DumpOperation, DumpResult};
 
-use crate::bridge::host_panic;
+use crate::bridge::{host_callback, host_panic};
 
 use super::HandleContext;
 
@@ -17,11 +17,11 @@ pub(super) unsafe extern "C" fn start(context: *const c_void) -> DumpResult {
             dump,
         },
         Ok(Err(error)) => DumpResult {
-            call: CallResult::error(&error),
+            call: CallResult::error(error),
             dump: DumpOperation::empty(),
         },
         Err(payload) => DumpResult {
-            call: crate::bridge::host_panic(&*payload),
+            call: host_panic(&*payload),
             dump: DumpOperation::empty(),
         },
     }
@@ -85,20 +85,20 @@ mod imp {
                 },
                 Err(error) => OperationPoll {
                     state: Poll::Ready,
-                    call: CallResult::error(&error),
+                    call: CallResult::error(error),
                 },
             }
         })) {
             Ok(result) => result,
             Err(payload) => OperationPoll {
                 state: Poll::Panicked,
-                call: crate::bridge::host_panic(&*payload),
+                call: host_panic(&*payload),
             },
         }
     }
 
     unsafe extern "C" fn release(data: *mut c_void) -> CallResult {
-        crate::bridge::host_callback(|| unsafe { &*data.cast::<HostResource<Dump>>() }.release())
+        host_callback(|| unsafe { &*data.cast::<HostResource<Dump>>() }.release())
     }
 }
 
@@ -126,10 +126,5 @@ pub(super) unsafe extern "C" fn trace_leaf(
     root: *const c_void,
     leaf: *const c_void,
 ) -> CallResult {
-    match catch_unwind(AssertUnwindSafe(|| {
-        crate::runtime::telekio::trace_leaf(root, leaf);
-    })) {
-        Ok(()) => CallResult::ok(),
-        Err(payload) => host_panic(&*payload),
-    }
+    host_callback(|| crate::runtime::telekio::trace_leaf(root, leaf))
 }

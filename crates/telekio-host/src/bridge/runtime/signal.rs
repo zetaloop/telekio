@@ -12,7 +12,7 @@ use std::{
 ))]
 use telekio_abi::SignalKind;
 use telekio_abi::{
-    CallResult, IoError, OperationPoll, OwnedBytes, Poll, SignalRequest, SignalResult, Status,
+    CallResult, IoError, OperationPoll, Poll, SignalRequest, SignalResult,
     Waker,
 };
 
@@ -64,7 +64,7 @@ pub(super) unsafe extern "C" fn signal(
     match catch_unwind(AssertUnwindSafe(|| create(context, request))) {
         Ok(Ok(receiver)) => match HostResource::new(&context.owner, Signal { receiver }) {
             Ok(signal) => SignalResult {
-                call: call_ok(),
+                call: CallResult::ok(),
                 error: IoError::none(),
                 signal: unsafe {
                     telekio_abi::Signal::from_raw(
@@ -75,17 +75,14 @@ pub(super) unsafe extern "C" fn signal(
                 },
             },
             Err(error) => SignalResult {
-                call: CallResult {
-                    status: Status::Error,
-                    payload: OwnedBytes::from_string(error),
-                },
+                call: CallResult::error(error),
                 error: IoError::none(),
                 signal: telekio_abi::Signal::empty(),
             },
         },
         Ok(Err(error)) => SignalResult {
             error: IoError::from_error(&error),
-            call: call_error(error),
+            call: CallResult::error(error.to_string()),
             signal: telekio_abi::Signal::empty(),
         },
         Err(payload) => SignalResult {
@@ -157,14 +154,11 @@ unsafe extern "C" fn poll(data: *mut c_void, waker: *const Waker) -> OperationPo
                     RustPoll::Pending => Poll::Pending,
                     RustPoll::Ready(()) => Poll::Ready,
                 },
-                call: call_ok(),
+                call: CallResult::ok(),
             },
             Err(error) => OperationPoll {
                 state: Poll::Ready,
-                call: CallResult {
-                    status: Status::Error,
-                    payload: OwnedBytes::from_string(error),
-                },
+                call: CallResult::error(error),
             },
         }
     })) {
@@ -178,18 +172,4 @@ unsafe extern "C" fn poll(data: *mut c_void, waker: *const Waker) -> OperationPo
 
 unsafe extern "C" fn release(data: *mut c_void) -> CallResult {
     crate::bridge::host_callback(|| unsafe { &*data.cast::<HostResource<Signal>>() }.release())
-}
-
-fn call_ok() -> CallResult {
-    CallResult {
-        status: Status::Ok,
-        payload: OwnedBytes::empty(),
-    }
-}
-
-fn call_error(error: io::Error) -> CallResult {
-    CallResult {
-        status: Status::Error,
-        payload: OwnedBytes::from_string(error.to_string()),
-    }
 }

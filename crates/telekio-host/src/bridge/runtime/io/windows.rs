@@ -100,7 +100,7 @@ impl Registration {
                     std::slice::from_raw_parts_mut(request.buffer(), request.buffer_len())
                 };
                 match pipe.try_read(buffer) {
-                    Ok(value) => io_poll_value(Poll::Ready, call_ok(), IoReady::empty(), value),
+                    Ok(value) => io_poll_value(Poll::Ready, CallResult::ok(), IoReady::empty(), value),
                     Err(error) => io_poll_error(Poll::Ready, error, IoReady::empty()),
                 }
             }
@@ -108,12 +108,12 @@ impl Registration {
                 let buffer =
                     unsafe { std::slice::from_raw_parts(request.buffer(), request.buffer_len()) };
                 match pipe.try_write(buffer) {
-                    Ok(value) => io_poll_value(Poll::Ready, call_ok(), IoReady::empty(), value),
+                    Ok(value) => io_poll_value(Poll::Ready, CallResult::ok(), IoReady::empty(), value),
                     Err(error) => io_poll_error(Poll::Ready, error, IoReady::empty()),
                 }
             }
             IoOperationKind::Disconnect => match pipe.disconnect() {
-                Ok(()) => io_poll(Poll::Ready, call_ok(), IoReady::empty()),
+                Ok(()) => io_poll(Poll::Ready, CallResult::ok(), IoReady::empty()),
                 Err(error) => io_poll_error(Poll::Ready, error, IoReady::empty()),
             },
             IoOperationKind::Connect => {

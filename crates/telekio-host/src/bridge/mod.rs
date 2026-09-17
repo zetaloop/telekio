@@ -9,17 +9,12 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
-use telekio_abi::{CallResult, OwnedBytes, Status};
-
-fn result(status: Status, payload: OwnedBytes) -> CallResult {
-    CallResult { status, payload }
-}
+use telekio_abi::{CallResult, Status};
 
 fn host_panic(payload: &(dyn Any + Send)) -> CallResult {
-    result(
-        Status::HostPanicked,
-        OwnedBytes::from_string(panic_message(payload)),
-    )
+    let mut result = CallResult::panicked(payload);
+    result.status = Status::HostPanicked;
+    result
 }
 
 pub(crate) fn host_callback(call: impl FnOnce()) -> CallResult {
@@ -27,16 +22,4 @@ pub(crate) fn host_callback(call: impl FnOnce()) -> CallResult {
         Ok(()) => CallResult::ok(),
         Err(payload) => host_panic(&*payload),
     }
-}
-
-fn panic_message(payload: &(dyn Any + Send)) -> String {
-    payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| {
-            payload
-                .downcast_ref::<&'static str>()
-                .map(|message| (*message).to_owned())
-        })
-        .unwrap_or_else(|| "Box<dyn Any>".to_owned())
 }

@@ -1,13 +1,12 @@
 use std::{
     ffi::c_void,
-    panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex},
 };
 
-use telekio_abi::{CallResult, OwnedBytes, Status, Waker};
+use telekio_abi::{CallResult, Waker};
 
 use crate::bridge::owner::CallbackCleanup;
-use crate::bridge::{host_panic, result};
+use crate::bridge::host_callback;
 
 use super::HandleContext;
 
@@ -57,7 +56,7 @@ impl std::task::Wake for Deferred {
 
 pub(super) unsafe extern "C" fn defer(context: *const c_void, waker: *const Waker) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
-    match catch_unwind(AssertUnwindSafe(|| {
+    host_callback(|| {
         let guest = unsafe { (*waker).clone_rust_waker() };
         let deferred = Arc::new(Deferred {
             state: Mutex::new(DeferredState {
@@ -73,8 +72,5 @@ pub(super) unsafe extern "C" fn defer(context: *const c_void, waker: *const Wake
         };
         deferred.install(cleanup);
         crate::runtime::telekio::defer(&waker);
-    })) {
-        Ok(()) => result(Status::Ok, OwnedBytes::empty()),
-        Err(payload) => host_panic(&*payload),
-    }
+    })
 }

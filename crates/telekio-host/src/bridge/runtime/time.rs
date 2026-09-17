@@ -15,13 +15,13 @@ use std::{
 
 use telekio_abi::{CallResult, ClockSample, DurationParts, InstantOffset, Timer, TimerResult};
 #[cfg(feature = "time")]
-use telekio_abi::{OperationPoll, OwnedBytes, Poll, Status, Waker};
+use telekio_abi::{OperationPoll, Poll, Waker};
 
 #[cfg(feature = "time")]
 use super::HandleContext;
 use crate::bridge::host_panic;
 #[cfg(feature = "time")]
-use crate::bridge::{host_callback, owner::HostResource, result};
+use crate::bridge::{host_callback, owner::HostResource};
 
 static CLOCK_ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
 
@@ -89,13 +89,10 @@ pub(super) use pause as resume;
 #[cfg(feature = "test-util")]
 fn time_call(context: *const c_void, call: impl FnOnce()) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
-    match catch_unwind(AssertUnwindSafe(|| {
+    host_callback(|| {
         let _guard = context.handle.enter();
         call();
-    })) {
-        Ok(()) => result(Status::Ok, OwnedBytes::empty()),
-        Err(payload) => host_panic(&*payload),
-    }
+    })
 }
 
 #[cfg(feature = "test-util")]
@@ -104,15 +101,12 @@ pub(super) unsafe extern "C" fn advance(
     duration: DurationParts,
 ) -> CallResult {
     let context = unsafe { &*context.cast::<HandleContext>() };
-    match catch_unwind(AssertUnwindSafe(|| {
+    host_callback(|| {
         let _guard = context.handle.enter();
         let mut operation = std::pin::pin!(crate::time::advance(duration.duration()));
         let mut context = TaskContext::from_waker(std::task::Waker::noop());
         _ = operation.as_mut().poll(&mut context);
-    })) {
-        Ok(()) => result(Status::Ok, OwnedBytes::empty()),
-        Err(payload) => host_panic(&*payload),
-    }
+    })
 }
 
 #[cfg(not(feature = "test-util"))]
@@ -134,7 +128,7 @@ pub(super) unsafe extern "C" fn timer(
         HostResource::new(&context.owner, TimeTimer { handle, timer })
     })) {
         Ok(Ok(timer)) => TimerResult {
-            call: result(Status::Ok, OwnedBytes::empty()),
+            call: CallResult::ok(),
             timer: unsafe {
                 Timer::from_raw(
                     Arc::as_ptr(&timer).cast_mut().cast(),
@@ -146,7 +140,7 @@ pub(super) unsafe extern "C" fn timer(
             },
         },
         Ok(Err(error)) => TimerResult {
-            call: result(Status::Error, OwnedBytes::from_string(error)),
+            call: CallResult::error(error),
             timer: Timer::empty(),
         },
         Err(payload) => TimerResult {
@@ -179,16 +173,9 @@ unsafe extern "C" fn poll_time_timer(data: *mut c_void, waker: *const Waker) -> 
                 .map(|result| result.unwrap_or_else(|error| panic!("timer error: {error}")))
         })
     })) {
-        Ok(Ok(RustPoll::Pending)) => {
-            time_poll(Poll::Pending, result(Status::Ok, OwnedBytes::empty()))
-        }
-        Ok(Ok(RustPoll::Ready(()))) => {
-            time_poll(Poll::Ready, result(Status::Ok, OwnedBytes::empty()))
-        }
-        Ok(Err(error)) => time_poll(
-            Poll::Ready,
-            result(Status::Error, OwnedBytes::from_string(error)),
-        ),
+        Ok(Ok(RustPoll::Pending)) => time_poll(Poll::Pending, CallResult::ok()),
+        Ok(Ok(RustPoll::Ready(()))) => time_poll(Poll::Ready, CallResult::ok()),
+        Ok(Err(error)) => time_poll(Poll::Ready, CallResult::error(error)),
         Err(payload) => time_poll(Poll::Panicked, host_panic(&*payload)),
     }
 }
@@ -204,8 +191,8 @@ unsafe extern "C" fn reset_time_timer(data: *mut c_void, deadline: InstantOffset
                 .reset(timer.handle.clone(), time_instant(deadline));
         })
     })) {
-        Ok(Ok(())) => result(Status::Ok, OwnedBytes::empty()),
-        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
+        Ok(Ok(())) => CallResult::ok(),
+        Ok(Err(error)) => CallResult::error(error),
         Err(payload) => host_panic(&*payload),
     }
 }

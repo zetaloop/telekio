@@ -15,7 +15,7 @@ pub(super) unsafe extern "C" fn register(
         "Tokio host I/O is unavailable in this configuration",
     );
     IoResult {
-        call: CallResult::error(&error.to_string()),
+        call: CallResult::error(error.to_string()),
         error: IoError::from_error(&error),
         registration: IoRegistration::empty(),
     }
@@ -33,7 +33,7 @@ pub(super) unsafe extern "C" fn register_driver(
     );
     IoDriverResult {
         call: if call.status == Status::Ok {
-            CallResult::error(&error.to_string())
+            CallResult::error(error.to_string())
         } else {
             call
         },

@@ -52,12 +52,11 @@ use std::{
 };
 
 use telekio_abi::{
-    BuildResult, CallResult, Future, OwnedBytes, RawRuntime, RuntimeApi, RuntimeConfig, Shutdown,
-    Status,
+    BuildResult, CallResult, Future, RawRuntime, RuntimeApi, RuntimeConfig, Shutdown, Status,
 };
 
 use crate::bridge::owner::{self, OwnerState};
-use crate::bridge::{host_callback, host_panic, result};
+use crate::bridge::{host_callback, host_panic};
 
 use self::{
     builder::build_runtime,
@@ -200,7 +199,7 @@ pub(super) unsafe extern "C" fn build(
         let _activity = match context.owner.activity() {
             Ok(activity) => activity,
             Err(error) => {
-                return BuildResult::error(result(Status::Error, OwnedBytes::from_string(error)));
+                return BuildResult::error(CallResult::error(error));
             }
         };
         match build_runtime(config, Arc::clone(&context.owner)) {
@@ -223,10 +222,8 @@ pub(super) unsafe extern "C" fn build(
                             .join()
                         };
                         return BuildResult::error(match closed {
-                            Ok(Ok(())) => result(Status::Error, OwnedBytes::from_string(error)),
-                            Ok(Err(error)) => {
-                                result(Status::Error, OwnedBytes::from_string(error.to_string()))
-                            }
+                            Ok(Ok(())) => CallResult::error(error),
+                            Ok(Err(error)) => CallResult::error(error.to_string()),
                             Err(payload) => host_panic(&*payload),
                         });
                     }
@@ -240,10 +237,7 @@ pub(super) unsafe extern "C" fn build(
                     workers,
                 )
             }
-            Err(error) => BuildResult::error(result(
-                Status::Error,
-                OwnedBytes::from_string(error.to_string()),
-            )),
+            Err(error) => BuildResult::error(CallResult::error(error.to_string())),
         }
     })) {
         Ok(result) => result,
@@ -258,14 +252,11 @@ pub(super) unsafe extern "C" fn shutdown(
     nanoseconds: u32,
 ) -> CallResult {
     let runtime = unsafe { &*owner.cast::<RuntimeOwner>() };
-    match catch_unwind(AssertUnwindSafe(|| {
+    host_callback(|| {
         runtime
             .close(mode, Duration::new(seconds, nanoseconds))
             .unwrap_or_else(|error| panic!("{error}"));
-    })) {
-        Ok(()) => result(Status::Ok, OwnedBytes::empty()),
-        Err(payload) => host_panic(&*payload),
-    }
+    })
 }
 
 fn shutdown_runtime(runtime: crate::runtime::Runtime, mode: Shutdown, duration: Duration) {
@@ -307,8 +298,8 @@ pub(super) unsafe extern "C" fn runtime_block_on(owner: *mut c_void, future: Fut
         Ok(status)
     }));
     match outcome {
-        Ok(Ok(status)) => block_on_result(Ok(status)),
-        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
+        Ok(Ok(status)) => block_on_result(status),
+        Ok(Err(error)) => CallResult::error(error),
         Err(payload) => host_panic(&*payload),
     }
 }

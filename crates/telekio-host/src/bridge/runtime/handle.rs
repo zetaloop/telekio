@@ -9,7 +9,7 @@ use std::{
 use telekio_abi::{BoolResult, CallResult, Flavor, Future, NameResult, OwnedBytes, RawHandle, Status};
 
 use crate::bridge::owner::OwnerState;
-use crate::bridge::{host_panic, result};
+use crate::bridge::host_panic;
 
 #[cfg(tokio_unstable)]
 use super::metrics::WorkerObserver;
@@ -118,8 +118,8 @@ pub(super) unsafe extern "C" fn handle_block_on(
         Ok(status)
     }));
     match outcome {
-        Ok(Ok(status)) => block_on_result(Ok(status)),
-        Ok(Err(error)) => result(Status::Error, OwnedBytes::from_string(error)),
+        Ok(Ok(status)) => block_on_result(status),
+        Ok(Err(error)) => CallResult::error(error),
         Err(payload) => host_panic(&*payload),
     }
 }
