@@ -5,25 +5,58 @@ permissions:
 defaults:
   run:
     shell: bash
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 jobs:
-  prepare:
-    name: Windows (${{ matrix.toolchain }})
+  integration:
+    name: Cached mixed workspace
     runs-on: windows-latest
-    timeout-minutes: 8
-    strategy:
-      fail-fast: false
-      matrix:
-        toolchain: [stable, nightly-2026-07-01]
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
-      RUSTFLAGS: -Dwarnings
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ matrix.toolchain }}
+      - name: Install Rust
+        run: rustup update --no-self-update stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+          save-if: false
       - name: Mixed workspace
-        run: cargo run -vv -p telekio -- cargo check -vv --workspace --locked
+        run: python -u .github/diagnose.py cargo run -vv -p telekio -- cargo check -vv --workspace --locked
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mixed-workspace
+          path: ${{ runner.temp }}/diagnostic
+          if-no-files-found: ignore
+  test-workspace-all-features-panic-abort:
+    name: Cached nightly preparation
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      RUSTFLAGS: -Dwarnings
+      RUSTUP_WINDOWS_PATH_ADD_BIN: 1
+      TOKIO_STABLE_FEATURES: full,test-util
+      RUST_NIGHTLY: nightly-2026-07-01
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tests -> ../target
+          save-if: false
       - name: Upstream workspace
-        run: cargo run -vv --manifest-path tests/Cargo.toml -p upstream-tests
+        run: python -u .github/diagnose.py bash --noprofile --norc -e -o pipefail -c "source=\$(cargo run -vv --manifest-path tests/Cargo.toml -p upstream-tests); printf '%s\n' \"\$source\""
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: nightly-preparation
+          path: ${{ runner.temp }}/diagnostic
+          if-no-files-found: ignore
