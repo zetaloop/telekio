@@ -27,11 +27,24 @@ env:
 
 jobs:
   check:
-    uses: ./.github/workflows/check.yml
+    name: Verify checked commit
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Require successful check
+        run: |
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/check.yml/runs?head_sha=$GITHUB_SHA&status=success&per_page=1" --jq '.workflow_runs | length')
+          if [ "$count" -eq 0 ]; then
+            echo "::error::Run check successfully on $GITHUB_SHA before building a release."
+            exit 1
+          fi
 
   build:
-    name: CLI (${{ matrix.target }})
     needs: check
+    name: CLI (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
