@@ -9,8 +9,6 @@ impl BlockingRegionGuard {
         let handle = crate::runtime::scheduler::Handle::current();
         let connection = handle.connection();
         let future = crate::runtime::context::telekio::active(future);
-        #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
-        let future = crate::runtime::metrics::telekio::root(connection, future);
         Ok(connection.handle.block_on(future))
     }
 }

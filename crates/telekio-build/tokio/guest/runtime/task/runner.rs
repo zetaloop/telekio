@@ -301,7 +301,11 @@ impl<S: HostSchedule> TaskSchedule<S> {
     }
 
     fn run(&self, runnable: Notified<Self>) {
-        self.schedule.run(|| runnable.run_host())
+        self.schedule.run(|| {
+            #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
+            crate::runtime::metrics::telekio::record_worker(self.schedule.connection());
+            runnable.run_host();
+        })
     }
 
     #[cfg(feature = "taskdump")]

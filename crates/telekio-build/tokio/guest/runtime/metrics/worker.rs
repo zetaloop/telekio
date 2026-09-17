@@ -1,5 +1,5 @@
 #[cfg(target_has_atomic = "64")]
-use crate::runtime::handle::telekio::Connection;
+use crate::runtime::{handle::telekio::Connection, scheduler::Handle};
 #[cfg(target_has_atomic = "64")]
 use std::{
     future::Future,
@@ -17,7 +17,7 @@ pub(crate) struct Workers {
 #[cfg(target_has_atomic = "64")]
 pub(crate) struct Root<'a, F> {
     future: F,
-    connection: &'a Connection,
+    connection: Option<&'a Connection>,
 }
 
 pub(crate) fn worker_index(handle: &::telekio_abi::Handle) -> Option<usize> {
@@ -47,7 +47,12 @@ pub(crate) fn record_worker(connection: &Connection) {
 }
 
 #[cfg(target_has_atomic = "64")]
-pub(crate) fn root<F: Future>(connection: &Connection, future: F) -> Root<'_, F> {
+pub(crate) fn root<F: Future>(handle: &Handle, future: F) -> Root<'_, F> {
+    let connection = match handle {
+        Handle::CurrentThread(_) => Some(handle.connection().as_ref()),
+        #[cfg(feature = "rt-multi-thread")]
+        Handle::MultiThread(_) => None,
+    };
     Root { future, connection }
 }
 
@@ -57,7 +62,9 @@ impl<F: Future> Future for Root<'_, F> {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
-        record_worker(this.connection);
+        if let Some(connection) = this.connection {
+            record_worker(connection);
+        }
         unsafe { Pin::new_unchecked(&mut this.future) }.poll(context)
     }
 }
@@ -71,7 +78,7 @@ impl Workers {
         }
     }
 
-    fn store(&self, worker: usize) {
+    pub(crate) fn store(&self, worker: usize) {
         let mut threads = self.threads.lock().unwrap();
         if threads.len() <= worker {
             threads.resize(worker + 1, None);

@@ -42,11 +42,6 @@ macro_rules! host_schedule {
             }
 
             fn run(&self, call: impl FnOnce()) {
-                let run = || {
-                    #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
-                    crate::runtime::metrics::telekio::record_worker(self.connection());
-                    call();
-                };
                 let current = crate::runtime::context::with_current(|handle| match handle {
                     crate::runtime::scheduler::Handle::$variant(handle) => {
                         std::sync::Arc::ptr_eq(handle, self)
@@ -56,12 +51,12 @@ macro_rules! host_schedule {
                 })
                 .unwrap_or(false);
                 if current {
-                    crate::runtime::context::telekio::enter(run)
+                    crate::runtime::context::telekio::enter(call)
                 } else {
                     let handle =
                         crate::runtime::scheduler::Handle::$variant(std::sync::Arc::clone(self));
                     let _guard = crate::runtime::context::try_set_current(&handle);
-                    crate::runtime::context::telekio::enter(run)
+                    crate::runtime::context::telekio::enter(call)
                 }
             }
 

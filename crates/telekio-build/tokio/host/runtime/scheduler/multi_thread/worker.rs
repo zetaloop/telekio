@@ -90,7 +90,11 @@ impl WorkerObservers {
 
 impl Handle {
     pub(crate) fn telekio_add_worker_observer(&self, observer: Observer) -> u64 {
-        let current = crate::runtime::context::worker_index();
+        let current = with_current(|context| {
+            context
+                .filter(|context| std::ptr::eq(context.worker.handle.as_ref(), self))
+                .map(|context| context.worker.index)
+        });
         let id = self.telekio.add(observer, current);
         for (worker, remote) in self.shared.remotes.iter().enumerate() {
             if Some(worker) != current {

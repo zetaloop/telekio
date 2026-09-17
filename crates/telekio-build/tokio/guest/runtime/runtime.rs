@@ -12,14 +12,19 @@ pub(crate) fn block_on<F: Future>(
     crate::runtime::context::telekio::block_on(handle, false, |_| {
         let future = crate::runtime::context::telekio::active(future);
         #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
-        let future = crate::runtime::metrics::telekio::root(handle.connection(), future);
+        let future = crate::runtime::metrics::telekio::root(handle, future);
         pool.runtime().block_on(future)
     })
 }
 
 impl Runtime {
     pub(crate) fn install_host(&self, runtime: ::telekio_abi::Runtime, io_enabled: bool) {
-        self.install(Connection::new(runtime.handle(), io_enabled));
+        let connection = Connection::new(runtime.handle(), io_enabled);
+        #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
+        if connection.handle.flavor() != ::telekio_abi::Flavor::MultiThread {
+            connection.workers.store(0);
+        }
+        self.install(connection);
         self.blocking_pool.install(runtime);
     }
 
