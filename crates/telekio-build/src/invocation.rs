@@ -1,9 +1,15 @@
 use std::{error::Error, process};
 
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System, UpdateKind};
 
 pub fn offline() -> Result<bool, Box<dyn Error>> {
-    let system = System::new_all();
+    let system = System::new_with_specifics(
+        RefreshKind::nothing().with_processes(
+            ProcessRefreshKind::nothing()
+                .with_cmd(UpdateKind::OnlyIfNotSet)
+                .without_tasks(),
+        ),
+    );
     let mut process = system
         .process(Pid::from_u32(process::id()))
         .ok_or("Telekio build process is unavailable")?;
