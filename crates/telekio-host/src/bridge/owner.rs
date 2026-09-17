@@ -4,7 +4,10 @@ use std::{
     ffi::c_void,
     fmt, io,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -32,12 +35,12 @@ struct GuestCallState<F, R> {
 }
 
 pub(super) struct OwnerState {
+    accepting: AtomicBool,
     state: Mutex<OwnerStatus>,
     notify: crate::sync::Notify,
 }
 
 struct OwnerStatus {
-    accepting: bool,
     handles: HashMap<usize, HandleRecord>,
     tasks: HashMap<u64, TaskRecord>,
     activities: HashMap<u64, Option<std::task::Waker>>,
@@ -168,8 +171,8 @@ unsafe extern "C" fn run_guest_call<F: FnOnce() -> R, R>(data: *mut c_void) -> C
 
 pub(super) fn owner_state() -> Arc<OwnerState> {
     Arc::new(OwnerState {
+        accepting: AtomicBool::new(true),
         state: Mutex::new(OwnerStatus {
-            accepting: true,
             handles: HashMap::new(),
             tasks: HashMap::new(),
             activities: HashMap::new(),
@@ -183,12 +186,12 @@ pub(super) fn owner_state() -> Arc<OwnerState> {
 
 impl OwnerState {
     pub(super) fn is_accepting(&self) -> bool {
-        self.state.lock().unwrap().accepting
+        self.accepting.load(Ordering::Acquire)
     }
 
     pub(super) fn callback(self: &Arc<Self>, waker: std::task::Waker) -> Option<CallbackCleanup> {
         let mut state = self.state.lock().unwrap();
-        if !state.accepting {
+        if !self.is_accepting() {
             return None;
         }
         let id = state.next_id;
@@ -202,7 +205,7 @@ impl OwnerState {
 
     pub(super) fn activity(self: &Arc<Self>) -> Result<Activity, String> {
         let mut state = self.state.lock().unwrap();
-        if !state.accepting {
+        if !self.is_accepting() {
             return Err("Tokio owner is shutting down".to_owned());
         }
         let id = state.next_id;
@@ -217,7 +220,7 @@ impl OwnerState {
 
     pub(super) fn update_activity_waker(&self, id: u64, waker: &std::task::Waker) -> bool {
         let mut state = self.state.lock().unwrap();
-        if !state.accepting {
+        if !self.is_accepting() {
             return false;
         }
         if let Some(slot) = state.activities.get_mut(&id) {
@@ -282,7 +285,7 @@ impl OwnerState {
 
     pub(super) fn reserve_task(&self, id: u64) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
-        if !state.accepting {
+        if !self.is_accepting() {
             return Err("Tokio owner is shutting down".to_owned());
         }
         match state.tasks.entry(id) {
@@ -298,7 +301,7 @@ impl OwnerState {
 
     pub(super) fn register_task(&self, id: u64, handle: crate::task::AbortHandle) {
         let mut state = self.state.lock().unwrap();
-        if !state.accepting {
+        if !self.is_accepting() {
             handle.abort();
         }
         if let Some(task) = state.tasks.get_mut(&id) {
@@ -321,12 +324,14 @@ impl OwnerState {
 
     pub(super) fn finish_task(&self, id: u64) {
         self.state.lock().unwrap().tasks.remove(&id);
-        self.notify.notify_waiters();
+        if !self.is_accepting() {
+            self.notify.notify_waiters();
+        }
     }
 
     pub(super) fn register_runtime(&self, runtime: Arc<RuntimeOwner>) -> Result<u64, String> {
         let mut state = self.state.lock().unwrap();
-        if !state.accepting {
+        if !self.is_accepting() {
             return Err("Tokio owner is shutting down".to_owned());
         }
         let id = state.next_id;
@@ -341,7 +346,7 @@ impl OwnerState {
 
     fn register_resource(&self, resource: Arc<dyn OwnerResource>) -> Result<u64, String> {
         let mut state = self.state.lock().unwrap();
-        if !state.accepting {
+        if !self.is_accepting() {
             return Err("Tokio owner is shutting down".to_owned());
         }
         let id = state.next_id;
@@ -381,7 +386,7 @@ impl OwnerState {
 
     fn detach(&self) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
-        if state.accepting || !state.tasks.is_empty() || !state.activities.is_empty() {
+        if self.is_accepting() || !state.tasks.is_empty() || !state.activities.is_empty() {
             return Err("Tokio owner must shut down before detaching".to_owned());
         }
         if state.runtimes.values().any(|runtime| !runtime.is_closed())
@@ -509,13 +514,13 @@ impl<T: Send + 'static> HostResource<T> {
 async fn shutdown_owner(owner: &Arc<OwnerState>) -> io::Result<()> {
     let cleanup = owner.callback(std::task::Waker::noop().clone());
     let (tasks, resources, activities) = {
-        let mut state = owner.state.lock().unwrap();
+        let state = owner.state.lock().unwrap();
         if state.runtimes.values().any(|runtime| runtime.local_open()) {
             return Err(io::Error::other(
                 "LocalRuntime must be dropped on its originating thread before owner shutdown",
             ));
         }
-        state.accepting = false;
+        owner.accepting.store(false, Ordering::Release);
         let tasks = state
             .tasks
             .values()

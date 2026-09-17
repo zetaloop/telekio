@@ -1,4 +1,4 @@
-name: ARM preparation
+name: Windows preparation
 on: push
 permissions:
   contents: read
@@ -7,14 +7,23 @@ defaults:
     shell: bash
 jobs:
   prepare:
-    runs-on: windows-11-arm
+    name: Windows (${{ matrix.toolchain }})
+    runs-on: windows-latest
     timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, nightly-2026-07-01]
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
-      CARGO_TERM_COLOR: always
-      RUSTFLAGS: --cfg tokio_unstable -Dwarnings --cfg tokio_no_tuning_tests
+      RUSTFLAGS: -Dwarnings
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: Prepare Tokio
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Mixed workspace
+        run: cargo run -vv -p telekio -- cargo check -vv --workspace --locked
+      - name: Upstream workspace
         run: cargo run -vv --manifest-path tests/Cargo.toml -p upstream-tests

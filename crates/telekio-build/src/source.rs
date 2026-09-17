@@ -36,7 +36,6 @@ pub(crate) fn prepare_tokio_workspace(offline: bool) -> Result<PathBuf, Box<dyn 
         if offline {
             return Err("Tokio workspace source is unavailable offline".into());
         }
-        eprintln!("prepare: clone workspace");
         let status = Command::new("git")
             .args([
                 "clone",
@@ -56,9 +55,9 @@ pub(crate) fn prepare_tokio_workspace(offline: bool) -> Result<PathBuf, Box<dyn 
     if destination.is_dir() {
         fs::remove_dir_all(&destination)?;
     }
-    eprintln!("prepare: copy workspace");
+    eprintln!("source: copy {} -> {}", source.display(), destination.display());
     copy_directory(&source, &destination)?;
-    eprintln!("prepare: workspace copied");
+    eprintln!("source: copy complete");
     println!(
         "cargo:rerun-if-changed={}",
         source.join("Cargo.toml").display()
@@ -114,7 +113,9 @@ fn prepare_package(
     if destination.is_dir() {
         fs::remove_dir_all(&destination)?;
     }
+    eprintln!("source: copy {} -> {}", source.display(), destination.display());
     copy_directory(&source, &destination)?;
+    eprintln!("source: copy complete");
     if emit {
         println!(
             "cargo:rerun-if-changed={}",
@@ -132,6 +133,7 @@ fn package_source(
     version: &str,
     offline: bool,
 ) -> Result<(PathBuf, Json), Box<dyn Error>> {
+    eprintln!("source: metadata {}", manifest.display());
     let output = Command::new(cargo())
         .current_dir(env::temp_dir())
         .args([
@@ -151,6 +153,7 @@ fn package_source(
         )
         .into());
     }
+    eprintln!("source: metadata complete");
     let metadata: Json = serde_json::from_slice(&output.stdout)?;
     let packages = metadata["packages"]
         .as_array()

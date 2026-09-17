@@ -43,7 +43,13 @@ pub unsafe extern "C" fn request(url: *const u8, length: usize) -> PluginFuture 
             tokio::time::sleep(Duration::from_millis(1)).await;
             tokio::task::spawn_blocking(|| 7).await.unwrap()
         });
-        let value = reqwest::get(url)
+        // The local server observes cancellation on the client socket.
+        let value = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
             .await
             .unwrap()
             .text()

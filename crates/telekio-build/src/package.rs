@@ -41,9 +41,7 @@ pub fn prepare_tests(support: &Path) -> Result<PathBuf, Box<dyn Error>> {
             Value::String(support.to_string_lossy().into_owned()),
         ),
     ]));
-    eprintln!("prepare: transform guest");
     prepare_guest_with(source, abi)?;
-    eprintln!("prepare: complete");
     Ok(workspace)
 }
 
@@ -381,7 +379,9 @@ fn prepare_guest_with(generated: PathBuf, abi: Value) -> Result<PathBuf, Box<dyn
         env::var_os("CARGO_CFG_UNIX").is_some() || env::var_os("CARGO_CFG_WINDOWS").is_some();
     if native && env::var_os("CARGO_CFG_LOOM").is_none() {
         patch_manifest(&generated.join("Cargo.toml"), abi)?;
+        eprintln!("source: guest transform start");
         transform::guest(&generated)?;
+        eprintln!("source: guest transform complete");
     }
     Ok(generated)
 }
@@ -391,7 +391,9 @@ pub fn prepare_tokio_host() -> Result<PathBuf, Box<dyn Error>> {
     let path = directory.join("src/lib.rs");
     let source = fs::read_to_string(&path)?;
     fs::write(path, include_source(&source)?)?;
+    eprintln!("source: host transform start");
     transform::host(&directory)?;
+    eprintln!("source: host transform complete");
     Ok(directory)
 }
 

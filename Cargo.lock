@@ -599,6 +599,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "toml",
+ "unicode-ident",
 ]
 
 [[package]]
