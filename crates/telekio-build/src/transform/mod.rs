@@ -13,7 +13,6 @@ use ra_ap_syntax::{AstNode, Edition, SourceFile, ast::HasModuleItem};
 use crate::edit;
 
 pub(crate) fn guest(generated: &Path) -> Result<(), Box<dyn Error>> {
-    watch("guest");
     runtime::patch_panicking(generated)?;
     patch_guest_root(&generated.join("src/lib.rs"))?;
     task::patch_task_id(&generated.join("src/runtime/task/id.rs"))?;
@@ -62,7 +61,6 @@ pub(crate) fn guest(generated: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 pub(crate) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
-    watch("host");
     runtime::patch_panicking(source)?;
     for (module, visibility, attribute) in [
         ("runtime/builder.rs", None, None),
@@ -229,13 +227,6 @@ fn patch_rand(generated: &Path) -> Result<(), Box<dyn Error>> {
     patch(&generated.join("src/util/rand/rt.rs"), |source| {
         mount(source, None, "telekio", "guest/util/rand/rt.rs")
     })
-}
-
-fn watch(role: &str) {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tokio");
-    for directory in [role, "shared"] {
-        println!("cargo::rerun-if-changed={}", root.join(directory).display());
-    }
 }
 
 fn mount(
