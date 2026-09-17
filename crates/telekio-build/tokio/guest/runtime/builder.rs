@@ -153,7 +153,7 @@ impl Builder {
                 }
             },
         };
-        let result = ::telekio_abi::attached().build(config);
+        let result = ::telekio_abi::attached(Clone::clone).build(config);
         // Tokio's LocalRuntime keeps this value on its originating thread.
         unsafe { result.into_runtime() }.map(|(runtime, _)| runtime)
     }

@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use libloading::Library;
 pub use telekio_abi::*;
 
-pub fn attached() -> Handle {
+pub fn attached<R>(call: impl FnOnce(&Handle) -> R) -> R {
     static HOST: OnceLock<Library> = OnceLock::new();
     HOST.get_or_init(|| unsafe {
         unsafe extern "C" {
@@ -27,7 +27,7 @@ pub fn attached() -> Handle {
         prepare(telekio_guest_context, on_panic).resume("failed to attach the test guest");
         library
     });
-    telekio_abi::attached()
+    telekio_abi::attached(call)
 }
 
 #[cfg(panic = "abort")]

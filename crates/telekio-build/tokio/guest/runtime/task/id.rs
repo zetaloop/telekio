@@ -10,7 +10,7 @@ impl Id {
     }
 
     pub(crate) fn next() -> Self {
-        let value = ::telekio_abi::attached().next_task_id();
+        let value = ::telekio_abi::attached(::telekio_abi::Handle::next_task_id);
         Self::from_telekio(value)
     }
 }

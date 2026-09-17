@@ -1,12 +1,12 @@
 use std::{
     ffi::c_void,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::Mutex,
+    sync::RwLock,
 };
 
 use crate::{CallResult, ExecutionState, Handle, Status, with_execution_state};
 
-static ATTACHED: Mutex<Option<Handle>> = Mutex::new(None);
+static ATTACHED: RwLock<Option<Handle>> = RwLock::new(None);
 
 #[repr(C)]
 pub struct RawAttachment {
@@ -98,7 +98,7 @@ impl GuestCall {
 
 #[doc(hidden)]
 pub fn install_handle(handle: Handle) -> Result<(), Handle> {
-    let mut attached = ATTACHED.lock().unwrap();
+    let mut attached = ATTACHED.write().unwrap();
     if attached.is_some() {
         Err(handle)
     } else {
@@ -115,7 +115,7 @@ pub fn install_handle(handle: Handle) -> Result<(), Handle> {
 pub unsafe fn detach_attached() -> CallResult {
     match catch_unwind(AssertUnwindSafe(|| {
         let handle = ATTACHED
-            .lock()
+            .write()
             .unwrap()
             .take()
             .ok_or("Telekio runtime is not attached")?;
@@ -123,7 +123,7 @@ pub unsafe fn detach_attached() -> CallResult {
         if result.status == Status::Ok {
             std::mem::forget(handle);
         } else {
-            *ATTACHED.lock().unwrap() = Some(handle);
+            *ATTACHED.write().unwrap() = Some(handle);
         }
         Ok::<_, &str>(result)
     })) {
@@ -134,9 +134,9 @@ pub unsafe fn detach_attached() -> CallResult {
 }
 
 #[doc(hidden)]
-pub fn attached() -> Handle {
-    let handle = ATTACHED.lock().unwrap().clone();
-    handle.expect("Telekio runtime is not attached")
+pub fn attached<R>(call: impl FnOnce(&Handle) -> R) -> R {
+    let handle = ATTACHED.read().unwrap();
+    call(handle.as_ref().expect("Telekio runtime is not attached"))
 }
 
 unsafe extern "C" fn enter_empty(
