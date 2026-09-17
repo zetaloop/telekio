@@ -1,4 +1,4 @@
-use std::{error::Error, fs, path::Path};
+use std::{error::Error, path::Path};
 
 use super::{mount, patch};
 use crate::edit;
@@ -282,21 +282,6 @@ pub(super) fn patch_defer(generated: &Path) -> Result<(), Box<dyn Error>> {
             "telekio",
             "guest/runtime/context.rs",
         )?;
-        for (function, call, helper) in [
-            ("thread_rng_n", "with", "telekio::rng"),
-            ("budget", "try_with", "telekio::budget"),
-            ("set_current_task_id", "try_with", "telekio::task_id"),
-            ("current_task_id", "try_with", "telekio::task_id"),
-        ] {
-            edit::delegate_closure(
-                source,
-                edit::Scope::Function(function),
-                edit::Call::Method(call),
-                0,
-                helper,
-                &[],
-            )?;
-        }
         edit::delegate_closure(
             source,
             edit::Scope::Function("worker_index"),
@@ -349,28 +334,33 @@ pub(super) fn patch_defer(generated: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 pub(super) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
-    let target = source.join("src/runtime/context.rs");
-    let mut contents = fs::read_to_string(&target)?;
-    for (function, call, helper) in [
-        ("thread_rng_n", "with", "telekio::rng"),
-        ("budget", "try_with", "telekio::budget"),
-        ("set_current_task_id", "try_with", "telekio::task_id"),
-        ("current_task_id", "try_with", "telekio::task_id"),
-    ] {
-        edit::delegate_closure(
-            &mut contents,
-            edit::Scope::Function(function),
-            edit::Call::Method(call),
-            0,
-            helper,
-            &[],
-        )?;
-    }
-    fs::write(target, contents)?;
     patch_runtime_context(source)
 }
 
 fn patch_runtime_context(source: &Path) -> Result<(), Box<dyn Error>> {
+    patch(&source.join("src/runtime/context.rs"), |contents| {
+        for (function, call, helper, context) in [
+            ("thread_rng_n", "with", "telekio::rng", &[][..]),
+            ("budget", "try_with", "telekio::budget", &[][..]),
+            (
+                "set_current_task_id",
+                "try_with",
+                "telekio::set_task_id",
+                &["id"][..],
+            ),
+            ("current_task_id", "try_with", "telekio::task_id", &[][..]),
+        ] {
+            edit::delegate_closure(
+                contents,
+                edit::Scope::Function(function),
+                edit::Call::Method(call),
+                0,
+                helper,
+                context,
+            )?;
+        }
+        Ok(())
+    })?;
     for (file, scopes, method, helper) in [
         (
             "context.rs",

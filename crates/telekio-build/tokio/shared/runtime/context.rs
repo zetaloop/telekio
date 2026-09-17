@@ -2,6 +2,8 @@ use super::super::Context;
 #[cfg(any(feature = "macros", feature = "rt"))]
 use super::super::FastRand;
 use super::{execution_state, State};
+#[cfg(feature = "rt")]
+use crate::runtime::task::Id;
 
 #[cfg(feature = "rt")]
 pub(crate) fn panicking() -> bool {
@@ -159,40 +161,35 @@ where
 }
 
 #[cfg(feature = "rt")]
-pub(in crate::runtime::context) fn task_id<F, R>(local: F) -> impl FnOnce(&Context) -> R
+pub(in crate::runtime::context) fn task_id<F>(local: F) -> impl FnOnce(&Context) -> Option<Id>
 where
-    F: FnOnce(&Context) -> R,
+    F: FnOnce(&Context) -> Option<Id>,
 {
     move |context| {
         let state = execution_state();
         if state.is_null() {
             return local(context);
         }
-        struct Reset<'a> {
-            context: &'a Context,
-            state: *mut State,
-            previous: Option<crate::runtime::task::Id>,
+        let id = unsafe { (*state).task_id };
+        (id != 0).then(|| Id::from_telekio(id))
+    }
+}
+
+#[cfg(feature = "rt")]
+pub(in crate::runtime::context) fn set_task_id<F>(
+    id: Option<Id>,
+    local: F,
+) -> impl FnOnce(&Context) -> Option<Id>
+where
+    F: FnOnce(&Context) -> Option<Id>,
+{
+    move |context| {
+        let state = execution_state();
+        if state.is_null() {
+            return local(context);
         }
-        impl Drop for Reset<'_> {
-            fn drop(&mut self) {
-                let state = unsafe { &mut *self.state };
-                state.task_id = self
-                    .context
-                    .current_task_id
-                    .get()
-                    .map_or(0, crate::runtime::task::Id::telekio_value);
-                self.context.current_task_id.set(self.previous);
-            }
-        }
-        let current = unsafe { &*state };
-        let previous = context.current_task_id.replace(
-            (current.task_id != 0).then(|| crate::runtime::task::Id::from_telekio(current.task_id)),
-        );
-        let _reset = Reset {
-            context,
-            state,
-            previous,
-        };
-        local(context)
+        let previous =
+            unsafe { std::mem::replace(&mut (*state).task_id, id.map_or(0, Id::telekio_value)) };
+        (previous != 0).then(|| Id::from_telekio(previous))
     }
 }

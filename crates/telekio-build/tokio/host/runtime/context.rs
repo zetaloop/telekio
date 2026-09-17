@@ -100,4 +100,4 @@ pub(crate) use access::panicking;
 #[cfg(any(feature = "macros", all(feature = "sync", feature = "rt")))]
 pub(super) use access::rng;
 #[cfg(feature = "rt")]
-pub(super) use access::{enter_runtime, runtime, task_id};
+pub(super) use access::{enter_runtime, runtime, set_task_id, task_id};
