@@ -1,12 +1,15 @@
 use std::{error::Error, path::Path};
 
+use r#override::{item, root};
+
 use super::{mount, patch};
-use crate::edit;
 
 pub(super) fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
     patch(&generated.join("src/io/interest.rs"), |source| {
         for name in ["is_aio", "is_lio"] {
-            edit::set_method_visibility(source, "Interest", name, "pub(crate)")?;
+            source
+                .select(root().implementation("Interest").item(name))?
+                .set_visibility("pub(crate)")?;
         }
         Ok(())
     })?;
@@ -22,48 +25,22 @@ pub(super) fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
         )
     })?;
     patch(&generated.join("src/runtime/io/driver.rs"), |source| {
-        edit::append_fields(
-            source,
-            "Handle",
-            &[edit::Field {
-                visibility: None,
-                name: "telekio_uring",
-                ty: "super::telekio::Uring",
-            }],
-        )?;
-        edit::append_record_fields(
-            source,
-            edit::Scope::Method {
-                owner: "Driver",
-                name: "new",
-            },
-            "Handle",
-            &[edit::FieldInit {
-                name: "telekio_uring",
-                value: "super::telekio::Uring::new()",
-            }],
-        )
+        source
+            .select(item("Handle"))?
+            .add_field("telekio_uring: super::telekio::Uring")?;
+        source
+            .select(item("Driver::new").record("Handle"))?
+            .add_field("telekio_uring: super::telekio::Uring::new()")
     })?;
     patch(
         &generated.join("src/runtime/io/driver/uring.rs"),
         |source| {
-            edit::redirect_call(
-                source,
-                edit::Scope::Method {
-                    owner: "Handle",
-                    name: "try_init",
-                },
-                "add_uring_source",
-                "add_uring_source_host",
-            )?;
-            edit::add_attr(
-                source,
-                edit::AttrTarget::Method {
-                    owner: "Handle",
-                    name: "add_uring_source",
-                },
-                "#[expect(dead_code)]",
-            )?;
+            source
+                .select(item("Handle::try_init").call("add_uring_source"))?
+                .redirect("add_uring_source_host")?;
+            source
+                .select(item("Handle::add_uring_source"))?
+                .add_attribute("#[expect(dead_code)]")?;
             mount(source, None, "telekio", "guest/runtime/io/driver/uring.rs")
         },
     )?;
@@ -80,15 +57,12 @@ pub(super) fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
                 ("readiness", "local_readiness"),
                 ("try_io", "local_try_io"),
             ] {
-                edit::rename_method(source, "Registration", name, replacement)?;
-                edit::add_attr(
-                    source,
-                    edit::AttrTarget::Method {
-                        owner: "Registration",
-                        name: replacement,
-                    },
-                    "#[cfg_attr(feature = \"rt\", expect(dead_code))]",
-                )?;
+                source
+                    .select(root().implementation("Registration").item(name))?
+                    .rename(replacement)?;
+                source
+                    .select(root().implementation("Registration").item(replacement))?
+                    .add_attribute("#[cfg_attr(feature = \"rt\", expect(dead_code))]")?;
             }
             mount(source, None, "telekio", "guest/runtime/io/registration.rs")
         },
@@ -96,87 +70,55 @@ pub(super) fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
     patch(
         &generated.join("src/runtime/io/scheduled_io.rs"),
         |source| {
-            edit::append_fields(
-                source,
-                "ScheduledIo",
-                &[edit::Field {
-                    visibility: None,
-                    name: "telekio",
-                    ty: "std::sync::Mutex<telekio::State>",
-                }],
-            )?;
-            edit::append_record_fields(
-                source,
-                edit::Scope::Method {
-                    owner: "ScheduledIo",
-                    name: "default",
-                },
-                "ScheduledIo",
-                &[edit::FieldInit {
-                    name: "telekio",
-                    value: "std::sync::Mutex::new(telekio::State::default())",
-                }],
-            )?;
+            source
+                .select(item("ScheduledIo"))?
+                .add_field("telekio: std::sync::Mutex<telekio::State>")?;
+            source
+                .select(item("ScheduledIo::default").record("ScheduledIo"))?
+                .add_field("telekio: std::sync::Mutex::new(telekio::State::default())")?;
             mount(source, None, "telekio", "guest/runtime/io/scheduled_io.rs")
         },
     )?;
     patch(&generated.join("src/io/poll_evented.rs"), |source| {
-        edit::set_type_parameter(
-            source,
-            "PollEvented<E>",
-            "new_with_interest_and_handle",
-            "E",
-            "E: Source + crate::runtime::io::telekio::Source",
-        )
+        source
+            .select(
+                root()
+                    .implementation("PollEvented<E>")
+                    .has(item("new_with_interest_and_handle"))
+                    .generic("E"),
+            )?
+            .set_bounds("Source + crate::runtime::io::telekio::Source")
     })?;
     patch(&generated.join("src/io/async_fd.rs"), |source| {
-        edit::retarget_use(source, "SourceFd", "self::telekio::SourceFd")?;
+        source
+            .select(root().import("SourceFd"))?
+            .redirect("self::telekio::SourceFd")?;
         mount(source, None, "telekio", "guest/io/async_fd.rs")
     })?;
     patch(&generated.join("src/net/windows/named_pipe.rs"), |source| {
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "NamedPipeServer",
-                name: "connect",
-            },
-            "connect",
-            "connect_host",
-        )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::MethodArgument {
-                owner: "NamedPipeServer",
-                name: "connect",
-                call: edit::Call::Method("async_io"),
-            },
-            "connect",
-            "connect_host",
-        )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "NamedPipeServer",
-                name: "disconnect",
-            },
-            "disconnect",
-            "disconnect_host",
-        )?;
+        source
+            .select(
+                item("NamedPipeServer::connect")
+                    .call("async_io")
+                    .child(root().closure())
+                    .call("connect"),
+            )?
+            .redirect("connect_host")?;
+        source
+            .select(item("NamedPipeServer::connect").call("connect"))?
+            .redirect("connect_host")?;
+        source
+            .select(item("NamedPipeServer::disconnect").call("disconnect"))?
+            .redirect("disconnect_host")?;
         for owner in ["NamedPipeServer", "NamedPipeClient"] {
             for (method, replacement) in [
                 ("poll_read", "poll_read_host"),
                 ("poll_write", "poll_write_host"),
                 ("poll_write_vectored", "poll_write_vectored_host"),
             ] {
-                edit::redirect_call(
-                    source,
-                    edit::Scope::Method {
-                        owner,
-                        name: method,
-                    },
-                    method,
-                    replacement,
-                )?;
+                source
+                    .select(root().implementation(owner).item(method).call(method))?
+                    .redirect(replacement)?;
             }
         }
         for owner in ["NamedPipeServer", "NamedPipeClient"] {
@@ -184,22 +126,23 @@ pub(super) fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
                 ("try_read", "Read", "buf.as_mut_ptr()"),
                 ("try_write", "Write", "buf.as_ptr().cast_mut()"),
             ] {
-                edit::delegate_closure(
-                    source,
-                    edit::Scope::Method {
-                        owner,
-                        name: method,
-                    },
-                    edit::Call::Method("try_io"),
-                    1,
-                    "crate::runtime::io::telekio::delegate",
-                    &[
-                        "self.io.registration()",
-                        &format!("::telekio_abi::IoOperationKind::{kind}"),
-                        data,
-                        "buf.len()",
-                    ],
-                )?;
+                source
+                    .select(
+                        root()
+                            .implementation(owner)
+                            .item(method)
+                            .call("try_io")
+                            .child(root().closure()),
+                    )?
+                    .delegate(
+                        "crate::runtime::io::telekio::delegate",
+                        &[
+                            "self.io.registration()",
+                            &format!("::telekio_abi::IoOperationKind::{kind}"),
+                            data,
+                            "buf.len()",
+                        ],
+                    )?;
             }
             for (method, helper, data, len) in [
                 (
@@ -215,29 +158,28 @@ pub(super) fn patch_io(generated: &Path) -> Result<(), Box<dyn Error>> {
                     "buf.len()",
                 ),
             ] {
-                edit::delegate_closure(
-                    source,
-                    edit::Scope::Method {
-                        owner,
-                        name: method,
-                    },
-                    edit::Call::Method("try_io"),
-                    1,
-                    helper,
-                    &["self.io.registration()", data, len],
-                )?;
+                source
+                    .select(
+                        root()
+                            .implementation(owner)
+                            .item(method)
+                            .call("try_io")
+                            .child(root().closure()),
+                    )?
+                    .delegate(helper, &["self.io.registration()", data, len])?;
             }
-            edit::delegate_closure(
-                source,
-                edit::Scope::Method {
-                    owner,
-                    name: "try_read_buf",
-                },
-                edit::Call::Method("try_io"),
-                1,
-                "crate::runtime::io::telekio::delegate_read_buf",
-                &["self.io.registration()", "std::ptr::from_mut(buf)"],
-            )?;
+            source
+                .select(
+                    root()
+                        .implementation(owner)
+                        .item("try_read_buf")
+                        .call("try_io")
+                        .child(root().closure()),
+                )?
+                .delegate(
+                    "crate::runtime::io::telekio::delegate_read_buf",
+                    &["self.io.registration()", "std::ptr::from_mut(buf)"],
+                )?;
         }
         mount(source, None, "telekio", "guest/net/windows/named_pipe.rs")
     })

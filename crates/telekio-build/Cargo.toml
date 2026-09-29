@@ -9,7 +9,8 @@ readme.workspace = true
 description = "Build integration for Telekio"
 
 [dependencies]
-ra_ap_syntax = "0.0.349"
+override = "0.1.0"
+ra_ap_syntax = "0.0.352"
 serde_json = "1"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 toml = "1.1.4"

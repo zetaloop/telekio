@@ -1,4 +1,3 @@
-mod edit;
 mod invocation;
 mod package;
 mod source;

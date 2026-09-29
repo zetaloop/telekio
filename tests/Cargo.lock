@@ -72,6 +72,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "camino"
+version = "1.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbad30e4b4c14a39e3cc8aed085a12a327257c316619c93581e017bc52be591"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
+name = "cargo-platform"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd0061da739915fae12ea00e16397555ed4371a6bb285431aab930f61b0aa4ba"
+dependencies = [
+ "serde",
+ "serde_core",
+]
+
+[[package]]
+name = "cargo_metadata"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef987d17b0a113becdd19d3d0022d04d7ef41f9efe4f3fb63ac44ba61df3ade9"
+dependencies = [
+ "camino",
+ "cargo-platform",
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "cc"
 version = "1.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -743,6 +776,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
+name = "override"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6f2d4f34165adfdd0fa4686ca9dd6ccceadf587373ce3137a0a2208e97e5981"
+dependencies = [
+ "cargo_metadata",
+ "ra_ap_syntax",
+ "toml",
+ "unicode-ident",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -905,15 +950,15 @@ dependencies = [
 
 [[package]]
 name = "ra_ap_edition"
-version = "0.0.349"
+version = "0.0.352"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "328b6c928e624558fdf875facc1ebd7930cc3c0bb9bf66c3f50acab1dfad7287"
+checksum = "ceff3f2017143089b7350dd75b8a64548fb4474500ff400aaaca2f8f9990f4db"
 
 [[package]]
 name = "ra_ap_parser"
-version = "0.0.349"
+version = "0.0.352"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74e2e1c85d765598ee09405eb7bf59e2b9a707d45ddeb537a0b4f8c678bb23b3"
+checksum = "41f172691cbb8df836e924dc947c1de36f019c2d17ec6ccca207f2aa5a835954"
 dependencies = [
  "drop_bomb",
  "ra-ap-rustc_lexer",
@@ -925,9 +970,9 @@ dependencies = [
 
 [[package]]
 name = "ra_ap_stdx"
-version = "0.0.349"
+version = "0.0.352"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41b9d594912f65457b2a0343410cc2969bbc1f25bf0af07806e18131edf40633"
+checksum = "d3a5a19381d885e40fe3c02d7b173cbff222a82b1da90f885c41fc6c69257f97"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-utils",
@@ -941,9 +986,9 @@ dependencies = [
 
 [[package]]
 name = "ra_ap_syntax"
-version = "0.0.349"
+version = "0.0.352"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a59dd095cfb96a92a7ec17e15f8bbaebade7dec496e1e39a25692a4a10c34314"
+checksum = "8d9b5c51a7fed9b29b940f3b2d50017892f56bf85666240443b6ef2aa05ad6f2"
 dependencies = [
  "either",
  "itertools",
@@ -1216,6 +1261,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "serde"
@@ -1224,6 +1273,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -1408,6 +1458,7 @@ version = "0.1.0"
 name = "telekio-build"
 version = "0.1.0"
 dependencies = [
+ "override",
  "ra_ap_syntax",
  "serde_json",
  "sysinfo",
@@ -1542,9 +1593,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.5+spec-1.1.0"
+version = "1.1.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
+checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
 dependencies = [
  "indexmap",
  "serde_core",

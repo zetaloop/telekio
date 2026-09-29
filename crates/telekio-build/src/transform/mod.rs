@@ -10,7 +10,7 @@ use std::{error::Error, fs, path::Path};
 
 use ra_ap_syntax::{AstNode, Edition, SourceFile, ast::HasModuleItem};
 
-use crate::edit;
+use r#override::{Source, item, root};
 
 pub(crate) fn guest(generated: &Path) -> Result<(), Box<dyn Error>> {
     runtime::patch_panicking(generated)?;
@@ -117,18 +117,20 @@ pub(crate) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
         patch(&source.join("src").join(module), |contents| {
             mount(contents, visibility, "telekio", &format!("host/{module}"))?;
             if module == "io/async_fd.rs" {
-                edit::retarget_use(contents, "Interest", "crate::io::interest::Interest")?;
-                edit::retarget_use(contents, "Ready", "crate::io::ready::Ready")?;
+                contents
+                    .select(root().import("Interest"))?
+                    .redirect("crate::io::interest::Interest")?;
+                contents
+                    .select(root().import("Ready"))?
+                    .redirect("crate::io::ready::Ready")?;
             }
             if visibility.is_some() {
-                edit::add_attr(
-                    contents,
-                    edit::AttrTarget::Module("telekio"),
-                    "#[doc(hidden)]",
-                )?;
+                contents
+                    .select(item("telekio"))?
+                    .add_attribute("#[doc(hidden)]")?;
             }
             if let Some(attribute) = attribute {
-                edit::add_attr(contents, edit::AttrTarget::Module("telekio"), attribute)?;
+                contents.select(item("telekio"))?.add_attribute(attribute)?;
             }
             Ok(())
         })?;
@@ -148,45 +150,40 @@ pub(crate) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
     ] {
         patch(&source.join("src").join(file), |contents| {
             for name in methods {
-                edit::redirect_call(
-                    contents,
-                    edit::Scope::Method { owner, name },
-                    "crate::util::trace::task",
-                    "crate::util::trace::telekio::task",
-                )?;
+                contents
+                    .select(
+                        root()
+                            .implementation(owner)
+                            .item(name)
+                            .call("crate::util::trace::task"),
+                    )?
+                    .redirect("crate::util::trace::telekio::task")?;
             }
             Ok(())
         })?;
     }
     patch(&source.join("src/runtime/blocking/pool.rs"), |contents| {
-        edit::retarget_use(
-            contents,
-            "blocking_task",
-            "crate::util::trace::telekio::blocking_task",
-        )
+        contents
+            .select(root().import("blocking_task"))?
+            .redirect("crate::util::trace::telekio::blocking_task")
     })?;
     if std::env::var_os("CARGO_CFG_UNIX").is_some()
         && std::env::var_os("CARGO_FEATURE_RT").is_some()
         && std::env::var_os("CARGO_FEATURE_NET").is_none()
     {
         patch(&source.join("src/runtime/io/driver.rs"), |contents| {
-            edit::retarget_macro(
-                contents,
-                edit::Scope::Method {
-                    owner: "ReadyEvent",
-                    name: "with_ready",
-                },
-                "cfg_net_unix",
-                "cfg_unix",
-            )
+            contents
+                .select(
+                    root()
+                        .macro_call("cfg_net_unix")
+                        .has(item("ReadyEvent::with_ready")),
+                )?
+                .redirect("cfg_unix")
         })?;
         patch(&source.join("src/runtime/io/mod.rs"), |contents| {
-            edit::mount_module(
-                contents,
-                Some("pub(crate)"),
-                "async_fd",
-                &source.join("src/io/async_fd.rs"),
-            )
+            contents
+                .select(root())?
+                .mount_module("pub(crate) mod async_fd", source.join("src/io/async_fd.rs"))
         })?;
     }
     task::host(source)?;
@@ -198,24 +195,21 @@ pub(crate) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
 fn patch_guest_root(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
         mount(source, None, "telekio_context", "guest/lib.rs")?;
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Module("telekio_context"),
-            "#[cfg(all(not(feature = \"rt\"), not(test)))]",
-        )
+        source
+            .select(item("telekio_context"))?
+            .add_attribute("#[cfg(all(not(feature = \"rt\"), not(test)))]")
     })
 }
 
 fn patch_coop(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        edit::delegate_closure(
-            source,
-            edit::Scope::Function("inc_budget_forced_yield_count"),
-            edit::Call::Function("context::with_current"),
-            0,
-            "telekio::forced_yield",
-            &[],
-        )?;
+        source
+            .select(
+                item("inc_budget_forced_yield_count")
+                    .call("context::with_current")
+                    .child(root().closure()),
+            )?
+            .delegate("telekio::forced_yield", &[])?;
         mount(source, None, "telekio", "guest/task/coop/mod.rs")
     })
 }
@@ -230,7 +224,7 @@ fn patch_rand(generated: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn mount(
-    source: &mut String,
+    source: &mut Source,
     visibility: Option<&str>,
     name: &str,
     helper: &str,
@@ -238,16 +232,22 @@ fn mount(
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tokio")
         .join(helper);
-    edit::mount_module(source, visibility, name, &path)
+    let visibility = visibility.map_or(String::new(), |visibility| format!("{visibility} "));
+    source
+        .select(root())?
+        .mount_module(&format!("{visibility}mod {name}"), &path)
 }
 
 fn patch(
     path: &Path,
-    transform: impl FnOnce(&mut String) -> Result<(), Box<dyn Error>>,
+    transform: impl FnOnce(&mut Source) -> Result<(), Box<dyn Error>>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut source = fs::read_to_string(path)?.replace("\r\n", "\n");
+    let mut source = Source::parse(
+        &fs::read_to_string(path)?.replace("\r\n", "\n"),
+        Edition::Edition2021,
+    )?;
     transform(&mut source).map_err(|error| format!("{}: {error}", path.display()))?;
-    fs::write(path, source)?;
+    fs::write(path, source.to_string())?;
     Ok(())
 }
 

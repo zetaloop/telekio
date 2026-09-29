@@ -1,26 +1,24 @@
-use std::{error::Error, fs, path::Path};
+use std::{error::Error, path::Path};
+
+use r#override::{item, root};
 
 use super::{mount, patch};
-use crate::edit;
 
 pub(super) fn patch_task_id(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        edit::rename_method(source, "Id", "next", "next_local")?;
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "Id",
-                name: "next_local",
-            },
-            "#[expect(dead_code)]",
-        )?;
+        source.select(item("Id::next"))?.rename("next_local")?;
+        source
+            .select(item("Id::next_local"))?
+            .add_attribute("#[expect(dead_code)]")?;
         mount(source, None, "telekio", "guest/runtime/task/id.rs")
     })
 }
 
 pub(super) fn patch_task(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        edit::rename_method(source, "SpawnLocation", "capture", "capture_local")?;
+        source
+            .select(item("SpawnLocation::capture"))?
+            .rename("capture_local")?;
         mount(
             source,
             Some("pub(crate)"),
@@ -32,41 +30,18 @@ pub(super) fn patch_task(path: &Path) -> Result<(), Box<dyn Error>> {
 
 pub(super) fn patch_task_trace(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        edit::redirect_call(
-            source,
-            edit::Scope::Function("trace_leaf"),
-            "Context::try_with_current_trace_leaf_fn",
-            "telekio::trace_leaf",
-        )?;
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "Context",
-                name: "is_tracing",
-            },
-            "#[expect(dead_code)]",
-        )?;
-        edit::append_fields(
-            source,
-            "Trace",
-            &[edit::Field {
-                visibility: None,
-                name: "foreign",
-                ty: "Option<crate::runtime::dump::telekio::ForeignTrace>",
-            }],
-        )?;
-        edit::append_record_fields(
-            source,
-            edit::Scope::Method {
-                owner: "Trace",
-                name: "empty",
-            },
-            "Self",
-            &[edit::FieldInit {
-                name: "foreign",
-                value: "None",
-            }],
-        )?;
+        source
+            .select(item("trace_leaf").call("Context::try_with_current_trace_leaf_fn"))?
+            .redirect("telekio::trace_leaf")?;
+        source
+            .select(item("Context::is_tracing"))?
+            .add_attribute("#[expect(dead_code)]")?;
+        source
+            .select(item("Trace"))?
+            .add_field("foreign: Option<crate::runtime::dump::telekio::ForeignTrace>")?;
+        source
+            .select(item("Trace::empty").record("Self"))?
+            .add_field("foreign: None")?;
         mount(
             source,
             Some("pub(crate)"),
@@ -89,29 +64,15 @@ pub(super) fn patch_task_trace_tree(path: &Path) -> Result<(), Box<dyn Error>> {
 
 pub(super) fn patch_dump(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        edit::rename_method(
-            source,
-            "Trace",
-            "resolve_backtraces",
-            "resolve_backtraces_local",
-        )?;
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "Trace",
-                name: "resolve_backtraces_local",
-            },
-            "#[doc(hidden)]",
-        )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "Trace",
-                name: "fmt",
-            },
-            "fmt",
-            "telekio_fmt",
-        )?;
+        source
+            .select(item("Trace::resolve_backtraces"))?
+            .rename("resolve_backtraces_local")?;
+        source
+            .select(item("Trace::resolve_backtraces_local"))?
+            .add_attribute("#[doc(hidden)]")?;
+        source
+            .select(item("Trace::fmt").call("fmt"))?
+            .redirect("telekio_fmt")?;
         mount(
             source,
             Some("pub(crate)"),
@@ -124,14 +85,9 @@ pub(super) fn patch_dump(path: &Path) -> Result<(), Box<dyn Error>> {
 pub(super) fn patch_task_list(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
         for name in ["bind", "bind_local", "bind_inner", "spawned_tasks_count"] {
-            edit::add_attr(
-                source,
-                edit::AttrTarget::Method {
-                    owner: "OwnedTasks<S>",
-                    name,
-                },
-                "#[expect(dead_code)]",
-            )?;
+            source
+                .select(root().implementation("OwnedTasks<S>").item(name))?
+                .add_attribute("#[expect(dead_code)]")?;
         }
         Ok(())
     })
@@ -139,43 +95,31 @@ pub(super) fn patch_task_list(path: &Path) -> Result<(), Box<dyn Error>> {
 
 pub(super) fn patch_sharded_list(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Struct("ShardedList"),
-            "#[cfg_attr(not(tokio_unstable), expect(dead_code))]",
-        )?;
+        source
+            .select(item("ShardedList"))?
+            .add_attribute("#[cfg_attr(not(tokio_unstable), expect(dead_code))]")?;
         for target in [
-            edit::AttrTarget::Struct("ShardGuard"),
-            edit::AttrTarget::Method {
-                owner: "ShardedList<L>",
-                name: "lock_shard",
-            },
-            edit::AttrTarget::Method {
-                owner: "ShardGuard<'a, L>",
-                name: "push",
-            },
-            edit::AttrTarget::Method {
-                owner: "ShardedList<L>",
-                name: "added",
-            },
+            item("ShardGuard"),
+            root().implementation("ShardedList<L>").item("lock_shard"),
+            root().implementation("ShardGuard<'a, L>").item("push"),
+            root().implementation("ShardedList<L>").item("added"),
         ] {
-            edit::add_attr(source, target, "#[expect(dead_code)]")?;
+            source
+                .select(target)?
+                .add_attribute("#[expect(dead_code)]")?;
         }
         Ok(())
     })
 }
 
 pub(super) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
-    let target = source.join("src/runtime/task/id.rs");
-    let mut contents = fs::read_to_string(&target)?;
-    edit::rename_method(&mut contents, "Id", "next", "next_local")?;
-    mount(&mut contents, None, "telekio", "host/runtime/task/id.rs")?;
-    fs::write(target, contents)?;
-
-    let target = source.join("src/runtime/task/mod.rs");
-    let mut contents = fs::read_to_string(&target)?;
-    edit::rename_method(&mut contents, "SpawnLocation", "capture", "capture_local")?;
-    fs::write(target, contents)?;
-
-    Ok(())
+    patch(&source.join("src/runtime/task/id.rs"), |contents| {
+        contents.select(item("Id::next"))?.rename("next_local")?;
+        mount(contents, None, "telekio", "host/runtime/task/id.rs")
+    })?;
+    patch(&source.join("src/runtime/task/mod.rs"), |contents| {
+        contents
+            .select(item("SpawnLocation::capture"))?
+            .rename("capture_local")
+    })
 }

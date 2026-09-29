@@ -1,7 +1,8 @@
-use std::{error::Error, fs, path::Path};
+use std::{error::Error, path::Path};
+
+use r#override::{item, root};
 
 use super::{mount, patch};
-use crate::edit;
 
 pub(super) fn patch_signal(generated: &Path) -> Result<(), Box<dyn Error>> {
     patch(&generated.join("src/runtime/driver.rs"), |source| {
@@ -9,101 +10,79 @@ pub(super) fn patch_signal(generated: &Path) -> Result<(), Box<dyn Error>> {
     })?;
     let unused_without_process = "#[cfg_attr(all(unix, not(test), feature = \"rt\", feature = \"signal\", not(feature = \"process\")), expect(dead_code))]";
     patch(&generated.join("src/runtime/signal/mod.rs"), |source| {
-        for target in [
-            edit::AttrTarget::Struct("Handle"),
-            edit::AttrTarget::Method {
-                owner: "Handle",
-                name: "check_inner",
-            },
-        ] {
-            edit::add_attr(source, target, unused_without_process)?;
+        for target in [item("Handle"), item("Handle::check_inner")] {
+            source
+                .select(target)?
+                .add_attribute(unused_without_process)?;
         }
         Ok(())
     })?;
     patch(&generated.join("src/signal/registry.rs"), |source| {
         for target in [
-            edit::AttrTarget::TypeAlias("EventId"),
-            edit::AttrTarget::Trait("Storage"),
-            edit::AttrTarget::Impl {
-                owner: "Registry<S>",
-                method: "register_listener",
-            },
-            edit::AttrTarget::Impl {
-                owner: "Globals",
-                method: "register_listener",
-            },
+            item("EventId"),
+            item("Storage"),
+            root()
+                .implementation("Registry<S>")
+                .has(item("register_listener")),
+            root()
+                .implementation("Globals")
+                .has(item("register_listener")),
         ] {
-            edit::add_attr(source, target, unused_without_process)?;
+            source
+                .select(target)?
+                .add_attribute(unused_without_process)?;
         }
         Ok(())
     })?;
     patch(&generated.join("src/signal/mod.rs"), |source| {
         for target in [
-            edit::AttrTarget::Struct("RxFuture"),
-            edit::AttrTarget::Function("make_future"),
-            edit::AttrTarget::Impl {
-                owner: "RxFuture",
-                method: "new",
-            },
-            edit::AttrTarget::Module("reusable_box"),
+            item("RxFuture"),
+            item("make_future"),
+            root().implementation("RxFuture").has(item("new")),
+            item("reusable_box"),
         ] {
-            edit::add_attr(
-                source,
-                target,
-                "#[cfg_attr(all(not(test), feature = \"rt\", feature = \"signal\"), expect(dead_code))]",
-            )?;
+            source.select(target)?.add_attribute("#[cfg_attr(all(not(test), feature = \"rt\", feature = \"signal\"), expect(dead_code))]")?;
         }
         Ok(())
     })?;
     patch(&generated.join("src/signal/unix.rs"), |source| {
         let unused = "#[cfg_attr(all(not(test), feature = \"rt\", feature = \"signal\", not(feature = \"process\")), expect(dead_code))]";
         for target in [
-            edit::AttrTarget::Struct("OsExtraData"),
-            edit::AttrTarget::Struct("SignalInfo"),
-            edit::AttrTarget::Impl {
-                owner: "OsStorage",
-                method: "get",
-            },
-            edit::AttrTarget::Function("action"),
-            edit::AttrTarget::Function("signal_enable"),
-            edit::AttrTarget::Function("signal_with_handle"),
+            item("OsExtraData"),
+            item("SignalInfo"),
+            root().implementation("OsStorage").has(item("get")),
+            item("action"),
+            item("signal_enable"),
+            item("signal_with_handle"),
         ] {
-            edit::add_attr(source, target, unused)?;
+            source.select(target)?.add_attribute(unused)?;
         }
-        edit::retarget_use(source, "RxFuture", "self::telekio::RxFuture")?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Function("signal"),
-            "signal",
-            "telekio_signal",
-        )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Function("signal"),
-            "signal_with_handle",
-            "telekio::signal",
-        )?;
+        source
+            .select(root().import("RxFuture"))?
+            .redirect("self::telekio::RxFuture")?;
+        source
+            .select(root().child(item("signal")).call("signal"))?
+            .redirect("telekio_signal")?;
+        source
+            .select(root().child(item("signal")).call("signal_with_handle"))?
+            .redirect("telekio::signal")?;
         mount(source, Some("pub(crate)"), "telekio", "guest/signal.rs")
     })?;
     patch(&generated.join("src/process/unix/mod.rs"), |source| {
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "GlobalOrphanQueue",
-                name: "push_orphan",
-            },
-            "push_orphan",
-            "reap_host_orphan",
-        )?;
+        source
+            .select(item("GlobalOrphanQueue::push_orphan").call("push_orphan"))?
+            .redirect("reap_host_orphan")?;
         mount(source, None, "telekio", "guest/process/unix/mod.rs")
     })?;
     patch(&generated.join("src/signal/windows.rs"), |source| {
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Modules("imp"),
-            "#[cfg_attr(not(test), expect(dead_code))]",
-        )?;
-        edit::retarget_use(source, "RxFuture", "self::telekio::RxFuture")?;
+        for condition in ["cfg(windows)", "cfg(not(windows))"] {
+            source
+                .select(item("imp").has(root().attribute(condition)))?
+                .add_attribute("#[cfg_attr(not(test), expect(dead_code))]")?;
+        }
+        source
+            .select(root().import("RxFuture"))?
+            .redirect("self::telekio::RxFuture")?;
         for name in [
             "ctrl_c",
             "ctrl_break",
@@ -111,31 +90,26 @@ pub(super) fn patch_signal(generated: &Path) -> Result<(), Box<dyn Error>> {
             "ctrl_logoff",
             "ctrl_shutdown",
         ] {
-            edit::redirect_call(
-                source,
-                edit::Scope::Function(name),
-                &format!("self::imp::{name}"),
-                &format!("telekio::{name}"),
-            )?;
+            source
+                .select(item(name).call(&format!("self::imp::{name}")))?
+                .redirect(&format!("telekio::{name}"))?;
         }
         mount(source, None, "telekio", "guest/signal.rs")
     })
 }
 
 pub(super) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
-    let target = source.join("src/runtime/process.rs");
-    let mut contents = fs::read_to_string(&target)?;
-    for name in ["park", "park_timeout"] {
-        edit::redirect_call(
-            &mut contents,
-            edit::Scope::Method {
-                owner: "Driver",
-                name,
-            },
-            "GlobalOrphanQueue::reap_orphans",
-            "telekio::reap_orphans",
-        )?;
-    }
-    fs::write(target, contents)?;
-    Ok(())
+    patch(&source.join("src/runtime/process.rs"), |contents| {
+        for name in ["park", "park_timeout"] {
+            contents
+                .select(
+                    root()
+                        .implementation("Driver")
+                        .item(name)
+                        .call("GlobalOrphanQueue::reap_orphans"),
+                )?
+                .redirect("telekio::reap_orphans")?;
+        }
+        Ok(())
+    })
 }

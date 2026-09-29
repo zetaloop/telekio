@@ -1,99 +1,52 @@
-use std::{error::Error, fs, path::Path};
+use std::{error::Error, path::Path};
+
+use r#override::{item, root};
 
 use super::{mount, patch};
-use crate::edit;
 
 pub(super) fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        edit::append_fields(
-            source,
-            "Handle",
-            &[edit::Field {
-                visibility: Some("pub(crate)"),
-                name: "telekio",
-                ty: "std::sync::OnceLock<Arc<crate::runtime::handle::telekio::Connection>>",
-            }],
-        )?;
-        edit::append_record_fields(
-            source,
-            edit::Scope::Method {
-                owner: "CurrentThread",
-                name: "new",
-            },
-            "Handle",
-            &[edit::FieldInit {
-                name: "telekio",
-                value: "std::sync::OnceLock::new()",
-            }],
-        )?;
+        source.select(item("Handle"))?.add_field("pub(crate) telekio: std::sync::OnceLock<Arc<crate::runtime::handle::telekio::Connection>>")?;
+        source
+            .select(item("CurrentThread::new").record("Handle"))?
+            .add_field("telekio: std::sync::OnceLock::new()")?;
         for (method, bind) in [("spawn", "bind"), ("spawn_local", "bind_local")] {
-            edit::redirect_call(
-                source,
-                edit::Scope::Method {
-                    owner: "Handle",
-                    name: method,
-                },
-                bind,
-                &format!("{bind}_host"),
-            )?;
-            edit::redirect_call(
-                source,
-                edit::Scope::Method {
-                    owner: "Handle",
-                    name: method,
-                },
-                "spawn",
-                "spawn_host",
-            )?;
+            source
+                .select(root().implementation("Handle").item(method).call(bind))?
+                .redirect(&format!("{bind}_host"))?;
+            source
+                .select(root().implementation("Handle").item(method).call("spawn"))?
+                .redirect("spawn_host")?;
         }
         for target in [
-            edit::AttrTarget::Method {
-                owner: "CurrentThread",
-                name: "block_on",
-            },
-            edit::AttrTarget::Struct("Core"),
-            edit::AttrTarget::Impl {
-                owner: "Core",
-                method: "tick",
-            },
-            edit::AttrTarget::Impl {
-                owner: "Context",
-                method: "run_task",
-            },
-            edit::AttrTarget::Impl {
-                owner: "Handle",
-                method: "next_remote_task",
-            },
-            edit::AttrTarget::Method {
-                owner: "CoreGuard<'_>",
-                name: "block_on",
-            },
+            item("CurrentThread::block_on"),
+            item("Core"),
+            root().implementation("Core").has(item("tick")),
+            root().implementation("Context").has(item("run_task")),
+            root()
+                .implementation("Handle")
+                .has(item("next_remote_task")),
+            root().implementation("CoreGuard<'_>").item("block_on"),
         ] {
-            edit::add_attr(source, target, "#[expect(dead_code)]")?;
+            source
+                .select(target)?
+                .add_attribute("#[expect(dead_code)]")?;
         }
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "Handle",
-                name: "spawned_tasks_count",
-            },
-            "#[expect(dead_code)]",
-        )?;
-        edit::rename_method(source, "Handle", "owned_id", "owned_id_inner")?;
+        source
+            .select(item("Handle::spawned_tasks_count"))?
+            .add_attribute("#[expect(dead_code)]")?;
+        source
+            .select(item("Handle::owned_id"))?
+            .rename("owned_id_inner")?;
         for name in [
             "worker_local_queue_depth",
             "num_blocking_threads",
             "num_idle_blocking_threads",
             "blocking_queue_depth",
         ] {
-            edit::add_attr(
-                source,
-                edit::AttrTarget::Method {
-                    owner: "Handle",
-                    name,
-                },
-                "#[expect(dead_code)]",
-            )?;
+            source
+                .select(root().implementation("Handle").item(name))?
+                .add_attribute("#[expect(dead_code)]")?;
         }
         mount(
             source,
@@ -106,62 +59,27 @@ pub(super) fn patch_current_thread(path: &Path) -> Result<(), Box<dyn Error>> {
 
 pub(super) fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(&path.join("handle.rs"), |source| {
-        edit::rename_method(source, "Handle", "owned_id", "owned_id_inner")?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "Handle",
-                name: "bind_new_task",
-            },
-            "bind",
-            "bind_host",
-        )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "Handle",
-                name: "bind_new_task",
-            },
-            "spawn",
-            "spawn_host",
-        )?;
-        edit::append_fields(
-            source,
-            "Handle",
-            &[edit::Field {
-                visibility: Some("pub(crate)"),
-                name: "telekio",
-                ty: "std::sync::OnceLock<Arc<crate::runtime::handle::telekio::Connection>>",
-            }],
-        )?;
-        Ok(())
+        source
+            .select(item("Handle::owned_id"))?
+            .rename("owned_id_inner")?;
+        source
+            .select(item("Handle::bind_new_task").call("bind"))?
+            .redirect("bind_host")?;
+        source
+            .select(item("Handle::bind_new_task").call("spawn"))?
+            .redirect("spawn_host")?;
+        source.select(item("Handle"))?.add_field("pub(crate) telekio: std::sync::OnceLock<Arc<crate::runtime::handle::telekio::Connection>>")
     })?;
     patch(&path.join("worker.rs"), |source| {
-        edit::append_record_fields(
-            source,
-            edit::Scope::Function("create"),
-            "Handle",
-            &[edit::FieldInit {
-                name: "telekio",
-                value: "std::sync::OnceLock::new()",
-            }],
-        )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "Launch",
-                name: "launch",
-            },
-            "runtime::spawn_blocking",
-            "super::telekio::host_worker",
-        )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Function("block_in_place"),
-            "coop::stop",
-            "crate::runtime::context::telekio::stop",
-        )?;
-        Ok(())
+        source
+            .select(item("create").record("Handle"))?
+            .add_field("telekio: std::sync::OnceLock::new()")?;
+        source
+            .select(item("Launch::launch").call("runtime::spawn_blocking"))?
+            .redirect("super::telekio::host_worker")?;
+        source
+            .select(item("block_in_place").call("coop::stop"))?
+            .redirect("crate::runtime::context::telekio::stop")
     })?;
     patch(&path.join("handle/metrics.rs"), |source| {
         for name in [
@@ -170,62 +88,37 @@ pub(super) fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
             "num_alive_tasks",
             "spawned_tasks_count",
         ] {
-            edit::add_attr(
-                source,
-                edit::AttrTarget::Method {
-                    owner: "Handle",
-                    name,
-                },
-                "#[expect(dead_code)]",
-            )?;
+            source
+                .select(root().implementation("Handle").item(name))?
+                .add_attribute("#[expect(dead_code)]")?;
         }
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "Handle",
-                name: "worker_metrics",
-            },
-            "#[cfg_attr(target_has_atomic = \"64\", expect(dead_code))]",
-        )?;
+        source
+            .select(item("Handle::worker_metrics"))?
+            .add_attribute("#[cfg_attr(target_has_atomic = \"64\", expect(dead_code))]")?;
         for name in [
             "num_blocking_threads",
             "num_idle_blocking_threads",
             "worker_local_queue_depth",
             "blocking_queue_depth",
         ] {
-            edit::add_attr(
-                source,
-                edit::AttrTarget::Method {
-                    owner: "Handle",
-                    name,
-                },
-                "#[expect(dead_code)]",
-            )?;
+            source
+                .select(root().implementation("Handle").item(name))?
+                .add_attribute("#[expect(dead_code)]")?;
         }
         Ok(())
     })?;
     patch(&path.join("worker/metrics.rs"), |source| {
         for name in ["injection_queue_depth", "worker_local_queue_depth"] {
-            edit::add_attr(
-                source,
-                edit::AttrTarget::Method {
-                    owner: "Shared",
-                    name,
-                },
-                "#[expect(dead_code)]",
-            )?;
+            source
+                .select(root().implementation("Shared").item(name))?
+                .add_attribute("#[expect(dead_code)]")?;
         }
         Ok(())
     })?;
     patch(&path.join("mod.rs"), |source| {
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "MultiThread",
-                name: "block_on",
-            },
-            "#[expect(dead_code)]",
-        )?;
+        source
+            .select(item("MultiThread::block_on"))?
+            .add_attribute("#[expect(dead_code)]")?;
         mount(
             source,
             None,
@@ -238,69 +131,42 @@ pub(super) fn patch_multi_thread(path: &Path) -> Result<(), Box<dyn Error>> {
 pub(super) fn patch_scheduler(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
         for name in ["is_local", "can_spawn_local_on_local_runtime"] {
-            edit::add_attr(
-                source,
-                edit::AttrTarget::Method {
-                    owner: "Handle",
-                    name,
-                },
-                "#[expect(dead_code)]",
-            )?;
-            edit::rename_method(source, "Handle", name, &format!("{name}_inner"))?;
+            source
+                .select(root().implementation("Handle").item(name))?
+                .add_attribute("#[expect(dead_code)]")?;
+            source
+                .select(root().implementation("Handle").item(name))?
+                .rename(&format!("{name}_inner"))?;
         }
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "Handle",
-                name: "spawn",
-            },
-            "#[track_caller]",
-        )?;
-        for name in ["num_workers", "num_alive_tasks", "spawned_tasks_count"] {
-            edit::add_attr(
-                source,
-                edit::AttrTarget::Method {
-                    owner: "Handle",
-                    name,
-                },
-                "#[expect(dead_code)]",
-            )?;
-        }
+        source
+            .select(item("Handle::spawn"))?
+            .add_attribute("#[track_caller]")?;
         for name in [
+            "num_workers",
+            "num_alive_tasks",
+            "spawned_tasks_count",
             "injection_queue_depth",
             "num_blocking_threads",
             "num_idle_blocking_threads",
             "worker_local_queue_depth",
             "blocking_queue_depth",
         ] {
-            edit::add_attr(
-                source,
-                edit::AttrTarget::Method {
-                    owner: "Handle",
-                    name,
-                },
-                "#[expect(dead_code)]",
-            )?;
+            source
+                .select(root().implementation("Handle").item(name))?
+                .add_attribute("#[expect(dead_code)]")?;
         }
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "Handle",
-                name: "worker_metrics",
-            },
-            "#[cfg_attr(target_has_atomic = \"64\", expect(dead_code))]",
-        )?;
+        source
+            .select(item("Handle::worker_metrics"))?
+            .add_attribute("#[cfg_attr(target_has_atomic = \"64\", expect(dead_code))]")?;
         mount(
             source,
             Some("pub(crate)"),
             "telekio",
             "guest/runtime/scheduler/mod.rs",
         )?;
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Module("telekio"),
-            "#[cfg(feature = \"rt\")]",
-        )
+        source
+            .select(item("telekio"))?
+            .add_attribute("#[cfg(feature = \"rt\")]")
     })
 }
 
@@ -308,64 +174,40 @@ pub(super) fn host(source: &Path) -> Result<(), Box<dyn Error>> {
     if std::env::var_os("CARGO_CFG_TOKIO_UNSTABLE").is_none() {
         return Ok(());
     }
-
-    let target = source.join("src/runtime/scheduler/multi_thread/handle.rs");
-    let mut contents = fs::read_to_string(&target)?;
-    edit::append_fields(
-        &mut contents,
-        "Handle",
-        &[edit::Field {
-            visibility: Some("pub(crate)"),
-            name: "telekio",
-            ty: "super::worker::telekio::WorkerObservers",
-        }],
-    )?;
-    fs::write(target, contents)?;
-
-    let target = source.join("src/runtime/scheduler/multi_thread/worker.rs");
-    let mut contents = fs::read_to_string(&target)?;
-    mount(
-        &mut contents,
-        Some("pub(crate)"),
-        "telekio",
-        "host/runtime/scheduler/multi_thread/worker.rs",
-    )?;
-    edit::append_record_fields(
-        &mut contents,
-        edit::Scope::Function("create"),
-        "Handle",
-        &[edit::FieldInit {
-            name: "telekio",
-            value: "telekio::WorkerObservers::new(size)",
-        }],
-    )?;
-    edit::redirect_call(
-        &mut contents,
-        edit::Scope::Method {
-            owner: "Context",
-            name: "run",
+    patch(
+        &source.join("src/runtime/scheduler/multi_thread/handle.rs"),
+        |contents| {
+            contents
+                .select(item("Handle"))?
+                .add_field("pub(crate) telekio: super::worker::telekio::WorkerObservers")
         },
-        "assert_lifo_enabled_is_correct",
-        "telekio_tick",
     )?;
-    edit::redirect_call(
-        &mut contents,
-        edit::Scope::Method {
-            owner: "Context",
-            name: "run",
+    patch(
+        &source.join("src/runtime/scheduler/multi_thread/worker.rs"),
+        |contents| {
+            mount(
+                contents,
+                Some("pub(crate)"),
+                "telekio",
+                "host/runtime/scheduler/multi_thread/worker.rs",
+            )?;
+            contents
+                .select(item("create").record("Handle"))?
+                .add_field("telekio: telekio::WorkerObservers::new(size)")?;
+            contents
+                .select(item("Context::run").call("assert_lifo_enabled_is_correct"))?
+                .redirect("telekio_tick")?;
+            contents
+                .select(item("Context::run").call("park"))?
+                .redirect("telekio_park")?;
+            contents
+                .select(
+                    root()
+                        .child(item("run"))
+                        .call("crate::runtime::context::enter_runtime")
+                        .child(root().closure()),
+                )?
+                .delegate("telekio::enter_worker", &["worker.clone()"])
         },
-        "park",
-        "telekio_park",
-    )?;
-    edit::delegate_closure(
-        &mut contents,
-        edit::Scope::Function("run"),
-        edit::Call::Function("crate::runtime::context::enter_runtime"),
-        2,
-        "telekio::enter_worker",
-        &["worker.clone()"],
-    )?;
-    fs::write(target, contents)?;
-
-    Ok(())
+    )
 }

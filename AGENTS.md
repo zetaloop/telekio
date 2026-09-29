@@ -26,7 +26,7 @@ Source locations outlive tasks because Tokio exposes them as `&'static Location`
 
 Cargo supplies the fixed upstream source. Changes belong in the transformation program and mounted helpers; generated trees are regenerated from those inputs.
 
-Preserve upstream control flow through symbol- and syntax-scoped edits from `telekio-build/src/edit.rs`. Singular edits require one target across direct syntax and nested macros. Discuss additions to the edit API before extending it. Exact `#[expect(dead_code)]` annotations identify upstream execution symbols displaced by a transformation.
+Preserve upstream control flow through `override` selectors and editing methods. Singular edits require one target across direct syntax and nested macros. Discuss additions to the edit API before extending it. Exact `#[expect(dead_code)]` annotations identify upstream execution symbols displaced by a transformation.
 
 Cargo root patches select the generated Tokio package. Publication strips application-root patches, so source installation uses the CLI to supply the same patch.
 

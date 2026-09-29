@@ -1,61 +1,41 @@
 use std::{error::Error, path::Path};
 
+use r#override::{item, root};
+
 use super::{mount, patch};
-use crate::edit;
 
 pub(super) fn patch_panicking(root: &Path) -> Result<(), Box<dyn Error>> {
     for (file, scope) in [
-        (
-            "runtime/blocking/shutdown.rs",
-            edit::Scope::Method {
-                owner: "Receiver",
-                name: "wait",
-            },
-        ),
+        ("runtime/blocking/shutdown.rs", item("Receiver::wait")),
         (
             "runtime/context/current.rs",
-            edit::Scope::MethodArgument {
-                owner: "SetCurrentGuard",
-                name: "drop",
-                call: edit::Call::Method("with"),
-            },
+            item("SetCurrentGuard::drop")
+                .call("with")
+                .child(r#override::root().closure()),
         ),
         (
             "runtime/scheduler/current_thread/mod.rs",
-            edit::Scope::Method {
-                owner: "CurrentThread",
-                name: "shutdown",
-            },
+            item("CurrentThread::shutdown"),
         ),
         (
             "runtime/scheduler/multi_thread/queue.rs",
-            edit::Scope::Method {
-                owner: "Local<T>",
-                name: "drop",
-            },
+            r#override::root().implementation("Local<T>").item("drop"),
         ),
         (
             "runtime/scheduler/multi_thread/worker.rs",
-            edit::Scope::Method {
-                owner: "AbortOnPanic",
-                name: "drop",
-            },
+            item("AbortOnPanic::drop"),
         ),
         (
             "util/idle_notified_set.rs",
-            edit::Scope::Method {
-                owner: "IdleNotifiedSet<T>",
-                name: "drop",
-            },
+            r#override::root()
+                .implementation("IdleNotifiedSet<T>")
+                .item("drop"),
         ),
     ] {
         patch(&root.join("src").join(file), |source| {
-            edit::redirect_call(
-                source,
-                scope,
-                "std::thread::panicking",
-                "crate::runtime::context::telekio::panicking",
-            )
+            source
+                .select(scope.call("std::thread::panicking"))?
+                .redirect("crate::runtime::context::telekio::panicking")
         })?;
     }
     Ok(())
@@ -63,33 +43,15 @@ pub(super) fn patch_panicking(root: &Path) -> Result<(), Box<dyn Error>> {
 
 pub(super) fn patch_builder(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "Builder",
-                name: "build",
-            },
-            "build_current_thread_runtime",
-            "build_hosted_current_thread",
-        )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "Builder",
-                name: "build",
-            },
-            "build_threaded_runtime",
-            "build_hosted_multi_thread",
-        )?;
-        edit::redirect_call(
-            source,
-            edit::Scope::Method {
-                owner: "Builder",
-                name: "build_local",
-            },
-            "build_current_thread_local_runtime",
-            "build_hosted_local",
-        )?;
+        source
+            .select(item("Builder::build").call("build_current_thread_runtime"))?
+            .redirect("build_hosted_current_thread")?;
+        source
+            .select(item("Builder::build").call("build_threaded_runtime"))?
+            .redirect("build_hosted_multi_thread")?;
+        source
+            .select(item("Builder::build_local").call("build_current_thread_local_runtime"))?
+            .redirect("build_hosted_local")?;
         mount(source, None, "telekio", "guest/runtime/builder.rs")
     })
 }
@@ -97,17 +59,13 @@ pub(super) fn patch_builder(path: &Path) -> Result<(), Box<dyn Error>> {
 pub(super) fn patch_runtime(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
         for variant in ["Scheduler::CurrentThread", "Scheduler::MultiThread"] {
-            edit::delegate_call(
-                source,
-                edit::Scope::MethodArm {
-                    owner: "Runtime",
-                    name: "block_on_inner",
-                    variant,
-                },
-                edit::Call::Method("block_on"),
-                "telekio::block_on",
-                &["&self.blocking_pool"],
-            )?;
+            source
+                .select(
+                    item("Runtime::block_on_inner")
+                        .arm(variant)
+                        .call("block_on"),
+                )?
+                .delegate("telekio::block_on", &["&self.blocking_pool"])?;
         }
         mount(
             source,
@@ -120,16 +78,12 @@ pub(super) fn patch_runtime(path: &Path) -> Result<(), Box<dyn Error>> {
 
 pub(super) fn patch_local_runtime(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        edit::delegate_call(
-            source,
-            edit::Scope::Method {
-                owner: "LocalRuntime",
-                name: "block_on_inner",
-            },
-            edit::Call::Method("block_on"),
-            "crate::runtime::runtime::telekio::block_on",
-            &["&self.blocking_pool"],
-        )?;
+        source
+            .select(item("LocalRuntime::block_on_inner").call("block_on"))?
+            .delegate(
+                "crate::runtime::runtime::telekio::block_on",
+                &["&self.blocking_pool"],
+            )?;
         mount(
             source,
             None,
@@ -141,57 +95,27 @@ pub(super) fn patch_local_runtime(path: &Path) -> Result<(), Box<dyn Error>> {
 
 pub(super) fn patch_blocking(path: &Path) -> Result<(), Box<dyn Error>> {
     patch(path, |source| {
-        edit::append_fields(
-            source,
-            "BlockingPool",
-            &[edit::Field {
-                visibility: None,
-                name: "telekio",
-                ty: "std::sync::OnceLock<::telekio_abi::Runtime>",
-            }],
-        )?;
-        edit::append_record_fields(
-            source,
-            edit::Scope::Method {
-                owner: "BlockingPool",
-                name: "new",
-            },
-            "BlockingPool",
-            &[edit::FieldInit {
-                name: "telekio",
-                value: "std::sync::OnceLock::new()",
-            }],
-        )?;
-        edit::rename_method(source, "BlockingPool", "shutdown", "shutdown_workers")?;
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Enum("Mandatory"),
-            "#[cfg_attr(not(tokio_unstable), expect(dead_code))]",
-        )?;
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Impl {
-                owner: "Spawner",
-                method: "spawn_blocking",
-            },
-            "#[expect(dead_code)]",
-        )?;
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Method {
-                owner: "SpawnerMetrics",
-                name: "queue_depth",
-            },
-            "#[expect(dead_code)]",
-        )?;
-        edit::add_attr(
-            source,
-            edit::AttrTarget::Impl {
-                owner: "Spawner",
-                method: "num_threads",
-            },
-            "#[expect(dead_code)]",
-        )?;
+        source
+            .select(item("BlockingPool"))?
+            .add_field("telekio: std::sync::OnceLock<::telekio_abi::Runtime>")?;
+        source
+            .select(item("BlockingPool::new").record("BlockingPool"))?
+            .add_field("telekio: std::sync::OnceLock::new()")?;
+        source
+            .select(item("BlockingPool::shutdown"))?
+            .rename("shutdown_workers")?;
+        source
+            .select(item("Mandatory"))?
+            .add_attribute("#[cfg_attr(not(tokio_unstable), expect(dead_code))]")?;
+        source
+            .select(root().implementation("Spawner").has(item("spawn_blocking")))?
+            .add_attribute("#[expect(dead_code)]")?;
+        source
+            .select(item("SpawnerMetrics::queue_depth"))?
+            .add_attribute("#[expect(dead_code)]")?;
+        source
+            .select(root().implementation("Spawner").has(item("num_threads")))?
+            .add_attribute("#[expect(dead_code)]")?;
         mount(source, None, "telekio", "guest/runtime/blocking/pool.rs")
     })?;
     patch(
@@ -201,15 +125,9 @@ pub(super) fn patch_blocking(path: &Path) -> Result<(), Box<dyn Error>> {
             .ok_or("blocking path has no runtime parent")?
             .join("handle.rs"),
         |source| {
-            edit::redirect_call(
-                source,
-                edit::Scope::Method {
-                    owner: "Handle",
-                    name: "spawn_blocking",
-                },
-                "spawn_blocking",
-                "spawn_host_blocking",
-            )
+            source
+                .select(item("Handle::spawn_blocking").call("spawn_blocking"))?
+                .redirect("spawn_host_blocking")
         },
     )
 }
@@ -225,45 +143,29 @@ pub(super) fn patch_context(path: &Path) -> Result<(), Box<dyn Error>> {
             .ok_or("context path has no runtime parent")?
             .join("handle.rs"),
         |source| {
-            edit::rename_method(source, "Handle", "runtime_flavor", "runtime_flavor_inner")?;
-            edit::set_method_visibility(source, "Handle", "runtime_flavor_inner", "pub(crate)")?;
-            edit::delegate_async_body(
-                source,
-                edit::Scope::Method {
-                    owner: "Handle",
-                    name: "dump",
-                },
-                "crate::runtime::dump::telekio::dump",
-                &["self"],
-            )?;
-            edit::redirect_call(
-                source,
-                edit::Scope::Method {
-                    owner: "Handle",
-                    name: "is_tracing",
-                },
-                "super::task::trace::Context::is_tracing",
-                "telekio::is_tracing",
-            )?;
-            edit::redirect_call(
-                source,
-                edit::Scope::MethodArgument {
-                    owner: "Handle",
-                    name: "block_on_inner",
-                    call: edit::Call::Function("context::enter_runtime"),
-                },
-                "block_on",
-                "block_on_host",
-            )?;
-            edit::redirect_call(
-                source,
-                edit::Scope::Method {
-                    owner: "Handle",
-                    name: "block_on_inner",
-                },
-                "context::enter_runtime",
-                "crate::runtime::context::telekio::block_on",
-            )?;
+            source
+                .select(item("Handle::runtime_flavor"))?
+                .rename("runtime_flavor_inner")?;
+            source
+                .select(item("Handle::runtime_flavor_inner"))?
+                .set_visibility("pub(crate)")?;
+            source
+                .select(item("Handle::dump"))?
+                .delegate("crate::runtime::dump::telekio::dump", &["self"])?;
+            source
+                .select(item("Handle::is_tracing").call("super::task::trace::Context::is_tracing"))?
+                .redirect("telekio::is_tracing")?;
+            source
+                .select(
+                    item("Handle::block_on_inner")
+                        .call("context::enter_runtime")
+                        .child(root().closure())
+                        .call("block_on"),
+                )?
+                .redirect("block_on_host")?;
+            source
+                .select(item("Handle::block_on_inner").call("context::enter_runtime"))?
+                .redirect("crate::runtime::context::telekio::block_on")?;
             mount(
                 source,
                 Some("pub(crate)"),
@@ -282,27 +184,26 @@ pub(super) fn patch_defer(generated: &Path) -> Result<(), Box<dyn Error>> {
             "telekio",
             "guest/runtime/context.rs",
         )?;
-        edit::delegate_closure(
-            source,
-            edit::Scope::Function("worker_index"),
-            edit::Call::Function("with_scheduler"),
-            0,
-            "telekio::worker_index",
-            &[],
-        )
+        source
+            .select(
+                item("worker_index")
+                    .call("with_scheduler")
+                    .child(root().closure()),
+            )?
+            .delegate("telekio::worker_index", &[])
     })?;
     patch_runtime_context(generated)?;
     patch(&generated.join("src/runtime/context.rs"), |source| {
-        edit::retarget_use(source, "exit_runtime", "runtime_mt::telekio::exit_runtime")
+        source
+            .select(root().import("exit_runtime"))?
+            .redirect("runtime_mt::telekio::exit_runtime")
     })?;
     patch(
         &generated.join("src/runtime/context/runtime_mt.rs"),
         |source| {
-            edit::add_attr(
-                source,
-                edit::AttrTarget::Function("exit_runtime"),
-                "#[expect(dead_code)]",
-            )?;
+            source
+                .select(item("exit_runtime"))?
+                .add_attribute("#[expect(dead_code)]")?;
             mount(
                 source,
                 Some("pub(crate)"),
@@ -312,24 +213,20 @@ pub(super) fn patch_defer(generated: &Path) -> Result<(), Box<dyn Error>> {
         },
     )?;
     patch(&generated.join("src/task/yield_now.rs"), |source| {
-        edit::redirect_call(
-            source,
-            edit::Scope::FunctionArgument {
-                name: "yield_now",
-                call: edit::Call::Function("poll_fn"),
-            },
-            "context::defer",
-            "crate::runtime::context::telekio::defer",
-        )?;
-        edit::remove_use(source, "context")
+        source
+            .select(
+                item("yield_now")
+                    .call("poll_fn")
+                    .child(root().closure())
+                    .call("context::defer"),
+            )?
+            .redirect("crate::runtime::context::telekio::defer")?;
+        source.select(root().import("context"))?.remove()
     })?;
     patch(&generated.join("src/task/coop/mod.rs"), |source| {
-        edit::redirect_call(
-            source,
-            edit::Scope::Function("register_waker"),
-            "context::defer",
-            "crate::runtime::context::telekio::defer",
-        )
+        source
+            .select(item("register_waker").call("context::defer"))?
+            .redirect("crate::runtime::context::telekio::defer")
     })
 }
 
@@ -350,78 +247,54 @@ fn patch_runtime_context(source: &Path) -> Result<(), Box<dyn Error>> {
             ),
             ("current_task_id", "try_with", "telekio::task_id", &[][..]),
         ] {
-            edit::delegate_closure(
-                contents,
-                edit::Scope::Function(function),
-                edit::Call::Method(call),
-                0,
-                helper,
-                context,
-            )?;
+            contents
+                .select(item(function).call(call).child(root().closure()))?
+                .delegate(helper, context)?;
         }
         Ok(())
     })?;
-    for (file, scopes, method, helper) in [
+    for (file, calls, helper) in [
         (
             "context.rs",
-            &[edit::Scope::Function("with_scheduler")][..],
-            "try_with",
+            vec![item("with_scheduler").call("try_with")],
             "runtime",
         ),
         (
             "context/runtime.rs",
-            &[
-                edit::Scope::Function("enter_runtime"),
-                edit::Scope::Method {
-                    owner: "EnterRuntimeGuard",
-                    name: "drop",
-                },
-            ][..],
-            "with",
+            vec![
+                item("enter_runtime").call("with"),
+                item("EnterRuntimeGuard::drop").call("with"),
+            ],
             "enter_runtime",
         ),
         (
             "context/runtime_mt.rs",
-            &[
-                edit::Scope::Function("current_enter_context"),
-                edit::Scope::Function("exit_runtime"),
-                edit::Scope::Method {
-                    owner: "Reset",
-                    name: "drop",
-                },
-            ][..],
-            "with",
+            vec![
+                item("current_enter_context").call("with"),
+                item("exit_runtime").body().child(root().call("with")),
+                item("Reset::drop").call("with"),
+            ],
             "runtime",
         ),
         (
             "context/blocking.rs",
-            &[
-                edit::Scope::Function("try_enter_blocking_region"),
-                edit::Scope::Function("disallow_block_in_place"),
-            ][..],
-            "try_with",
+            vec![
+                item("try_enter_blocking_region").call("try_with"),
+                item("disallow_block_in_place").call("try_with"),
+            ],
             "runtime",
         ),
         (
             "context/blocking.rs",
-            &[edit::Scope::Method {
-                owner: "DisallowBlockInPlaceGuard",
-                name: "drop",
-            }][..],
-            "with",
+            vec![item("DisallowBlockInPlaceGuard::drop").call("with")],
             "runtime",
         ),
     ] {
         patch(&source.join("src/runtime").join(file), |contents| {
-            for &scope in scopes {
-                edit::delegate_closure(
-                    contents,
-                    scope,
-                    edit::Call::Method(method),
-                    0,
-                    &format!("crate::runtime::context::telekio::{helper}"),
-                    &[],
-                )?;
+            for call in calls {
+                contents
+                    .select(call.child(root().closure()))?
+                    .delegate(&format!("crate::runtime::context::telekio::{helper}"), &[])?;
             }
             Ok(())
         })?;
