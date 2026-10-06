@@ -45,15 +45,8 @@ pub(super) fn uses_tokio(metadata: &serde_json::Value) -> bool {
         .into_iter()
         .flatten()
         .any(|package| {
-            (package["name"].as_str() == Some("tokio")
-                && (crates_io(package) || generated_patch(package)))
-                || package["dependencies"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|dependency| {
-                        dependency["name"].as_str() == Some("tokio") && crates_io(dependency)
-                    })
+            package["name"].as_str() == Some("tokio")
+                && (crates_io(package) || generated_patch(package))
         })
 }
 
@@ -125,7 +118,7 @@ fn package_role(package: &serde_json::Value) -> Role {
     if guest { Role::Guest } else { Role::Host }
 }
 
-pub(super) fn verify_patch(
+pub(super) fn prepare_graph(
     cargo: &OsStr,
     arguments: &[OsString],
     manifest: &Path,
@@ -161,6 +154,10 @@ pub(super) fn verify_patch(
             .ok_or("Telekio config has no parent")?
             .join("tokio/Cargo.toml"),
     )?;
+    let patch = fs::read_to_string(&expected)?.parse::<DocumentMut>()?;
+    let version = patch["package"]["version"]
+        .as_str()
+        .ok_or("generated Tokio patch has no version")?;
     for package in packages
         .iter()
         .filter(|package| package["name"].as_str() == Some("tokio"))
@@ -174,7 +171,23 @@ pub(super) fn verify_patch(
                 .is_some_and(|id| reachable.contains(&id))
             && (crates_io(package) || generated_patch(package))
         {
-            return Err("generated Tokio patch was not selected; run `telekio cargo update -p tokio`, or `cargo update -p tokio` after `telekio init`, then adjust incompatible Tokio version requirements".into());
+            let id = package["id"].as_str().ok_or("Tokio package has no ID")?;
+            let mut update = cargo::global_options(arguments)
+                .into_iter()
+                .map(OsStr::to_os_string)
+                .collect::<Vec<_>>();
+            update.extend([
+                OsString::from("update"),
+                OsString::from("--manifest-path"),
+                manifest.as_os_str().to_owned(),
+                OsString::from("--package"),
+                OsString::from(id),
+                OsString::from("--precise"),
+                OsString::from(version),
+            ]);
+            if !cargo::status(cargo, &update, Some(config))?.success() {
+                return Err("Cargo could not select the generated Tokio patch".into());
+            }
         }
     }
     Ok(())

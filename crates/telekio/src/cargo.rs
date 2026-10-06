@@ -253,7 +253,7 @@ fn metadata_options(arguments: &[OsString]) -> Vec<OsString> {
     options
 }
 
-fn global_options(arguments: &[OsString]) -> Vec<&OsStr> {
+pub(super) fn global_options(arguments: &[OsString]) -> Vec<&OsStr> {
     let mut options = Vec::new();
     let mut index = 0;
     while index < arguments.len() && arguments[index] != "--" {

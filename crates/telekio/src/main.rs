@@ -75,7 +75,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let info = project::info(&cargo, &interpreted, &manifest, &metadata)?;
     if let Some(role) = info.role() {
         let config = prepare_config(role, role == Role::Guest && info.workspace_mixed)?;
-        project::verify_patch(
+        project::prepare_graph(
             &cargo,
             &interpreted,
             &manifest,
@@ -132,7 +132,7 @@ fn run_groups(
             arguments.to_vec()
         };
         let config = prepare_config(role, true)?;
-        project::verify_patch(cargo, &arguments, manifest, &config, packages)?;
+        project::prepare_graph(cargo, &arguments, manifest, &config, packages)?;
         let status = cargo::status(cargo, &arguments, Some(&config))?;
         if !status.success() {
             if !cargo::has_option(&arguments, "--keep-going")
