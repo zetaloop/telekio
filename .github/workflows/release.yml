@@ -73,8 +73,7 @@ jobs:
       RUSTFLAGS: ${{ contains(matrix.target, '-windows-') && '-C target-feature=+crt-static' || '' }}
     steps:
       - uses: actions/checkout@v7
-      - name: Install Rust
-        run: rustup update --no-self-update stable
+      - uses: dtolnay/rust-toolchain@1.98.0
       - uses: mlugg/setup-zig@v2
         if: runner.os == 'Linux'
         with:

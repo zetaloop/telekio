@@ -28,10 +28,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install Rust
-        run: |
-          rustup update --no-self-update stable
-          rustup component add rustfmt clippy
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
       - name: Install actionlint
         run: |
           mkdir "$RUNNER_TEMP/actionlint"
@@ -77,10 +76,9 @@ jobs:
             library: libplugin.dylib
     steps:
       - uses: actions/checkout@v7
-      - name: Install Rust
-        run: |
-          rustup update --no-self-update stable
-          rustup component add clippy
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -136,10 +134,9 @@ jobs:
       RUSTFLAGS: --cfg tokio_unstable -Dwarnings
     steps:
       - uses: actions/checkout@v7
-      - name: Install Rust
-        run: |
-          rustup update --no-self-update stable
-          rustup target add ${{ matrix.target }}
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: cross-${{ matrix.target }}
